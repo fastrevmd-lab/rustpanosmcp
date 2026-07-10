@@ -1,0 +1,33 @@
+services:
+  rust-panosmcp:
+    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.1.0
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
+    volumes:
+      - ./runtime:/etc/rust-panosmcp:ro
+    ports:
+      - "30031:30031"
+    command:
+      - --device-mapping
+      - /etc/rust-panosmcp/devices.json
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30031"
+      - --tokens-file
+      - /etc/rust-panosmcp/tokens.json
+      - --tls-cert
+      - /etc/rust-panosmcp/server.crt
+      - --tls-key
+      - /etc/rust-panosmcp/server.key
+      - --allowed-host
+      - mcp.example.test:30031
+      - --allowed-origin
+      - https://client.example.test

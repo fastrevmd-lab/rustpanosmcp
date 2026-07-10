@@ -1,0 +1,63 @@
+[Unit]
+Description=Secure PAN-OS MCP server
+Documentation=https://github.com/fastrevmd-lab/rust-panosmcp/blob/main/docs/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rust-panosmcp
+Group=rust-panosmcp
+ExecStart=/usr/local/bin/rust-panosmcp \
+    --device-mapping /etc/rust-panosmcp/devices.json \
+    --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 30031 \
+    --tokens-file /var/lib/rust-panosmcp/tokens.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+Environment=RUST_LOG=info
+UMask=0077
+StateDirectory=rust-panosmcp
+StateDirectoryMode=0700
+RuntimeDirectory=rust-panosmcp
+RuntimeDirectoryMode=0700
+
+# Filesystem and privilege boundary.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/rust-panosmcp
+ReadWritePaths=/var/lib/rust-panosmcp
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Kernel, process, and syscall boundary.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=256
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 # rust-panosmcp project plan
 
-Status: Phase 1 implemented and accepted on mock HTTPS and an explicit lab firewall; Phases 2-4 planned, 2026-07-09
+Status: Phases 0-4 implemented; v0.1 release candidate, 2026-07-09
 
 ## 1. Outcome
 
@@ -35,11 +35,13 @@ Initial tools:
 2. `gather_device_facts`
 3. `execute_panos_op` — XML operational command, guarded by policy
 4. `get_panos_config` — running or candidate, optional XPath and output caps
-5. `get_panos_config_diff` — candidate versus running, with a bounded result
+5. `get_candidate_fingerprint`
 6. `stage_panos_config` — typed XML API action plus XPath and element
-7. `validate_panos_candidate`
-8. `commit_panos_candidate` — explicit second step, job polling, audit event
-9. `discard_panos_candidate`
+7. `diff_panos_candidate` — bounded running/candidate change summary
+8. `validate_panos_candidate`
+9. `commit_panos_candidate` — explicit second step, job polling, audit event
+10. `discard_panos_candidate`
+11. `get_panos_operation` — safe detached/indeterminate reconciliation state
 
 The configuration tools deliberately separate staging, validation, commit,
 and discard. A later convenience tool may compose those steps, but it must not
@@ -198,6 +200,13 @@ Provisional v0.1 acceptance targets:
 - no more than five API calls in flight per firewall, with four as the default;
 - bounded memory under maximum accepted input/output and malformed XML tests.
 
+Phase 4 measurement found 16.791 microseconds p95 for in-memory MCP read
+dispatch and 46.682 microseconds p95 for a warm pooled mock HTTPS read. On the
+PAN-OS 12.1.5 lab, device time dominated: Rust full MCP was 507.546 ms p95 and
+the Python direct tool was 520.634 ms p95 across 50 alternating calls. This
+demonstrates parity with lower Rust p95, not the provisional material
+same-device speedup; the result is retained rather than overstated.
+
 The five-call ceiling is conservative because Palo Alto Networks recommends a
 limit of five concurrent REST API calls to protect the shared management-plane
 web server. The XML path will be load-tested, but it should not default to a
@@ -255,6 +264,9 @@ Exit: successful and failed changes are deterministic, scoped, fully audited,
 and recoverable in a disposable lab.
 
 ### Phase 4 — packaging, hardening, and benchmarks
+
+Status: achieved 2026-07-09. Reproducible build, packaging, fuzz, compatibility,
+and benchmark evidence is in `docs/PHASE4_ACCEPTANCE.md`.
 
 - Distroless container and hardened systemd service.
 - Run as an unprivileged user with a read-only filesystem and narrowly writable

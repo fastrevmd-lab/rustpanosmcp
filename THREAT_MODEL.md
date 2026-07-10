@@ -1,6 +1,6 @@
 # Threat model
 
-Status: Phase 3 guarded candidate lifecycle baseline, 2026-07-09
+Status: v0.1 release-candidate baseline through Phase 4, 2026-07-09
 
 This document defines the security boundaries and invariants for
 `rust-panosmcp`. It constrains both remote reads and explicitly enabled
@@ -234,6 +234,45 @@ limiting is in-process; multi-replica deployments need a shared upstream
 limiter and operation coordinator. Audit output is structured, while durable
 retention and integrity remain the operator's logging responsibility.
 
+## Phase 4 controls implemented
+
+- The runtime container is the digest-pinned distroless `cc-debian12` non-root
+  image, runs as UID/GID 65532, has no shell/package manager, and is exercised
+  in CI with a read-only root, no capabilities, and no-new-privileges.
+- The systemd unit uses a dedicated static account, empty capability sets,
+  strict filesystem protection, one narrow writable state directory, private
+  temporary/device namespaces, kernel/process protections, syscall and address
+  family restrictions, and task/file-descriptor caps.
+- Release archives use the locked dependency graph, path remapping, fixed source
+  date, deterministic metadata/compression, checksums, and a two-build
+  byte-identity gate. Builder and runtime container indexes are pinned by
+  digest and tracked by Dependabot.
+- CI separately enforces Rust 1.88, warning-free build/test/docs, fuzz-target
+  compilation, RustSec advisories, license/bans/sources policy, packaging
+  invariants, container construction, and a non-root read-only smoke run.
+- Bounded libFuzzer runs cover bearer/digest parsing, token-store JSON, PAN-OS
+  response XML, candidate XML elements, and read/write XPath validation.
+- The operator runbook defines file ownership, TLS proxy/native TLS boundaries,
+  overlapping token rotation, PAN-OS key rotation, encrypted backup/restore,
+  mutation-aware upgrade/rollback, monitoring, and incident recovery.
+- Compatibility claims distinguish parser/mock CI from real-device evidence;
+  only PAN-OS 12.1.5 currently carries read and guarded-mutation lab evidence.
+
+## Residual Phase 4 risk
+
+Base-image digests freeze reviewed bytes but also freeze their vulnerabilities;
+operators must take tested digest updates promptly. A distroless image reduces
+runtime tooling, not kernel/container-runtime risk. The packaged systemd unit
+listens on plaintext loopback and therefore requires a same-host TLS proxy or a
+native-TLS override before remote exposure.
+
+Reproducibility proves that the same declared inputs create the same archive on
+the tested platform; it does not prove that the compiler, base image, registry,
+or CI runner is benign. Published image provenance/SBOM and independent
+verification remain required release practices. Real-device compatibility is
+maintenance-release-specific, and three selected release families still lack
+recorded lab runs.
+
 ## Verification obligations
 
 Each future security control needs at least one refusal-path test, not only a
@@ -248,5 +287,4 @@ happy-path test. Before a remote release, the suite must cover:
 - stage/validate/commit races and indeterminate job outcomes;
 - log capture proving bearer values and PAN-OS keys never appear.
 
-Security findings should be reported privately to the repository owner until
-a public security policy and coordinated disclosure address are established.
+Security findings must follow the private disclosure process in `SECURITY.md`.
