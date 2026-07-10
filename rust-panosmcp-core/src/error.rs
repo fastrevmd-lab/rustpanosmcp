@@ -1,4 +1,4 @@
-//! Stable error categories shared by future PAN-OS tools.
+//! Stable error categories shared by PAN-OS tools.
 
 use std::path::PathBuf;
 
@@ -100,8 +100,8 @@ pub enum PanosMcpError {
         /// Configured hard cap.
         limit: usize,
     },
-    /// Caller input violates the read-only command or XPath policy.
-    #[error("read-only policy rejected {field}: {reason}")]
+    /// Caller input violates a command, XPath, or lifecycle policy.
+    #[error("policy rejected {field}: {reason}")]
     Policy {
         /// Stable input field.
         field: &'static str,

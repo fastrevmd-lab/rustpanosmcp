@@ -1,8 +1,8 @@
 # rust-panosmcp
 
 Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository now contains the Phase 2 bearer-protected, read-only
-remote server.
+firewalls. The repository now contains the Phase 3 bearer-protected server with
+a guarded PAN-OS candidate configuration lifecycle.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -18,11 +18,16 @@ boundaries and release-blocking controls are tracked in
 Phase 1 implemented validated inventory and secret providers, strict HTTPS with
 system roots/custom CA/exact leaf pinning, pooled async PAN-OS XML API calls,
 typed errors, timeouts, cancellation, output caps, and a per-device semaphore.
-Phase 2 adds digest-only bearer tokens, exact device/tool scopes, atomic
+Phase 2 added digest-only bearer tokens, exact device/tool scopes, atomic
 inventory/token reload, TLS Streamable HTTP, Host/Origin validation, bounded
 request bodies, IP/token rate limits, and audit-safe request tracing. Both
 transports expose four read-only tools: `list_devices`,
 `gather_device_facts`, `execute_panos_op`, and `get_panos_config`.
+
+Phase 3 adds opt-in candidate fingerprints, narrow XPath policy, PAN-OS config
+locks, per-device serialization, stage/diff/full validation, admin-scoped
+partial commit/revert, job reconciliation, and structured mutation audit. Write
+tools require explicit token scopes; `*` remains read-only.
 
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
@@ -30,7 +35,8 @@ is recorded in [docs/PHASE1_ACCEPTANCE.md](docs/PHASE1_ACCEPTANCE.md).
 
 Phase 2 acceptance evidence is recorded in
 [docs/PHASE2_ACCEPTANCE.md](docs/PHASE2_ACCEPTANCE.md). Configuration mutation
-is intentionally absent until the guarded Phase 3 lifecycle is complete.
+acceptance is in [docs/PHASE3_ACCEPTANCE.md](docs/PHASE3_ACCEPTANCE.md), with
+operator requirements in [docs/PHASE3_OPERATIONS.md](docs/PHASE3_OPERATIONS.md).
 
 ## Workspace
 

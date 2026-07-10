@@ -14,8 +14,26 @@ pub use token::{TokenDigest, TokenError, TokenSecret};
 
 /// Exact Phase 2 tool registry used to validate token scopes.
 pub const KNOWN_TOOLS: &[&str] = &[
+    "commit_panos_candidate",
+    "diff_panos_candidate",
+    "discard_panos_candidate",
     "execute_panos_op",
     "gather_device_facts",
+    "get_candidate_fingerprint",
     "get_panos_config",
+    "get_panos_operation",
     "list_devices",
+    "stage_panos_config",
+    "validate_panos_candidate",
+];
+
+/// Tools that always require an explicit token allowlist entry.
+pub const MUTATION_TOOLS: &[&str] = &[
+    "commit_panos_candidate",
+    "diff_panos_candidate",
+    "discard_panos_candidate",
+    "get_candidate_fingerprint",
+    "get_panos_operation",
+    "stage_panos_config",
+    "validate_panos_candidate",
 ];

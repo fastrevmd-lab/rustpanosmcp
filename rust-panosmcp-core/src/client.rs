@@ -2,7 +2,7 @@
 
 use crate::{
     PanosMcpError, Result,
-    inventory::{DeviceConfig, LoadedTlsTrust},
+    inventory::{DeviceConfig, LoadedTlsTrust, MutationPolicy},
     xml::{
         JobStatus, PanosResponse, XmlLimits, parse_job_status, parse_panos_response,
         validate_read_only_op_command, validate_read_xpath,
@@ -64,6 +64,12 @@ impl PanosClient {
     #[must_use]
     pub fn device_name(&self) -> &str {
         &self.config.metadata.name
+    }
+
+    /// Explicit candidate-mutation policy, if the operator enabled writes.
+    #[must_use]
+    pub fn mutation_policy(&self) -> Option<&MutationPolicy> {
+        self.config.mutation.as_ref()
     }
 
     /// Execute a validated PAN-OS operational XML command.
@@ -138,6 +144,15 @@ impl PanosClient {
                 operation: "poll_job",
             }),
         }
+    }
+
+    /// Submit already-validated fields for guarded configuration lifecycle operations.
+    pub(crate) async fn post_fields(
+        &self,
+        fields: Vec<(&'static str, String)>,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        self.post(fields, cancellation).await
     }
 
     async fn post(
