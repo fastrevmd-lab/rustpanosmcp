@@ -13,23 +13,31 @@ name = "rust-panosmcp"
 path = "src/main.rs"
 
 [dependencies]
+arc-swap.workspace = true
+axum.workspace = true
+axum-server.workspace = true
 clap.workspace = true
-rmcp = { workspace = true, features = ["macros", "schemars", "server", "transport-io"] }
+http.workspace = true
+rmcp = { workspace = true, features = ["macros", "schemars", "server", "transport-io", "transport-streamable-http-server"] }
+rust-panosmcp-auth = { version = "0.1.0", path = "../rust-panosmcp-auth" }
 rust-panosmcp-core = { version = "0.1.0", path = "../rust-panosmcp-core" }
+rustix.workspace = true
+rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-axum = "0.8"
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rcgen = "0.14"
-rmcp = { workspace = true, features = ["client", "server", "transport-io"] }
-rustls.workspace = true
+reqwest.workspace = true
+rmcp = { workspace = true, features = ["client", "server", "transport-io", "transport-streamable-http-client-reqwest"] }
 tempfile = "3"
+tower.workspace = true
 
 [lints]
 workspace = true

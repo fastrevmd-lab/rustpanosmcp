@@ -229,6 +229,9 @@ explicitly configured `panosvm` lab firewall, including the full MCP path.
 
 ### Phase 2 — bearer-protected remote MCP
 
+Status: achieved 2026-07-09. Reproducible transport, refusal, scope, reload,
+TLS, and token-lookup evidence is in `docs/PHASE2_ACCEPTANCE.md`.
+
 - Port and generalize the proven token store, scope checks, CLI token commands,
   and atomic hot reload.
 - Add Streamable HTTP, TLS, refusal matrix, Host/Origin validation, body limits,

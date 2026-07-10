@@ -1,10 +1,10 @@
 # Threat model
 
-Status: Phase 1 read-only baseline, 2026-07-09
+Status: Phase 2 bearer-protected remote read-only baseline, 2026-07-09
 
 This document defines the security boundaries and invariants for
-`rust-panosmcp`. It is a design constraint, not a claim that Phase 1 is ready
-for remote MCP access or configuration changes.
+`rust-panosmcp`. It is a design constraint, not a claim that Phase 2 is ready
+for configuration changes.
 
 ## Scope
 
@@ -156,19 +156,51 @@ data safe.
   errors, oversized and slow responses, cancellation, concurrency, connection
   reuse, job polling, and full MCP tool calls.
 
-## Residual Phase 1 risk
+## Phase 2 controls implemented
 
-Phase 1 has no listening remote transport, MCP bearer verification, token
-scopes, IP/token rate limiting, Host/Origin policy, or persistent audit log.
-Those are Phase 2 controls. Run Phase 1 only as a local stdio child process; do
-not publish it through a generic HTTP or websocket bridge.
+- Tokens contain 256 random bits and are printed only by add/rotate. The store
+  persists a versioned SHA-256 digest, never plaintext, and token types redact
+  formatting and zeroize owned secrets.
+- Verification hashes the bounded candidate once, traverses every configured
+  digest with constant-time comparisons, and caps stores at 1,024 entries.
+- Every token has exact device and MCP-tool scopes. HTTP middleware returns
+  RFC 6750-style 401 errors for missing/malformed/invalid credentials and HTTP
+  403 before MCP dispatch for insufficient scope. Handlers repeat the check as
+  defense in depth.
+- Streamable HTTP defaults to loopback, requires bearer auth unless an explicit
+  loopback-only no-auth mode is selected, and refuses off-loopback plaintext
+  unless the operator acknowledges a trusted TLS proxy.
+- Native TLS requires a complete certificate/key pair. The private key must be
+  a regular non-symlink file owned by root or the service user with no
+  group/other access; temporary key bytes are zeroized.
+- The rmcp transport validates Host against a nonempty allowlist and Origin
+  against exact scheme/host/port entries. Non-loopback binds require explicit
+  Host and Origin policy.
+- Request bodies are read under a hard cap. Bounded per-IP and per-token fixed
+  windows return HTTP 429 with Retry-After before MCP work reaches a device.
+- Structured HTTP audit events record method, path, source IP, token audit
+  name, status, and duration; Authorization values, query strings, bodies,
+  PAN-OS keys, and configuration payloads are excluded.
+- SIGHUP builds inventory, clients, and tokens as one complete replacement and
+  atomically swaps it only after every component validates. A failed reload
+  retains the prior snapshot.
+- Token-store writes are same-directory atomic replacements with private mode,
+  file and directory synchronization, size/schema/reference validation, and
+  symlink refusal.
+
+## Residual Phase 2 risk
 
 All configuration-changing operations remain unimplemented. Candidate reads
-can expose sensitive firewall policy to a local MCP caller, so the PAN-OS key
-and local client must still follow least privilege. Exact leaf pins
+can expose sensitive firewall policy to an authorized remote MCP caller, so
+both bearer and PAN-OS credentials must follow least privilege. Exact leaf pins
 intentionally bind to a single certificate and require operator rotation before
-certificate renewal. The Phase 1 mock and explicit real-firewall acceptance
-gates have been exercised; remote transport risks remain deferred to Phase 2.
+certificate renewal. Rate limiting is in-process and fixed-window; multi-replica
+deployments require a shared upstream limiter. Audit output is structured but
+durable retention and integrity are the operator's logging responsibility.
+
+Phase 3 must establish candidate fingerprints, per-device mutation locks,
+configuration-lock behavior, destructive-operation policy, two-step commit,
+job reconciliation, and cancellation audit before write tools may be enabled.
 
 ## Verification obligations
 

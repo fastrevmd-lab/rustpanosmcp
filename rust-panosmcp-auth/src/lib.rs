@@ -1,11 +1,21 @@
-//! Authentication primitives shared by the MCP transports.
-//!
-//! Token persistence and authorization scopes arrive in Phase 2. Phase 0
-//! establishes the secret-redaction and bearer-header parsing invariants that
-//! those components will build upon.
+//! Authentication, digest-only token persistence, and authorization scopes.
 
-mod bearer;
-mod secret;
+pub mod bearer;
+pub mod file;
+pub mod secret;
+pub mod store;
+pub mod token;
 
 pub use bearer::{BearerHeaderError, parse_bearer_header};
+pub use file::{TokenStoreFile, TokenStoreFileError};
 pub use secret::SecretString;
+pub use store::{CallerContext, ScopeSet, TokenEntry, TokenStore};
+pub use token::{TokenDigest, TokenError, TokenSecret};
+
+/// Exact Phase 2 tool registry used to validate token scopes.
+pub const KNOWN_TOOLS: &[&str] = &[
+    "execute_panos_op",
+    "gather_device_facts",
+    "get_panos_config",
+    "list_devices",
+];
