@@ -1,4 +1,4 @@
-//! In-memory MCP client/server Phase 1 discovery test.
+//! In-memory MCP client/server tool-registry drift test.
 
 use rmcp::ServiceExt;
 use rust_panosmcp::PanosMcpServer;
@@ -29,7 +29,7 @@ fn handler(directory: &Path) -> PanosMcpServer {
 }
 
 #[tokio::test]
-async fn client_discovers_exactly_the_four_phase_one_tools() {
+async fn client_discovers_exactly_the_registered_tools() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server = handler(directory.path());
@@ -47,15 +47,6 @@ async fn client_discovers_exactly_the_four_phase_one_tools() {
 
     let tools = client.list_tools(None).await.expect("tool list");
     let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(
-        names,
-        [
-            "execute_panos_op",
-            "gather_device_facts",
-            "get_panos_config",
-            "list_devices"
-        ]
-    );
     assert_eq!(names, KNOWN_TOOLS, "token registry must track MCP tools");
 
     client.cancel().await.expect("client shutdown");

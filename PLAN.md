@@ -242,6 +242,9 @@ Exit: remote read-only deployment passes transport and auth integration tests.
 
 ### Phase 3 — guarded configuration lifecycle
 
+Status: achieved 2026-07-09. The deterministic mock workflow and reversible
+PAN-OS 12.1.5 lab round trip are recorded in `docs/PHASE3_ACCEPTANCE.md`.
+
 - Candidate fingerprinting and per-device mutation lock.
 - Stage, validate, diff, commit, discard, job polling, and cancellation audit.
 - Confirm exact PAN-OS configuration-lock and partial-commit behavior on the lab

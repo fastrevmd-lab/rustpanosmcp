@@ -19,6 +19,7 @@ use rust_panosmcp_auth::{CallerContext, TokenStore, TokenStoreFile};
 use rust_panosmcp_core::{
     Result as CoreResult,
     inventory::Inventory,
+    mutation::{CandidateFingerprintInput, OperationInput, OperationStatusInput, StageConfigInput},
     tools::{ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, PanosService},
 };
 use schemars::JsonSchema;
@@ -54,7 +55,7 @@ impl RuntimeState {
     ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
         let token_path = token_path.map(Path::to_path_buf);
-        let snapshot = load_snapshot(&inventory_path, token_path.as_deref())?;
+        let snapshot = load_snapshot(&inventory_path, token_path.as_deref(), None)?;
         Ok(Self {
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
             inventory_path: Arc::new(inventory_path),
@@ -88,9 +89,11 @@ impl RuntimeState {
                 "embedded runtime has no reload source".to_owned(),
             ));
         }
+        let current = self.snapshot();
         let replacement = load_snapshot(
             &self.inventory_path,
             self.token_path.as_ref().map(|path| path.as_path()),
+            Some(&current.service),
         )?;
         self.current.store(Arc::new(replacement));
         Ok(())
@@ -112,6 +115,7 @@ impl RuntimeState {
 fn load_snapshot(
     inventory_path: &Path,
     token_path: Option<&Path>,
+    previous_service: Option<&PanosService>,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
     let inventory = Inventory::load(inventory_path)?;
     let names: Vec<String> = inventory
@@ -119,7 +123,10 @@ fn load_snapshot(
         .into_iter()
         .map(|device| device.name)
         .collect();
-    let service = Arc::new(PanosService::new(inventory)?);
+    let service = Arc::new(match previous_service {
+        Some(previous) => PanosService::reload(inventory, previous)?,
+        None => PanosService::new(inventory)?,
+    });
     let tokens = token_path
         .map(|path| TokenStoreFile::load(path, &names).map(Arc::new))
         .transpose()?;
@@ -189,7 +196,7 @@ impl PanosMcpServer {
         device: Option<&str>,
     ) -> Option<CallToolResult> {
         let caller = caller?;
-        if !caller.tools.allows(tool) {
+        if !caller.tools.allows_tool(tool) {
             return Some(CallToolResult::error(vec![ContentBlock::text(format!(
                 "token '{}' is not authorized for tool '{tool}'",
                 caller.token_name
@@ -205,6 +212,18 @@ impl PanosMcpServer {
         }
         None
     }
+
+    fn mutation_principal(extensions: &Extensions) -> Result<&str, CallToolResult> {
+        if let Some(caller) = Self::caller(extensions) {
+            return Ok(&caller.token_name);
+        }
+        if extensions.get::<http::request::Parts>().is_some() {
+            return Err(CallToolResult::error(vec![ContentBlock::text(
+                "candidate mutation requires authenticated HTTP or local stdio",
+            )]));
+        }
+        Ok("local-stdio")
+    }
 }
 
 /// Empty input object for `list_devices`.
@@ -214,6 +233,195 @@ pub struct EmptyInput {}
 
 #[tool_router]
 impl PanosMcpServer {
+    /// Fingerprint all operator-authorized candidate subtrees before mutation.
+    #[tool(
+        name = "get_candidate_fingerprint",
+        description = "Return a SHA-256 fingerprint over all operator-authorized candidate subtrees"
+    )]
+    async fn get_candidate_fingerprint(
+        &self,
+        Parameters(input): Parameters<CandidateFingerprintInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "get_candidate_fingerprint",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.candidate_fingerprint(input, cancellation).await)
+    }
+
+    /// Stage one guarded set/delete candidate action.
+    #[tool(
+        name = "stage_panos_config",
+        description = "Stage one policy-bounded PAN-OS candidate set/delete using an expected fingerprint"
+    )]
+    async fn stage_panos_config(
+        &self,
+        Parameters(input): Parameters<StageConfigInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "stage_panos_config",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.stage_config(input, principal, cancellation).await)
+    }
+
+    /// Read a bounded PAN-OS running/candidate change summary.
+    #[tool(
+        name = "diff_panos_candidate",
+        description = "Return a bounded PAN-OS change summary for the exact staged candidate fingerprint"
+    )]
+    async fn diff_panos_candidate(
+        &self,
+        Parameters(input): Parameters<OperationInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "diff_panos_candidate",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.diff_candidate(input, principal, cancellation).await)
+    }
+
+    /// Run full PAN-OS validation for the staged fingerprint.
+    #[tool(
+        name = "validate_panos_candidate",
+        description = "Validate a staged candidate and make only the same fingerprint eligible for commit"
+    )]
+    async fn validate_panos_candidate(
+        &self,
+        Parameters(input): Parameters<OperationInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "validate_panos_candidate",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(
+            service
+                .validate_candidate(input, principal, cancellation)
+                .await,
+        )
+    }
+
+    /// Start the second, admin-scoped commit step and reconcile its job.
+    #[tool(
+        name = "commit_panos_candidate",
+        description = "Commit only a successfully validated operation using an exact candidate fingerprint"
+    )]
+    async fn commit_panos_candidate(
+        &self,
+        Parameters(input): Parameters<OperationInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "commit_panos_candidate",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(
+            service
+                .commit_candidate(input, principal, cancellation)
+                .await,
+        )
+    }
+
+    /// Revert candidate changes belonging to the configured dedicated PAN-OS admin.
+    #[tool(
+        name = "discard_panos_candidate",
+        description = "Discard a staged operation through an admin-scoped partial candidate revert"
+    )]
+    async fn discard_panos_candidate(
+        &self,
+        Parameters(input): Parameters<OperationInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "discard_panos_candidate",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(
+            service
+                .discard_candidate(input, principal, cancellation)
+                .await,
+        )
+    }
+
+    /// Poll detached or completed lifecycle state.
+    #[tool(
+        name = "get_panos_operation",
+        description = "Return safe status for an owned PAN-OS candidate lifecycle operation"
+    )]
+    async fn get_panos_operation(
+        &self,
+        Parameters(input): Parameters<OperationStatusInput>,
+        extensions: Extensions,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "get_panos_operation",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.operation_status(input, principal).await)
+    }
+
     /// List devices visible to the authenticated caller.
     #[tool(
         name = "list_devices",
@@ -315,5 +523,24 @@ impl ServerHandler for PanosMcpServer {
             .with_instructions(
                 "PAN-OS MCP server. Remote callers are restricted by exact bearer-token tool and device scopes.",
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutation_principal_refuses_unauthenticated_http_but_allows_stdio() {
+        let local = Extensions::default();
+        assert_eq!(
+            PanosMcpServer::mutation_principal(&local).expect("local stdio"),
+            "local-stdio"
+        );
+
+        let (parts, _) = http::Request::new(()).into_parts();
+        let mut remote = Extensions::default();
+        remote.insert(parts);
+        assert!(PanosMcpServer::mutation_principal(&remote).is_err());
     }
 }

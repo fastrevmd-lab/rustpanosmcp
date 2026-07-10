@@ -805,6 +805,7 @@ version = "0.1.0"
 dependencies = [
  "fastrand",
  "futures-util",
+ "getrandom 0.4.3",
  "quick-xml",
  "reqwest",
  "rust-panosmcp-auth",

@@ -1,10 +1,10 @@
 # Threat model
 
-Status: Phase 2 bearer-protected remote read-only baseline, 2026-07-09
+Status: Phase 3 guarded candidate lifecycle baseline, 2026-07-09
 
 This document defines the security boundaries and invariants for
-`rust-panosmcp`. It is a design constraint, not a claim that Phase 2 is ready
-for configuration changes.
+`rust-panosmcp`. It constrains both remote reads and explicitly enabled
+candidate configuration changes.
 
 ## Scope
 
@@ -188,19 +188,51 @@ data safe.
   file and directory synchronization, size/schema/reference validation, and
   symlink refusal.
 
-## Residual Phase 2 risk
+## Phase 3 controls implemented
 
-All configuration-changing operations remain unimplemented. Candidate reads
-can expose sensitive firewall policy to an authorized remote MCP caller, so
-both bearer and PAN-OS credentials must follow least privilege. Exact leaf pins
-intentionally bind to a single certificate and require operator rotation before
-certificate renewal. Rate limiting is in-process and fixed-window; multi-replica
-deployments require a shared upstream limiter. Audit output is structured but
-durable retention and integrity are the operator's logging responsibility.
+- Mutation is absent by default and enabled only by an inventory policy naming
+  a dedicated PAN-OS admin and one or more narrow XPath roots. `/config` is
+  never accepted as a write root.
+- Every Phase 3 tool requires an explicit token allowlist entry. Tool wildcard
+  remains read-only, preventing a Phase 2 token from gaining writes after an
+  upgrade.
+- Candidate fingerprints cover all authorized write subtrees. Stage and every
+  later transition compare the caller's fingerprint with current PAN-OS state
+  and the operation record before network mutation.
+- Per-device mutexes serialize server-side lifecycle calls. PAN-OS
+  configuration lock acquisition is mandatory by default and stays held until
+  commit or discard.
+- Set accepts one bounded, structurally valid, DTD-free XML element. Delete is
+  disabled by default and requires both inventory enablement and an exact
+  `DELETE <xpath>` confirmation.
+- Only the token principal that staged an operation can diff, validate,
+  commit, discard, or poll it. One principal can have only one active
+  operation per device.
+- PAN-OS full validation must succeed before the separate commit call. Commit
+  and discard use admin-scoped partial operations tied to the dedicated API
+  identity.
+- Commit continues in a detached worker after caller cancellation, polls the
+  job to terminal state, and records outcome without turning a disconnect into
+  false success or failure.
+- Audit records include token principal, device, random operation ID, action,
+  XPath fingerprint, job ID, result, and duration without XML, XPath text,
+  keys, or bearer values.
+- A reversible PAN-OS 12.1.5 lab run confirmed lock acquisition, validation,
+  partial commit, and clean add/delete round trip.
 
-Phase 3 must establish candidate fingerprints, per-device mutation locks,
-configuration-lock behavior, destructive-operation policy, two-step commit,
-job reconciliation, and cancellation audit before write tools may be enabled.
+## Residual Phase 3 risk
+
+PAN-OS admin-scoped partial commit/revert cannot distinguish this server from
+another client sharing the same admin. The admin identity must be dedicated
+and unshared. Privileged administrators can remove locks or commit other
+admins' changes and remain outside the isolation boundary. Operation records
+survive SIGHUP but not process restart; restart recovery requires explicit job,
+candidate, and lock reconciliation.
+
+Exact leaf pins require operator rotation before certificate renewal. Rate
+limiting is in-process; multi-replica deployments need a shared upstream
+limiter and operation coordinator. Audit output is structured, while durable
+retention and integrity remain the operator's logging responsibility.
 
 ## Verification obligations
 

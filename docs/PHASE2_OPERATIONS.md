@@ -26,8 +26,9 @@ rust-panosmcp \
 
 The plaintext secret is written once to stdout. Capture it directly into a
 secret manager; it cannot be recovered from the store. Wildcard `*` is
-supported for either scope but cannot be mixed with exact names. Exact scopes
-are preferred.
+supported for either scope but cannot be mixed with exact names. Starting in
+Phase 3, a wildcard tool scope grants only read tools; every candidate-
+lifecycle tool requires an explicit name. Exact scopes are preferred.
 
 List non-secret metadata, rotate, or revoke:
 

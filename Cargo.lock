@@ -1463,6 +1463,7 @@ dependencies = [
  "axum-server",
  "fastrand",
  "futures-util",
+ "getrandom 0.4.3",
  "quick-xml",
  "rcgen",
  "reqwest",
