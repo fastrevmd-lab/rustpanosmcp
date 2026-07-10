@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response status="success" code="19">
+  <result>
+    <system>
+      <hostname>lab-fw-01</hostname>
+      <model>PA-VM</model>
+      <sw-version>12.1.0</sw-version>
+      <serial>000000000001</serial>
+    </system>
+  </result>
+</response>
