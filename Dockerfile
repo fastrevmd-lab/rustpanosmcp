@@ -2,7 +2,7 @@
 
 # Both image indexes are pinned. Dependabot is configured to propose digest
 # refreshes; the explicit Debian generation prevents an unplanned ABI jump.
-FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS builder
+FROM rust:1.97.0-slim-bookworm@sha256:cfbb0e0ef7a73e736386bfa346f1cb0503c6d162969dc9426fb37834f3f64c25 AS builder
 
 WORKDIR /src
 ENV CARGO_INCREMENTAL=0
