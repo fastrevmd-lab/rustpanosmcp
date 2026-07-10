@@ -66,6 +66,11 @@ PANOS_LAB_INVENTORY=/etc/rust-panosmcp/devices.json \
 PANOS_LAB_DEVICE=lab-fw-01 \
 cargo test --locked -p rust-panosmcp-core --test lab_firewall \
   -- --ignored --nocapture
+
+PANOS_LAB_INVENTORY=/etc/rust-panosmcp/devices.json \
+PANOS_LAB_DEVICE=lab-fw-01 \
+cargo test --locked -p rust-panosmcp --test lab_mcp_firewall \
+  -- --ignored --nocapture
 ```
 
 The inventory referenced by `PANOS_LAB_INVENTORY` controls the API-key secret
