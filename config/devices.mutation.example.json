@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "name": "lab-fw-01",
+      "endpoint": "https://panos-lab.example.net",
+      "api_key": {
+        "type": "env",
+        "name": "PANOS_DEDICATED_MCP_API_KEY"
+      },
+      "tls": {
+        "type": "custom_ca",
+        "path": "/etc/rust-panosmcp/panos-lab-ca.pem"
+      },
+      "mutation": {
+        "admin": "rust-panosmcp-api",
+        "allowed_xpath_roots": [
+          "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address"
+        ],
+        "allow_delete": false,
+        "require_config_lock": true
+      }
+    }
+  ]
+}

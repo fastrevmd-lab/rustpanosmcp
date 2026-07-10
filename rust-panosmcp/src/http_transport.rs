@@ -314,7 +314,7 @@ fn tool_call_exceeds_scope(value: &Value, caller: &CallerContext) -> bool {
     let Some(tool) = params.get("name").and_then(Value::as_str) else {
         return false;
     };
-    if !caller.tools.allows(tool) {
+    if !caller.tools.allows_tool(tool) {
         return true;
     }
     params
@@ -400,21 +400,26 @@ mod tests {
 
     #[test]
     fn scope_preflight_checks_exact_tool_and_device() {
-        let caller = caller(
+        let limited = caller(
             ScopeSet::Allowlist(vec!["get_panos_config".to_owned()]),
             ScopeSet::Allowlist(vec!["fw-a".to_owned()]),
         );
         assert!(!request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-a"}}}"#,
-            &caller,
+            &limited,
         ));
         assert!(request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute_panos_op","arguments":{"device":"fw-a"}}}"#,
-            &caller,
+            &limited,
+        ));
+        let wildcard = caller(ScopeSet::Wildcard, ScopeSet::Wildcard);
+        assert!(request_exceeds_scope(
+            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"stage_panos_config","arguments":{"device":"fw-a"}}}"#,
+            &wildcard,
         ));
         assert!(request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-b"}}}"#,
-            &caller,
+            &limited,
         ));
     }
 

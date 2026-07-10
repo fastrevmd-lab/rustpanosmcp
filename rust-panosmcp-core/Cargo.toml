@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 fastrand.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 rust-panosmcp-auth = { version = "0.1.0", path = "../rust-panosmcp-auth" }

@@ -9,6 +9,8 @@ use serde::Serialize;
 pub const MAX_OP_COMMAND_BYTES: usize = 64 * 1024;
 /// Maximum accepted configuration XPath.
 pub const MAX_XPATH_BYTES: usize = 4096;
+/// Maximum accepted XML element for one candidate mutation.
+pub const MAX_CONFIG_ELEMENT_BYTES: usize = 256 * 1024;
 const MAX_EXTRACTED_TEXT_BYTES: usize = 4096;
 const MAX_ENVELOPE_ATTRIBUTE_BYTES: usize = 64;
 
@@ -278,6 +280,81 @@ pub fn validate_read_xpath(xpath: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Validate one bounded XML element supplied to a candidate set action.
+pub fn validate_config_element(element: &str) -> Result<()> {
+    if element.is_empty() {
+        return Err(PanosMcpError::Policy {
+            field: "element",
+            reason: "value is empty".to_owned(),
+        });
+    }
+    if element.len() > MAX_CONFIG_ELEMENT_BYTES {
+        return Err(PanosMcpError::InputTooLarge {
+            field: "element",
+            limit: MAX_CONFIG_ELEMENT_BYTES,
+        });
+    }
+    let mut reader = Reader::from_reader(element.as_bytes());
+    let root = loop {
+        match reader.read_event() {
+            Ok(Event::Start(node) | Event::Empty(node)) => {
+                break node.name().as_ref().to_vec();
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Ok(Event::Eof) => {
+                return Err(PanosMcpError::Xml(
+                    "element contains no root node".to_owned(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
+        }
+    };
+    validate_xml_root(
+        element.as_bytes(),
+        XmlLimits {
+            max_bytes: MAX_CONFIG_ELEMENT_BYTES,
+            max_depth: 32,
+        },
+        &root,
+        "element",
+    )?;
+    Ok(())
+}
+
+/// Enforce that a mutation XPath is inside one explicit operator-controlled root.
+pub fn validate_write_xpath(xpath: &str, allowed_roots: &[String]) -> Result<()> {
+    validate_read_xpath(xpath)?;
+    if allowed_roots.iter().any(|root| {
+        xpath == root
+            || xpath
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }) {
+        return Ok(());
+    }
+    Err(PanosMcpError::Policy {
+        field: "xpath",
+        reason: "path is outside every operator-configured mutation root".to_owned(),
+    })
+}
+
+/// Extract and validate the numeric job identifier returned by an async request.
+pub fn parse_job_id(response: &PanosResponse) -> Result<String> {
+    let value = first_element_text(response.xml.as_bytes(), b"job")?
+        .ok_or_else(|| PanosMcpError::Xml("response contains no job identifier".to_owned()))?;
+    if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PanosMcpError::Xml(
+            "response job identifier is not 1-32 ASCII digits".to_owned(),
+        ));
+    }
+    Ok(value)
 }
 
 /// Extract common facts from a successful `show system info` response.

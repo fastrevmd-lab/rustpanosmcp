@@ -3,6 +3,7 @@
 pub mod client;
 pub mod error;
 pub mod inventory;
+pub mod mutation;
 pub mod observability;
 pub mod tools;
 pub mod xml;
