@@ -16,9 +16,15 @@ repository = "https://github.com/fastrevmd-lab/rust-panosmcp"
 authors = ["fastrevmd-lab"]
 
 [workspace.dependencies]
+arc-swap = "1"
+axum = "0.8"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
 futures-util = "0.3"
+getrandom = "0.4"
+http = "1"
 quick-xml = "0.41"
 reqwest = { version = "0.13", default-features = false, features = ["form", "rustls-no-provider", "stream"] }
 rmcp = { version = "2", default-features = false }
@@ -28,9 +34,11 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"

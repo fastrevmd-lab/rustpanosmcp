@@ -2,6 +2,7 @@
 
 use rmcp::ServiceExt;
 use rust_panosmcp::PanosMcpServer;
+use rust_panosmcp_auth::KNOWN_TOOLS;
 use rust_panosmcp_core::{
     inventory::{Environment, Inventory},
     tools::PanosService,
@@ -55,6 +56,7 @@ async fn client_discovers_exactly_the_four_phase_one_tools() {
             "list_devices"
         ]
     );
+    assert_eq!(names, KNOWN_TOOLS, "token registry must track MCP tools");
 
     client.cancel().await.expect("client shutdown");
     server_task.abort();
