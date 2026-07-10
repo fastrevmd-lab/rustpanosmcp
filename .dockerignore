@@ -1,0 +1,16 @@
+.git
+.github
+target
+fuzz
+dist
+docs
+packaging
+scripts
+*.md
+*.pem
+*.p12
+*.key
+.env
+.env.*
+devices.json
+tokens.json

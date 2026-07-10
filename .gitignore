@@ -1,8 +1,11 @@
 /target/
+/dist/
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/corpus/
 *.profraw
+__pycache__/
+*.pyc
 *.pem
 *.p12
 *.key
