@@ -1,0 +1,25 @@
+[package]
+name = "rust-panosmcp"
+description = "Secure, async MCP server for PAN-OS firewalls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rust-panosmcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+rust-panosmcp-auth = { version = "0.1.0", path = "../rust-panosmcp-auth" }
+rust-panosmcp-core = { version = "0.1.0", path = "../rust-panosmcp-core" }
+tokio.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client", "server", "transport-io"] }
+
+[lints]
+workspace = true
