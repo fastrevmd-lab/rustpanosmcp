@@ -28,5 +28,26 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "config_element"
+path = "fuzz_targets/config_element.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "token_store"
+path = "fuzz_targets/token_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xpath"
+path = "fuzz_targets/xpath.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

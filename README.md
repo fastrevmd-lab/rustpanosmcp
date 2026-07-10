@@ -1,8 +1,9 @@
 # rust-panosmcp
 
 Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository now contains the Phase 3 bearer-protected server with
-a guarded PAN-OS candidate configuration lifecycle.
+firewalls. The repository contains the v0.1 release candidate: a
+bearer-protected server with a guarded PAN-OS candidate configuration
+lifecycle and hardened release packaging.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -29,6 +30,11 @@ locks, per-device serialization, stage/diff/full validation, admin-scoped
 partial commit/revert, job reconciliation, and structured mutation audit. Write
 tools require explicit token scopes; `*` remains read-only.
 
+Phase 4 adds a digest-pinned non-root distroless image, hardened systemd unit,
+read-only deployment guidance, PAN-OS release-family matrix, five parser fuzz
+targets, byte-reproducible archives, security/runbook documentation, and
+published Rust/Python measurements.
+
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
 is recorded in [docs/PHASE1_ACCEPTANCE.md](docs/PHASE1_ACCEPTANCE.md).
@@ -37,6 +43,12 @@ Phase 2 acceptance evidence is recorded in
 [docs/PHASE2_ACCEPTANCE.md](docs/PHASE2_ACCEPTANCE.md). Configuration mutation
 acceptance is in [docs/PHASE3_ACCEPTANCE.md](docs/PHASE3_ACCEPTANCE.md), with
 operator requirements in [docs/PHASE3_OPERATIONS.md](docs/PHASE3_OPERATIONS.md).
+Phase 4 release evidence is in
+[docs/PHASE4_ACCEPTANCE.md](docs/PHASE4_ACCEPTANCE.md). Production deployment,
+rotation, backup/recovery, and upgrades are covered by
+[docs/OPERATIONS.md](docs/OPERATIONS.md); see also
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md),
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and [SECURITY.md](SECURITY.md).
 
 ## Workspace
 
@@ -47,6 +59,8 @@ rust-panosmcp-core/     # inventory, PAN-OS client, validation, tool logic
 config/                 # secret-free inventory examples
 docs/                   # operator guidance and phase notes
 fuzz/                   # isolated cargo-fuzz workspace
+packaging/              # distroless/container and systemd assets
+scripts/                # release, matrix, fuzz, and benchmark gates
 ```
 
 ## Run
@@ -94,7 +108,14 @@ security defaults. Phase 1 inventory and firewall TLS details remain in
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --locked
+cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+scripts/verify-packaging.sh
 ```
+
+Create a deterministic release archive with `scripts/build-release.sh`, or
+compile it twice and require byte identity with
+`scripts/verify-reproducible-build.sh`. Container/systemd installation is
+documented in the operator runbook.
 
 ## Project stance
 
