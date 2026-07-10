@@ -1,6 +1,6 @@
 # rust-panosmcp project plan
 
-Status: Phase 0 implemented; Phases 1-4 planned, 2026-07-09
+Status: Phase 1 implemented and accepted on mock HTTPS and an explicit lab firewall; Phases 2-4 planned, 2026-07-09
 
 ## 1. Outcome
 
@@ -216,7 +216,7 @@ more aggressive posture without device evidence.
 
 Exit: clean CI with a no-op MCP server and mock client test.
 
-### Phase 1 — secure PAN-OS read client
+### Phase 1 — secure PAN-OS read client (implemented)
 
 - Inventory/schema validation and secret providers.
 - Strict TLS, custom CA/pin support, `X-PAN-KEY`, POST-only request builder.
@@ -224,8 +224,8 @@ Exit: clean CI with a no-op MCP server and mock client test.
 - Connection reuse, timeouts, per-device semaphore, cancellation.
 - Implement `list_devices`, facts, op, and config read tools.
 
-Exit: read-only end-to-end tests against a mock server and one explicitly
-configured lab firewall.
+Exit achieved: read-only end-to-end tests pass against mock HTTPS and the
+explicitly configured `panosvm` lab firewall, including the full MCP path.
 
 ### Phase 2 — bearer-protected remote MCP
 
