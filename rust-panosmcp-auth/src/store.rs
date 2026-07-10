@@ -8,6 +8,83 @@ use std::collections::BTreeSet;
 pub const MAX_TOKENS: usize = 1024;
 /// Maximum names in one explicit scope.
 pub const MAX_SCOPE_NAMES: usize = 256;
+/// Maximum token-specific XPath roots.
+pub const MAX_MUTATION_ROOTS: usize = 64;
+
+/// Token-specific write authority, intersected with the inventory policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutationGrant {
+    /// Exact XPath subtrees this token may modify.
+    pub allowed_xpath_roots: Vec<String>,
+    /// Candidate actions this token may plan and apply.
+    pub actions: Vec<MutationAction>,
+}
+
+impl MutationGrant {
+    /// Whether this grant permits an action.
+    #[must_use]
+    pub fn allows_action(&self, action: MutationAction) -> bool {
+        self.actions.contains(&action)
+    }
+
+    /// Whether the XPath is equal to or below a granted root.
+    #[must_use]
+    pub fn allows_xpath(&self, xpath: &str) -> bool {
+        self.allowed_xpath_roots.iter().any(|root| {
+            xpath == root
+                || xpath
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with('['))
+        })
+    }
+
+    fn validate(&self) -> Result<(), StoreError> {
+        if self.allowed_xpath_roots.is_empty()
+            || self.allowed_xpath_roots.len() > MAX_MUTATION_ROOTS
+        {
+            return Err(StoreError::Invalid(format!(
+                "mutation grant must contain 1-{MAX_MUTATION_ROOTS} XPath roots"
+            )));
+        }
+        if self.actions.is_empty() {
+            return Err(StoreError::Invalid(
+                "mutation grant must permit at least one action".to_owned(),
+            ));
+        }
+        let mut roots = BTreeSet::new();
+        for root in &self.allowed_xpath_roots {
+            if root.len() > 4096 || !root.starts_with("/config/") || root.contains('\0') {
+                return Err(StoreError::Invalid(
+                    "mutation grant XPath roots must be bounded absolute /config subtrees"
+                        .to_owned(),
+                ));
+            }
+            if !roots.insert(root) {
+                return Err(StoreError::Invalid(format!(
+                    "duplicate mutation XPath root '{root}'"
+                )));
+            }
+        }
+        let actions: BTreeSet<_> = self.actions.iter().copied().collect();
+        if actions.len() != self.actions.len() {
+            return Err(StoreError::Invalid(
+                "mutation grant contains duplicate actions".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Candidate actions that can be delegated to a bearer token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationAction {
+    /// Merge an XML element.
+    Set,
+    /// Delete an exact XPath.
+    Delete,
+}
 
 /// Wildcard or literal allowlist for device/tool names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +198,12 @@ pub struct TokenEntry {
     pub tools: ScopeSet,
     /// Creation or last-rotation Unix timestamp.
     pub created_at_unix: u64,
+    /// Optional absolute expiry; expired secrets never authenticate.
+    #[serde(default)]
+    pub expires_at_unix: Option<u64>,
+    /// Optional token-specific write authority for v0.2 change sets.
+    #[serde(default)]
+    pub mutation: Option<MutationGrant>,
 }
 
 /// Authenticated request identity copied into HTTP request extensions.
@@ -132,6 +215,8 @@ pub struct CallerContext {
     pub devices: ScopeSet,
     /// Exact tool authorization.
     pub tools: ScopeSet,
+    /// Token-specific write authority.
+    pub mutation: Option<MutationGrant>,
 }
 
 impl From<&TokenEntry> for CallerContext {
@@ -140,6 +225,7 @@ impl From<&TokenEntry> for CallerContext {
             token_name: entry.name.clone(),
             devices: entry.devices.clone(),
             tools: entry.tools.clone(),
+            mutation: entry.mutation.clone(),
         }
     }
 }
@@ -163,6 +249,17 @@ impl TokenStore {
             validate_name("token", &entry.name)?;
             entry.devices.validate("devices")?;
             entry.tools.validate("tools")?;
+            if entry
+                .expires_at_unix
+                .is_some_and(|expiry| expiry <= entry.created_at_unix)
+            {
+                return Err(StoreError::Invalid(
+                    "token expiry must be later than its creation time".to_owned(),
+                ));
+            }
+            if let Some(grant) = &entry.mutation {
+                grant.validate()?;
+            }
             if !names.insert(entry.name.as_str()) {
                 return Err(StoreError::Invalid(format!(
                     "duplicate token name '{}'",
@@ -176,12 +273,22 @@ impl TokenStore {
     /// Verify a candidate against every digest before returning a match.
     #[must_use]
     pub fn authenticate(&self, candidate: &str) -> Option<&TokenEntry> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(u64::MAX, |duration| duration.as_secs());
+        self.authenticate_at(candidate, now)
+    }
+
+    /// Verify a candidate at a supplied time, allowing deterministic expiry tests.
+    #[must_use]
+    pub fn authenticate_at(&self, candidate: &str, now_unix: u64) -> Option<&TokenEntry> {
         // Hash once so the bounded full traversal performs only cheap
         // constant-time digest comparisons, even at MAX_TOKENS.
         let candidate = TokenDigest::from_secret(candidate);
         let mut matched = None;
         for entry in &self.entries {
-            if entry.digest.constant_time_eq(&candidate) && matched.is_none() {
+            let current = entry.expires_at_unix.is_none_or(|expiry| now_unix < expiry);
+            if entry.digest.constant_time_eq(&candidate) && current && matched.is_none() {
                 matched = Some(entry);
             }
         }
@@ -244,6 +351,8 @@ mod tests {
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
             created_at_unix: 1,
+            expires_at_unix: None,
+            mutation: None,
         }
     }
 
@@ -283,5 +392,23 @@ mod tests {
     fn store_refuses_duplicates_and_excessive_names() {
         assert!(TokenStore::new(vec![entry("same", "a"), entry("same", "b")]).is_err());
         assert!(validate_name("token", &"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn expiry_and_mutation_grants_are_fail_closed() {
+        let mut expiring = entry("writer", "secret");
+        expiring.expires_at_unix = Some(10);
+        expiring.mutation = Some(MutationGrant {
+            allowed_xpath_roots: vec!["/config/shared/address".to_owned()],
+            actions: vec![MutationAction::Set],
+        });
+        let store = TokenStore::new(vec![expiring]).expect("valid grant");
+        assert!(store.authenticate_at("secret", 9).is_some());
+        assert!(store.authenticate_at("secret", 10).is_none());
+        let grant = store.entries()[0].mutation.as_ref().expect("grant");
+        assert!(grant.allows_xpath("/config/shared/address/entry[@name='x']"));
+        assert!(!grant.allows_xpath("/config/shared/address-group"));
+        assert!(grant.allows_action(MutationAction::Set));
+        assert!(!grant.allows_action(MutationAction::Delete));
     }
 }

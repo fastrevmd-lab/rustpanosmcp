@@ -2,7 +2,7 @@
 
 use crate::{
     KNOWN_TOOLS,
-    store::{ScopeSet, TokenEntry, TokenStore},
+    store::{MutationGrant, ScopeSet, TokenEntry, TokenStore},
     token::{TokenError, TokenSecret},
 };
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
 
 /// Token-store read, validation, or persistence failure.
@@ -79,7 +79,7 @@ impl TokenStoreFile {
             )));
         }
         let on_disk: OnDiskStore = serde_json::from_slice(bytes)?;
-        if on_disk.version != STORE_VERSION {
+        if !matches!(on_disk.version, 1 | STORE_VERSION) {
             return Err(TokenStoreFileError::Invalid(format!(
                 "unsupported version {}; expected {STORE_VERSION}",
                 on_disk.version
@@ -160,6 +160,19 @@ impl TokenStoreFile {
         tools: ScopeSet,
         known_devices: &[String],
     ) -> Result<TokenSecret, TokenStoreFileError> {
+        Self::add_with_options(path, name, devices, tools, None, None, known_devices)
+    }
+
+    /// Add one token with optional v0.2 expiry and mutation authority.
+    pub fn add_with_options(
+        path: &Path,
+        name: &str,
+        devices: ScopeSet,
+        tools: ScopeSet,
+        expires_at_unix: Option<u64>,
+        mutation: Option<MutationGrant>,
+        known_devices: &[String],
+    ) -> Result<TokenSecret, TokenStoreFileError> {
         let current = if path.exists() {
             Self::load(path, known_devices)?
         } else {
@@ -178,6 +191,8 @@ impl TokenStoreFile {
             devices,
             tools,
             created_at_unix: now_unix()?,
+            expires_at_unix,
+            mutation,
         });
         let updated = TokenStore::new(entries)?;
         validate_references(&updated, known_devices)?;
@@ -227,6 +242,8 @@ impl TokenStoreFile {
                         devices: entry.devices.clone(),
                         tools: entry.tools.clone(),
                         created_at_unix,
+                        expires_at_unix: entry.expires_at_unix,
+                        mutation: entry.mutation.clone(),
                     }
                 } else {
                     entry.clone()
@@ -451,6 +468,32 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
         }
         assert!(TokenStoreFile::load(&path, &known()).is_err());
+    }
+
+    #[test]
+    fn version_one_store_loads_and_is_saved_as_version_two() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("tokens.json");
+        let digest = crate::TokenDigest::from_secret("secret");
+        fs::write(
+            &path,
+            format!(
+                r#"{{"version":1,"tokens":[{{"name":"reader","digest":"{}","devices":["fw-1"],"tools":["list_devices"],"created_at_unix":1}}]}}"#,
+                digest.as_str()
+            ),
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+        }
+        let store = TokenStoreFile::load(&path, &known()).expect("v1 migration read");
+        assert!(store.entries()[0].mutation.is_none());
+        TokenStoreFile::save(&path, &store).expect("v2 save");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("saved bytes")).expect("JSON");
+        assert_eq!(saved["version"], 2);
     }
 
     #[test]

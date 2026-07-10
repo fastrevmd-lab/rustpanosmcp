@@ -395,6 +395,7 @@ mod tests {
             token_name: "test".to_owned(),
             tools,
             devices,
+            mutation: None,
         }
     }
 
@@ -440,6 +441,8 @@ mod tests {
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
             created_at_unix: 1,
+            expires_at_unix: None,
+            mutation: None,
         }])
         .expect("store");
         assert_eq!(

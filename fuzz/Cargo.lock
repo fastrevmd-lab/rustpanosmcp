@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fastrand",
  "futures-util",
@@ -815,6 +815,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

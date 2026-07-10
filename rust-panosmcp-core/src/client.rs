@@ -72,6 +72,12 @@ impl PanosClient {
         self.config.mutation.as_ref()
     }
 
+    /// Canonical management endpoint used to serialize aliases of one appliance.
+    #[must_use]
+    pub(crate) fn mutation_lock_key(&self) -> String {
+        self.config.endpoint.origin().ascii_serialization()
+    }
+
     /// Execute a validated PAN-OS operational XML command.
     pub async fn operational(
         &self,

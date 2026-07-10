@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a deterministic v0.1 release archive and SHA-256 checksum.
+# Build a deterministic release archive and SHA-256 checksum.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,7 +37,8 @@ PKG="$STAGING/rust-panosmcp-v${VERSION}"
 install -d "$PKG/bin" "$PKG/packaging/systemd" "$PKG/docs"
 install -m 0755 "$TARGET_DIR/release/rust-panosmcp" "$PKG/bin/rust-panosmcp"
 install -m 0644 LICENSE-APACHE LICENSE-MIT README.md SECURITY.md "$PKG/"
-install -m 0644 docs/OPERATIONS.md docs/COMPATIBILITY.md docs/BENCHMARKS.md "$PKG/docs/"
+install -m 0644 docs/OPERATIONS.md docs/COMPATIBILITY.md docs/BENCHMARKS.md \
+    docs/V0.2_CHANGE_SETS.md "$PKG/docs/"
 install -m 0644 packaging/systemd/rust-panosmcp.service \
     packaging/systemd/rust-panosmcp.sysusers \
     packaging/systemd/rust-panosmcp.tmpfiles "$PKG/packaging/systemd/"

@@ -65,7 +65,8 @@ that identity rather than switching tokens mid-operation.
    revert. It is fingerprint-bound and releases the configuration lock.
 
 Every step rechecks operation ownership, device, inventory-policy signature,
-and candidate fingerprint. Per-device mutexes serialize server mutations.
+and candidate fingerprint. v0.2 mutexes serialize by canonical management
+endpoint, including multiple inventory aliases for one appliance.
 
 ## Cancellation and recovery
 
@@ -80,12 +81,17 @@ configuration lock or permit discard. Reconcile the PAN-OS job and candidate
 state manually before removing the lock. A terminal PAN-OS commit failure is
 recorded as `failed` and remains eligible for explicit discard.
 
-Operation records are in memory and survive SIGHUP, not process restart. After
-an unexpected restart, do not blindly retry a stage or commit. Inspect the
+With `--state-file`, operation and change-set records survive process restart.
+A restart converts staging, validating, or committing records to
+`indeterminate`; the endpoint remains blocked until manual reconciliation.
+Without that option, v0.1 in-memory recovery behavior remains. After an
+unexpected restart, do not blindly retry a stage or commit. Inspect the
 PAN-OS job list, candidate change summary, commit locks, and configuration
 locks. Reconcile any running job, then use PAN-OS admin-scoped partial revert
 or commit under change control. Remove a stale configuration lock only after
-confirming no lifecycle worker remains.
+confirming no lifecycle worker remains. With the service stopped, use the
+v0.2 `state resolve` command documented in `V0.2_CHANGE_SETS.md` to record the
+proven terminal outcome and unblock the endpoint.
 
 Audit events contain principal, device, operation ID, action, SHA-256 XPath
 fingerprint, job ID, outcome, and duration. They exclude XPath text, XML

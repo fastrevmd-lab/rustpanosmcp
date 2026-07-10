@@ -112,7 +112,7 @@ jobs:
       - name: Build hardened container
         run: |
           docker build \
-            --build-arg VERSION=0.1.0 \
+            --build-arg VERSION=0.2.0 \
             --build-arg VCS_REF="$GITHUB_SHA" \
             --tag rust-panosmcp:ci .
           test "$(docker image inspect --format '{{.Config.User}}' rust-panosmcp:ci)" = "65532:65532"
