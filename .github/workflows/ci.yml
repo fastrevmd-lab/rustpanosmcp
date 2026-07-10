@@ -84,3 +84,44 @@ jobs:
         run: |
           cargo deny check licenses bans sources
           cargo deny --manifest-path fuzz/Cargo.toml --config fuzz/deny.toml check licenses bans sources
+
+  release-candidate:
+    name: Release candidate packaging
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Verify packaging policy
+        run: scripts/verify-packaging.sh
+
+      - name: Verify and build reproducible archive
+        env:
+          PANOSMCP_OUTPUT_DIR: ${{ github.workspace }}/dist
+        run: scripts/verify-reproducible-build.sh
+
+      - name: Smoke release binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/rust-panosmcp-rc"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/rust-panosmcp-rc"
+          "$RUNNER_TEMP"/rust-panosmcp-rc/*/bin/rust-panosmcp --version
+
+      - name: Build hardened container
+        run: |
+          docker build \
+            --build-arg VERSION=0.1.0 \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --tag rust-panosmcp:ci .
+          test "$(docker image inspect --format '{{.Config.User}}' rust-panosmcp:ci)" = "65532:65532"
+          docker run --rm --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges rust-panosmcp:ci --version
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-panosmcp-release-candidate
+          path: dist/*
+          if-no-files-found: error

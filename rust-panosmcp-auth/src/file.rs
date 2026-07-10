@@ -61,7 +61,24 @@ impl TokenStoreFile {
     pub fn load(path: &Path, known_devices: &[String]) -> Result<TokenStore, TokenStoreFileError> {
         require_absolute(path)?;
         let bytes = read_private_file(path)?;
-        let on_disk: OnDiskStore = serde_json::from_slice(&bytes)?;
+        Self::parse(&bytes, known_devices)
+    }
+
+    /// Parse and validate a bounded digest-only store without filesystem access.
+    ///
+    /// This is also the pure parser entry point used by the token-store fuzz
+    /// target. Production callers normally use [`Self::load`] so ownership and
+    /// permission checks are enforced before parsing.
+    pub fn parse(
+        bytes: &[u8],
+        known_devices: &[String],
+    ) -> Result<TokenStore, TokenStoreFileError> {
+        if bytes.len() as u64 > MAX_STORE_BYTES {
+            return Err(TokenStoreFileError::Invalid(format!(
+                "token store exceeds {MAX_STORE_BYTES} bytes"
+            )));
+        }
+        let on_disk: OnDiskStore = serde_json::from_slice(bytes)?;
         if on_disk.version != STORE_VERSION {
             return Err(TokenStoreFileError::Invalid(format!(
                 "unsupported version {}; expected {STORE_VERSION}",

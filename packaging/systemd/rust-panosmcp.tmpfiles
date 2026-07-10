@@ -1,0 +1,2 @@
+d /etc/rust-panosmcp 0750 root rust-panosmcp -
+d /var/lib/rust-panosmcp 0700 rust-panosmcp rust-panosmcp -

@@ -25,6 +25,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -352,4 +353,48 @@ async fn asynchronous_job_polling_reaches_terminal_state() {
         .expect("job polling");
     assert!(job.succeeded());
     assert!(mock.state.jobs.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+#[ignore = "manual release benchmark: run with --release --ignored --nocapture"]
+async fn benchmark_warm_pooled_https_read_latency() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+    for _ in 0..10 {
+        client
+            .operational(
+                "<show><system><info/></system></show>",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("warm-up read");
+    }
+
+    let mut samples = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let started = Instant::now();
+        let result = client
+            .operational(
+                "<show><system><info/></system></show>",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("benchmark read");
+        std::hint::black_box(result);
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    let p50 = percentile(&samples, 50);
+    let p95 = percentile(&samples, 95);
+    println!("warm pooled mock HTTPS facts: p50={p50:?}, p95={p95:?}, n=200");
+    assert_eq!(
+        mock.state.peers.lock().expect("peers").len(),
+        1,
+        "benchmark must retain one pooled HTTPS connection"
+    );
+}
+
+fn percentile(samples: &[Duration], percentile: usize) -> Duration {
+    let index = (samples.len() * percentile).div_ceil(100).saturating_sub(1);
+    samples[index]
 }
