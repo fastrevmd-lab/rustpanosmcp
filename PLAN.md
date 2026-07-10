@@ -1,6 +1,6 @@
 # rust-panosmcp project plan
 
-Status: Phase 0 implemented; Phases 1-4 planned, 2026-07-09
+Status: Phase 1 implemented and mock-validated; explicit lab exit gate pending, 2026-07-09
 
 ## 1. Outcome
 
