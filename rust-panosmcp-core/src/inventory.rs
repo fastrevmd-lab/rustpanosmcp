@@ -25,6 +25,7 @@ const MAX_DEVICE_CONCURRENCY: usize = 5;
 const MAX_DEVICE_NAME_BYTES: usize = 64;
 const MAX_DEVICES: usize = 256;
 const MAX_TAGS_PER_DEVICE: usize = 32;
+const MAX_WRITE_ROOTS_PER_DEVICE: usize = 32;
 
 /// Source used to resolve environment-backed secrets.
 pub trait Environment: Send + Sync {
@@ -104,6 +105,21 @@ pub struct DeviceConfig {
     pub max_concurrency: usize,
     /// Hard cap applied while streaming a PAN-OS response.
     pub max_response_bytes: usize,
+    /// Explicit write policy. Its absence keeps every mutation tool disabled.
+    pub mutation: Option<MutationPolicy>,
+}
+
+/// Operator-controlled guardrails for PAN-OS candidate mutations.
+#[derive(Debug, Clone)]
+pub struct MutationPolicy {
+    /// PAN-OS administrator associated with the API key and partial commits.
+    pub admin: String,
+    /// Exact XPath subtrees within which mutation is permitted.
+    pub allowed_xpath_roots: Vec<String>,
+    /// Whether delete actions may pass the separate confirmation gate.
+    pub allow_delete: bool,
+    /// Whether cross-administrator PAN-OS configuration lock acquisition is mandatory.
+    pub require_config_lock: bool,
 }
 
 impl fmt::Debug for DeviceConfig {
@@ -239,6 +255,19 @@ struct RawDevice {
     max_concurrency: usize,
     #[serde(default = "default_max_response_bytes")]
     max_response_bytes: usize,
+    #[serde(default)]
+    mutation: Option<RawMutationPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMutationPolicy {
+    admin: String,
+    allowed_xpath_roots: Vec<String>,
+    #[serde(default)]
+    allow_delete: bool,
+    #[serde(default = "default_true")]
+    require_config_lock: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,6 +324,10 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
     let endpoint = validate_endpoint(&raw.endpoint)?;
     let api_key = Arc::new(SecretString::new(load_api_key(&raw.api_key, environment)?));
     let tls = load_tls(raw.tls)?;
+    let mutation = raw
+        .mutation
+        .map(|policy| load_mutation_policy(&raw.name, policy))
+        .transpose()?;
 
     if !(1..=MAX_DEVICE_CONCURRENCY).contains(&raw.max_concurrency) {
         return Err(PanosMcpError::Inventory(format!(
@@ -350,7 +383,42 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
         request_timeout: Duration::from_secs(raw.request_timeout_secs),
         max_concurrency: raw.max_concurrency,
         max_response_bytes: raw.max_response_bytes,
+        mutation,
     })
+}
+
+fn load_mutation_policy(device: &str, raw: RawMutationPolicy) -> Result<MutationPolicy> {
+    validate_identifier("mutation admin", &raw.admin, MAX_DEVICE_NAME_BYTES)?;
+    if raw.allowed_xpath_roots.is_empty()
+        || raw.allowed_xpath_roots.len() > MAX_WRITE_ROOTS_PER_DEVICE
+    {
+        return Err(PanosMcpError::Inventory(format!(
+            "device '{device}' mutation policy requires 1-{MAX_WRITE_ROOTS_PER_DEVICE} XPath roots"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    let mut roots = Vec::with_capacity(raw.allowed_xpath_roots.len());
+    for root in raw.allowed_xpath_roots {
+        crate::xml::validate_read_xpath(&root)?;
+        if root == "/config" {
+            return Err(PanosMcpError::Inventory(format!(
+                "device '{device}' mutation XPath root may not authorize all of /config"
+            )));
+        }
+        if seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    }
+    Ok(MutationPolicy {
+        admin: raw.admin,
+        allowed_xpath_roots: roots,
+        allow_delete: raw.allow_delete,
+        require_config_lock: raw.require_config_lock,
+    })
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn validate_endpoint(raw: &str) -> Result<Url> {
@@ -675,8 +743,35 @@ mod tests {
         assert_eq!(device.metadata.endpoint, "https://fw.example.test:4443");
         assert_eq!(device.metadata.tags, ["lab"]);
         assert_eq!(device.max_concurrency, 4);
+        assert!(device.mutation.is_none());
         assert_eq!(device.api_key.expose_secret(), "test-api-key-value");
         assert!(!format!("{device:?}").contains("test-api-key-value"));
+    }
+
+    #[test]
+    fn mutation_policy_is_explicit_narrow_and_validated() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let valid = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config/shared/address"],"allow_delete":true}}]}"#,
+        );
+        let inventory =
+            Inventory::load_with_environment(valid, &environment()).expect("mutation policy");
+        let policy = inventory
+            .device("fw")
+            .expect("device")
+            .mutation
+            .clone()
+            .expect("explicit mutation policy");
+        assert_eq!(policy.admin, "mcp-admin");
+        assert!(policy.allow_delete);
+        assert!(policy.require_config_lock);
+
+        let broad = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config"]}}]}"#,
+        );
+        assert!(Inventory::load_with_environment(broad, &environment()).is_err());
     }
 
     #[test]

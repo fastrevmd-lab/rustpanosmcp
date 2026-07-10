@@ -28,6 +28,15 @@ impl ScopeSet {
         }
     }
 
+    /// Whether an MCP tool is allowed, with write tools excluded from wildcard.
+    #[must_use]
+    pub fn allows_tool(&self, name: &str) -> bool {
+        match self {
+            Self::Wildcard => !crate::MUTATION_TOOLS.contains(&name),
+            Self::Allowlist(names) => names.iter().any(|allowed| allowed == name),
+        }
+    }
+
     /// Whether this scope permits nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -244,6 +253,12 @@ mod tests {
         assert!(exact.allows("fw-1"));
         assert!(!exact.allows("FW-1"));
         assert!(ScopeSet::Wildcard.allows("anything"));
+        assert!(ScopeSet::Wildcard.allows_tool("list_devices"));
+        assert!(!ScopeSet::Wildcard.allows_tool("commit_panos_candidate"));
+        assert!(
+            ScopeSet::Allowlist(vec!["commit_panos_candidate".to_owned()])
+                .allows_tool("commit_panos_candidate")
+        );
         assert!(
             ScopeSet::Allowlist(vec!["*".to_owned(), "fw-1".to_owned()])
                 .validate("devices")

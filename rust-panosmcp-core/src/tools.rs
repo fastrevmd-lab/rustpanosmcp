@@ -1,4 +1,4 @@
-//! Transport-independent Phase 1 read-only tool behavior.
+//! Transport-independent PAN-OS service and read-only tool behavior.
 
 use crate::{
     PanosMcpError, Result,
@@ -17,16 +17,32 @@ const DEFAULT_OUTPUT_LINES: usize = 10_000;
 const MAX_OUTPUT_LINES: usize = 100_000;
 const SYSTEM_INFO_COMMAND: &str = "<show><system><info></info></system></show>";
 
-/// Shared, immutable service behind all Phase 1 MCP tools.
+/// Shared service behind read tools and the guarded candidate lifecycle.
 #[derive(Debug, Clone)]
 pub struct PanosService {
     inventory: Inventory,
     clients: Arc<BTreeMap<String, Arc<PanosClient>>>,
+    pub(crate) mutations: Arc<crate::mutation::MutationCoordinator>,
 }
 
 impl PanosService {
     /// Build and validate all pooled device clients before serving requests.
     pub fn new(inventory: Inventory) -> Result<Self> {
+        Self::build(
+            inventory,
+            Arc::new(crate::mutation::MutationCoordinator::default()),
+        )
+    }
+
+    /// Rebuild clients while retaining in-flight mutation state across atomic reload.
+    pub fn reload(inventory: Inventory, previous: &Self) -> Result<Self> {
+        Self::build(inventory, previous.mutations.clone())
+    }
+
+    fn build(
+        inventory: Inventory,
+        mutations: Arc<crate::mutation::MutationCoordinator>,
+    ) -> Result<Self> {
         let mut clients = BTreeMap::new();
         for device in inventory.entries() {
             let client = Arc::new(PanosClient::new(device)?);
@@ -35,6 +51,7 @@ impl PanosService {
         Ok(Self {
             inventory,
             clients: Arc::new(clients),
+            mutations,
         })
     }
 
@@ -108,7 +125,7 @@ impl PanosService {
         })
     }
 
-    fn client(&self, name: &str) -> Result<Arc<PanosClient>> {
+    pub(crate) fn client(&self, name: &str) -> Result<Arc<PanosClient>> {
         self.clients
             .get(name)
             .cloned()
