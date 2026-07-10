@@ -1,0 +1,32 @@
+[package]
+name = "rust-panosmcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rust-panosmcp-auth = { version = "0.1.0", path = "../rust-panosmcp-auth" }
+rust-panosmcp-core = { version = "0.1.0", path = "../rust-panosmcp-core" }
+
+[[bin]]
+name = "bearer_header"
+path = "fuzz_targets/bearer_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml_response"
+path = "fuzz_targets/xml_response.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

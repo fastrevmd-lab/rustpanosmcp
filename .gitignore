@@ -1,0 +1,12 @@
+/target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+*.profraw
+*.pem
+*.p12
+*.key
+.env
+.env.*
+devices.json
+tokens.json

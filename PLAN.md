@@ -1,6 +1,6 @@
 # rust-panosmcp project plan
 
-Status: initial plan, 2026-07-09
+Status: Phase 0 implemented; Phases 1-4 planned, 2026-07-09
 
 ## 1. Outcome
 
@@ -205,7 +205,7 @@ more aggressive posture without device evidence.
 
 ## 7. Delivery phases
 
-### Phase 0 — skeleton and quality gates
+### Phase 0 — skeleton and quality gates (implemented)
 
 - Create the Cargo workspace and three crates.
 - Pin a supported Rust MSRV and enable formatting, Clippy, unit tests,
