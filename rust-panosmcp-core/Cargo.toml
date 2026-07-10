@@ -9,10 +9,29 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+fastrand.workspace = true
+futures-util.workspace = true
 quick-xml.workspace = true
+reqwest.workspace = true
+rust-panosmcp-auth = { version = "0.1.0", path = "../rust-panosmcp-auth" }
+rustix.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rcgen = "0.14"
+tempfile = "3"
 
 [lints]
 workspace = true

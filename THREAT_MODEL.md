@@ -1,10 +1,10 @@
 # Threat model
 
-Status: Phase 0 baseline, 2026-07-09
+Status: Phase 1 read-only baseline, 2026-07-09
 
 This document defines the security boundaries and invariants for
-`rust-panosmcp`. It is a design constraint, not a claim that the Phase 0
-scaffold is ready for remote or device access.
+`rust-panosmcp`. It is a design constraint, not a claim that Phase 1 is ready
+for remote MCP access or configuration changes.
 
 ## Scope
 
@@ -131,16 +131,44 @@ data safe.
 - The Phase 0 server has no tools, no listening HTTP socket, no inventory, and
   no device network access.
 
-## Residual Phase 0 risk
+## Phase 1 controls implemented
 
-The current code is a scaffold. It does not yet implement bearer token
-verification, authorization scopes, Streamable HTTP, TLS, PAN-OS connections,
-inventory validation, rate limiting, or audit persistence. Do not deploy this
-revision as a remote service or describe it as a functional firewall manager.
+- Exact-name inventory resolution prevents MCP callers from selecting URLs.
+- Endpoints are HTTPS-only origins. Redirects and environment proxies are
+  disabled, TLS 1.2+ is required, and trust is system roots, a private CA, or
+  an exact leaf-certificate SHA-256 pin.
+- API keys come only from environment variables or protected absolute files,
+  are redacted in formatting, and are sent only in sensitive `X-PAN-KEY`
+  headers on POST requests.
+- Unix inventory, secret, and CA reads use `O_NOFOLLOW`, validate the opened
+  regular file's owner/mode/size, and read from the same descriptor.
+- XML responses are streamed under a hard cap, reject DTDs/deep or malformed
+  structures, and map PAN-OS status/codes to stable errors.
+- Operational input accepts only one `<show>` root. Configuration reads accept
+  a bounded XPath subset rooted at `/config`.
+- Request deadlines cover semaphore queueing, network transfer, and parsing.
+  MCP cancellation drops in-flight reads. Each device defaults to four calls
+  and cannot be configured above five.
+- Every tool output is byte- and line-bounded with explicit truncation
+  metadata. Async job polling has a deadline, cancellation, and jittered
+  exponential backoff.
+- HTTPS mock tests cover trust success/refusal, header/form behavior, typed
+  errors, oversized and slow responses, cancellation, concurrency, connection
+  reuse, job polling, and full MCP tool calls.
 
-The bounded XML helper currently performs structural envelope validation only.
-Phase 1 must add semantic status/error parsing and response-content limits
-before device data is exposed through MCP.
+## Residual Phase 1 risk
+
+Phase 1 has no listening remote transport, MCP bearer verification, token
+scopes, IP/token rate limiting, Host/Origin policy, or persistent audit log.
+Those are Phase 2 controls. Run Phase 1 only as a local stdio child process; do
+not publish it through a generic HTTP or websocket bridge.
+
+All configuration-changing operations remain unimplemented. Candidate reads
+can expose sensitive firewall policy to a local MCP caller, so the PAN-OS key
+and local client must still follow least privilege. Exact leaf pins
+intentionally bind to a single certificate and require operator rotation before
+certificate renewal. The Phase 1 mock and explicit real-firewall acceptance
+gates have been exercised; remote transport risks remain deferred to Phase 2.
 
 ## Verification obligations
 
