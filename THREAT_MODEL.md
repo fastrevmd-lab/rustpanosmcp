@@ -167,8 +167,8 @@ All configuration-changing operations remain unimplemented. Candidate reads
 can expose sensitive firewall policy to a local MCP caller, so the PAN-OS key
 and local client must still follow least privilege. Exact leaf pins
 intentionally bind to a single certificate and require operator rotation before
-certificate renewal. The explicit real-firewall test remains a release gate
-until exercised against the selected lab PAN-OS version.
+certificate renewal. The Phase 1 mock and explicit real-firewall acceptance
+gates have been exercised; remote transport risks remain deferred to Phase 2.
 
 ## Verification obligations
 

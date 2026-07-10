@@ -20,9 +20,9 @@ typed errors, timeouts, cancellation, output caps, and a per-device semaphore.
 The stdio MCP server exposes four read-only tools: `list_devices`,
 `gather_device_facts`, `execute_panos_op`, and `get_panos_config`.
 
-The full HTTPS mock and MCP end-to-end suites pass. The repository includes an
-explicitly ignored real-firewall acceptance test; the Phase 1 milestone is not
-closed until that test passes against a configured lab firewall.
+The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
+firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
+is recorded in [docs/PHASE1_ACCEPTANCE.md](docs/PHASE1_ACCEPTANCE.md).
 
 Bearer-protected Streamable HTTP is Phase 2. Phase 1 uses local stdio and must
 not be placed behind an unauthenticated network bridge.
