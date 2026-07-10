@@ -1,6 +1,6 @@
 services:
   rust-panosmcp:
-    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.1.0
+    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.2.0
     user: "65532:65532"
     read_only: true
     cap_drop: ["ALL"]
@@ -10,6 +10,7 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
     volumes:
       - ./runtime:/etc/rust-panosmcp:ro
+      - ./state:/var/lib/rust-panosmcp:rw
     ports:
       - "30031:30031"
     command:
@@ -23,6 +24,8 @@ services:
       - "30031"
       - --tokens-file
       - /etc/rust-panosmcp/tokens.json
+      - --state-file
+      - /var/lib/rust-panosmcp/mutation-state.json
       - --tls-cert
       - /etc/rust-panosmcp/server.crt
       - --tls-key

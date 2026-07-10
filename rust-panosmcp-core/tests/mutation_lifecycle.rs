@@ -6,11 +6,13 @@ use axum::{
     routing::post,
 };
 use rcgen::generate_simple_self_signed;
+use rust_panosmcp_auth::{MutationAction, MutationGrant};
 use rust_panosmcp_core::{
     inventory::{Environment, Inventory},
     mutation::{
-        CandidateFingerprintInput, CommitDisposition, OperationInput, OperationStatusInput,
-        StageAction, StageConfigInput,
+        ApplyChangeSetInput, ApproveChangeSetInput, CandidateFingerprintInput, ChangeSetAction,
+        ChangeSetStatusInput, CommitDisposition, CreateChangeSetInput, OperationInput,
+        OperationStatusInput, StageAction, StageConfigInput,
     },
     tools::PanosService,
 };
@@ -111,6 +113,8 @@ fn success(inner: &str) -> String {
 
 struct Fixture {
     _directory: tempfile::TempDir,
+    inventory_path: std::path::PathBuf,
+    state_path: std::path::PathBuf,
     state: Arc<Mutex<MockState>>,
     server: axum_server::Handle<std::net::SocketAddr>,
     service: PanosService,
@@ -170,12 +174,165 @@ async fn fixture(commit_fails: bool) -> Fixture {
     .expect("inventory");
     let inventory = Inventory::load_with_environment(&inventory_path, &TestEnvironment)
         .expect("mutation inventory");
+    let state_path = directory.path().join("mutation-state.json");
+    let service = PanosService::new_with_state(inventory, Some(&state_path)).expect("service");
     Fixture {
         _directory: directory,
+        inventory_path,
+        state_path,
         state,
         server: handle,
-        service: PanosService::new(inventory).expect("service"),
+        service,
     }
+}
+
+#[tokio::test]
+async fn change_set_requires_exact_independent_approval_and_applies_as_one_operation() {
+    let fixture = fixture(false).await;
+    let initial = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+    let grant = MutationGrant {
+        allowed_xpath_roots: vec!["/config/shared/address".to_owned()],
+        actions: vec![MutationAction::Set, MutationAction::Delete],
+    };
+    let planned = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: initial.candidate_fingerprint.clone(),
+                actions: vec![
+                    ChangeSetAction {
+                        action: StageAction::Set,
+                        xpath: "/config/shared/address".to_owned(),
+                        element: Some(
+                            "<entry name=\"one\"><ip-netmask>192.0.2.1</ip-netmask></entry>"
+                                .to_owned(),
+                        ),
+                        destructive_confirmation: None,
+                    },
+                    ChangeSetAction {
+                        action: StageAction::Set,
+                        xpath: "/config/shared/address".to_owned(),
+                        element: Some(
+                            "<entry name=\"two\"><ip-netmask>192.0.2.2</ip-netmask></entry>"
+                                .to_owned(),
+                        ),
+                        destructive_confirmation: None,
+                    },
+                ],
+            },
+            "writer",
+            Some(&grant),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("plan");
+    assert_eq!(planned.state, "planned");
+    assert_eq!(planned.actions.len(), 2);
+
+    let approval = ApproveChangeSetInput {
+        device: "mock-fw".to_owned(),
+        change_set_id: planned.change_set_id.clone(),
+        expected_digest: planned.digest.clone(),
+    };
+    assert!(
+        fixture
+            .service
+            .approve_change_set(approval.clone(), "writer")
+            .await
+            .is_err(),
+        "self approval must fail"
+    );
+    let mut wrong = approval.clone();
+    wrong.expected_digest = format!("sha256:{}", "0".repeat(64));
+    assert!(
+        fixture
+            .service
+            .approve_change_set(wrong, "reviewer")
+            .await
+            .is_err(),
+        "digest mismatch must fail"
+    );
+    let approved = fixture
+        .service
+        .approve_change_set(approval, "reviewer")
+        .await
+        .expect("independent approval");
+    assert_eq!(approved.state, "approved");
+    assert_eq!(approved.approver.as_deref(), Some("reviewer"));
+
+    let recovered_inventory =
+        Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
+            .expect("recovered inventory");
+    let recovered = PanosService::new_with_state(recovered_inventory, Some(&fixture.state_path))
+        .expect("recover persistent approval");
+
+    let apply = ApplyChangeSetInput {
+        device: "mock-fw".to_owned(),
+        change_set_id: planned.change_set_id.clone(),
+        expected_digest: planned.digest,
+        expected_candidate_fingerprint: initial.candidate_fingerprint,
+    };
+    assert!(
+        recovered
+            .apply_change_set(
+                apply.clone(),
+                "reviewer",
+                Some(&grant),
+                CancellationToken::new(),
+            )
+            .await
+            .is_err(),
+        "only the plan owner may apply"
+    );
+    let (first_apply, second_apply) = tokio::join!(
+        recovered.apply_change_set(
+            apply.clone(),
+            "writer",
+            Some(&grant),
+            CancellationToken::new(),
+        ),
+        recovered.apply_change_set(apply, "writer", Some(&grant), CancellationToken::new(),),
+    );
+    assert_ne!(
+        first_apply.is_ok(),
+        second_apply.is_ok(),
+        "an approval must be single-use under concurrent apply"
+    );
+    let staged = first_apply.or(second_apply).expect("one apply succeeds");
+    let status = recovered
+        .change_set_status(ChangeSetStatusInput {
+            device: "mock-fw".to_owned(),
+            change_set_id: planned.change_set_id,
+        })
+        .await
+        .expect("status");
+    assert_eq!(status.state, "applied");
+    assert_eq!(
+        status.operation_id.as_deref(),
+        Some(staged.operation_id.as_str())
+    );
+    recovered
+        .discard_candidate(
+            OperationInput {
+                device: "mock-fw".to_owned(),
+                operation_id: staged.operation_id,
+                expected_candidate_fingerprint: staged.candidate_fingerprint,
+            },
+            "writer",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("discard");
 }
 
 #[tokio::test]

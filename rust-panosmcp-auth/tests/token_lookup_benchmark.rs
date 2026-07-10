@@ -13,6 +13,8 @@ fn benchmark_maximum_token_store_lookup() {
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
             created_at_unix: 1,
+            expires_at_unix: None,
+            mutation: None,
         })
         .collect();
     let store = TokenStore::new(entries).expect("maximum supported token store");

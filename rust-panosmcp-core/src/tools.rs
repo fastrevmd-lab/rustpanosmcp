@@ -8,7 +8,7 @@ use crate::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_OUTPUT_BYTES: usize = 512 * 1024;
@@ -28,9 +28,14 @@ pub struct PanosService {
 impl PanosService {
     /// Build and validate all pooled device clients before serving requests.
     pub fn new(inventory: Inventory) -> Result<Self> {
+        Self::new_with_state(inventory, None)
+    }
+
+    /// Build clients and optionally restore private mutation/approval state.
+    pub fn new_with_state(inventory: Inventory, state_path: Option<&Path>) -> Result<Self> {
         Self::build(
             inventory,
-            Arc::new(crate::mutation::MutationCoordinator::default()),
+            Arc::new(crate::mutation::MutationCoordinator::load(state_path)?),
         )
     }
 

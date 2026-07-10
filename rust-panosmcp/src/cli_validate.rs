@@ -74,6 +74,9 @@ pub enum CliRefusal {
 
 /// Validate all serve arguments before inventory, secrets, sockets, or TLS load.
 pub fn validate(cli: &Cli) -> Result<(), CliRefusal> {
+    if let Some(path) = &cli.state_file {
+        require_absolute(path, "--state-file")?;
+    }
     if cli.transport == Transport::Stdio {
         return Ok(());
     }

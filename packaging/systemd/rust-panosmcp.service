@@ -13,7 +13,8 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --transport streamable-http \
     --host 127.0.0.1 \
     --port 30031 \
-    --tokens-file /var/lib/rust-panosmcp/tokens.json
+    --tokens-file /var/lib/rust-panosmcp/tokens.json \
+    --state-file /var/lib/rust-panosmcp/mutation-state.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s

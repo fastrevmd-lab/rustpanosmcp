@@ -1,4 +1,4 @@
-# v0.1 operator runbook
+# v0.2 operator runbook
 
 This runbook covers the Phase 4 systemd and container packages. Read
 `PHASE1_OPERATIONS.md`, `PHASE2_OPERATIONS.md`, and `PHASE3_OPERATIONS.md`
@@ -11,9 +11,9 @@ checksum before extracting and compare the recorded Git commit with the release
 you approved:
 
 ```bash
-sha256sum --check rust-panosmcp-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf rust-panosmcp-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-cat rust-panosmcp-v0.1.0/BUILD-INFO
+sha256sum --check rust-panosmcp-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf rust-panosmcp-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+cat rust-panosmcp-v0.2.0/BUILD-INFO
 ```
 
 The build uses `Cargo.lock`, a fixed Rust MSRV, path remapping, a fixed source
@@ -141,8 +141,10 @@ Back up, encrypted and access-controlled:
 - PAN-OS API keys in the approved secret manager, separately from inventory;
 - durable audit logs and the documented PAN-OS administrator/role definition.
 
-Do not rely on in-memory mutation-operation records: they intentionally do not
-survive a restart. Before backup, upgrade, or disaster recovery, stop new writes
+Configure `--state-file /var/lib/rust-panosmcp/mutation-state.json` and include
+that private mode-0600 file in the encrypted backup. It contains exact planned
+XML payloads as well as operation metadata and must be protected like candidate
+configuration. Before backup, upgrade, or disaster recovery, stop new writes
 and reconcile every active validation/commit job and configuration lock on
 PAN-OS. Restore files with their documented ownership/modes, validate the
 checksum, start the same binary/image, perform read-only health calls, inspect

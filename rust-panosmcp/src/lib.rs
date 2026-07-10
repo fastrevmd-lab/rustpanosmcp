@@ -19,7 +19,11 @@ use rust_panosmcp_auth::{CallerContext, TokenStore, TokenStoreFile};
 use rust_panosmcp_core::{
     Result as CoreResult,
     inventory::Inventory,
-    mutation::{CandidateFingerprintInput, OperationInput, OperationStatusInput, StageConfigInput},
+    mutation::{
+        ApplyChangeSetInput, ApproveChangeSetInput, CandidateFingerprintInput,
+        ChangeSetStatusInput, CreateChangeSetInput, OperationInput, OperationStatusInput,
+        StageConfigInput,
+    },
     tools::{ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, PanosService},
 };
 use schemars::JsonSchema;
@@ -53,9 +57,18 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
     ) -> Result<Self, RuntimeLoadError> {
+        Self::load_with_state(inventory_path, token_path, None)
+    }
+
+    /// Load runtime with an optional persistent private mutation-state file.
+    pub fn load_with_state(
+        inventory_path: impl AsRef<Path>,
+        token_path: Option<&Path>,
+        state_path: Option<&Path>,
+    ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
         let token_path = token_path.map(Path::to_path_buf);
-        let snapshot = load_snapshot(&inventory_path, token_path.as_deref(), None)?;
+        let snapshot = load_snapshot(&inventory_path, token_path.as_deref(), None, state_path)?;
         Ok(Self {
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
             inventory_path: Arc::new(inventory_path),
@@ -94,6 +107,7 @@ impl RuntimeState {
             &self.inventory_path,
             self.token_path.as_ref().map(|path| path.as_path()),
             Some(&current.service),
+            None,
         )?;
         self.current.store(Arc::new(replacement));
         Ok(())
@@ -116,6 +130,7 @@ fn load_snapshot(
     inventory_path: &Path,
     token_path: Option<&Path>,
     previous_service: Option<&PanosService>,
+    state_path: Option<&Path>,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
     let inventory = Inventory::load(inventory_path)?;
     let names: Vec<String> = inventory
@@ -125,7 +140,7 @@ fn load_snapshot(
         .collect();
     let service = Arc::new(match previous_service {
         Some(previous) => PanosService::reload(inventory, previous)?,
-        None => PanosService::new(inventory)?,
+        None => PanosService::new_with_state(inventory, state_path)?,
     });
     let tokens = token_path
         .map(|path| TokenStoreFile::load(path, &names).map(Arc::new))
@@ -224,6 +239,19 @@ impl PanosMcpServer {
         }
         Ok("local-stdio")
     }
+
+    fn change_set_identity(
+        extensions: &Extensions,
+    ) -> Result<(&str, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
+        let principal = Self::mutation_principal(extensions)?;
+        let caller = Self::caller(extensions);
+        if caller.is_some_and(|caller| caller.mutation.is_none()) {
+            return Err(CallToolResult::error(vec![ContentBlock::text(
+                "v0.2 change-set writes require a token-specific mutation grant",
+            )]));
+        }
+        Ok((principal, caller.and_then(|caller| caller.mutation.clone())))
+    }
 }
 
 /// Empty input object for `list_devices`.
@@ -233,6 +261,115 @@ pub struct EmptyInput {}
 
 #[tool_router]
 impl PanosMcpServer {
+    /// Persist a fingerprint-bound multi-action plan without changing PAN-OS.
+    #[tool(
+        name = "create_panos_change_set",
+        description = "Plan and persist 1-64 ordered PAN-OS candidate actions under inventory and token XPath/action scopes"
+    )]
+    async fn create_panos_change_set(
+        &self,
+        Parameters(input): Parameters<CreateChangeSetInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "create_panos_change_set",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let (principal, grant) = match Self::change_set_identity(&extensions) {
+            Ok(identity) => identity,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(
+            service
+                .create_change_set(input, principal, grant.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Independently approve the exact digest of another principal's plan.
+    #[tool(
+        name = "approve_panos_change_set",
+        description = "Approve an unexpired exact change-set digest; self-approval is refused"
+    )]
+    async fn approve_panos_change_set(
+        &self,
+        Parameters(input): Parameters<ApproveChangeSetInput>,
+        extensions: Extensions,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "approve_panos_change_set",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let principal = match Self::mutation_principal(&extensions) {
+            Ok(principal) => principal,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.approve_change_set(input, principal).await)
+    }
+
+    /// Inspect the exact persistent plan, approval, expiry, and apply state.
+    #[tool(
+        name = "get_panos_change_set",
+        description = "Return the exact actions, digest, approval, expiry, and operation state for review or recovery"
+    )]
+    async fn get_panos_change_set(
+        &self,
+        Parameters(input): Parameters<ChangeSetStatusInput>,
+        extensions: Extensions,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "get_panos_change_set",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        if let Err(denial) = Self::mutation_principal(&extensions) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(service.change_set_status(input).await)
+    }
+
+    /// Apply one independently approved plan as a normal staged operation.
+    #[tool(
+        name = "apply_panos_change_set",
+        description = "Apply an independently approved exact change set under one endpoint/config lock, reverting partial failure"
+    )]
+    async fn apply_panos_change_set(
+        &self,
+        Parameters(input): Parameters<ApplyChangeSetInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            Self::caller(&extensions),
+            "apply_panos_change_set",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let (principal, grant) = match Self::change_set_identity(&extensions) {
+            Ok(identity) => identity,
+            Err(denial) => return Ok(denial),
+        };
+        let service = self.runtime.snapshot().service.clone();
+        Self::to_call_result(
+            service
+                .apply_change_set(input, principal, grant.as_ref(), cancellation)
+                .await,
+        )
+    }
+
     /// Fingerprint all operator-authorized candidate subtrees before mutation.
     #[tool(
         name = "get_candidate_fingerprint",

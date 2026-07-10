@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semver image version, for example 0.1.0'
+        description: 'Semver image version, for example 0.2.0'
         required: true
 
 env:

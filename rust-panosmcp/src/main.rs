@@ -4,7 +4,7 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use rust_panosmcp::{
     PanosMcpServer, RuntimeState,
-    cli::{Cli, Command, Transport},
+    cli::{Cli, Command, StateAction, StateDisposition, Transport},
     cli_validate,
     http_transport::{self, HttpOptions},
     tls, token_cmd,
@@ -17,14 +17,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rust_panosmcp_core::observability::init_tracing();
     let cli = Cli::parse();
 
-    if let Some(Command::Token { action }) = cli.command {
-        let inventory = Inventory::load(&cli.device_mapping)?;
-        let known_devices = inventory
-            .metadata()
-            .into_iter()
-            .map(|device| device.name)
-            .collect::<Vec<_>>();
-        token_cmd::run(action, &known_devices)?;
+    if let Some(command) = cli.command {
+        match command {
+            Command::Token { action } => {
+                let inventory = Inventory::load(&cli.device_mapping)?;
+                let known_devices = inventory
+                    .metadata()
+                    .into_iter()
+                    .map(|device| device.name)
+                    .collect::<Vec<_>>();
+                token_cmd::run(action, &known_devices)?;
+            }
+            Command::State {
+                action:
+                    StateAction::Resolve {
+                        state_file,
+                        operation_id,
+                        disposition,
+                        confirmation,
+                    },
+            } => {
+                let disposition = match disposition {
+                    StateDisposition::Committed => {
+                        rust_panosmcp_core::mutation::RecoveryDisposition::Committed
+                    }
+                    StateDisposition::Discarded => {
+                        rust_panosmcp_core::mutation::RecoveryDisposition::Discarded
+                    }
+                };
+                let output = rust_panosmcp_core::mutation::resolve_persisted_operation(
+                    &state_file,
+                    &operation_id,
+                    disposition,
+                    &confirmation,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
         return Ok(());
     }
 
@@ -32,7 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
-    let runtime = RuntimeState::load(&cli.device_mapping, tokens)?;
+    let runtime =
+        RuntimeState::load_with_state(&cli.device_mapping, tokens, cli.state_file.as_deref())?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
         devices = runtime.snapshot().service.list_devices().devices.len(),
