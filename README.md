@@ -1,8 +1,8 @@
 # rust-panosmcp
 
 Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository contains the v0.2.1 maintenance release: a
-bearer-protected server with a guarded PAN-OS candidate configuration
+firewalls. The repository contains the v0.2.2 dependency-maintenance release:
+a bearer-protected server with a guarded PAN-OS candidate configuration
 lifecycle and hardened release packaging.
 
 The project goal is a small, fast, production-oriented server with the same
@@ -47,6 +47,10 @@ commit/discard records clear `config_lock_held` only after the device accepts
 unlock, while a failed unlock is persisted as `indeterminate` for explicit
 reconciliation. It also records the default-trusted TLS and lab rollout
 evidence in [docs/V0.2.1_ACCEPTANCE.md](docs/V0.2.1_ACCEPTANCE.md).
+
+v0.2.2 updates the maintained Rust dependency graph and GitHub Actions while
+preserving the v0.2.1 PAN-OS tool, authorization, inventory, and mutation-state
+interfaces. Multi-vsys, HA, and Panorama work remains deferred.
 
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
