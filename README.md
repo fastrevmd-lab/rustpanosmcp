@@ -1,7 +1,7 @@
 # rust-panosmcp
 
 Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository contains the released v0.2.0 change set: a
+firewalls. The repository contains the v0.2.1 maintenance release: a
 bearer-protected server with a guarded PAN-OS candidate configuration
 lifecycle and hardened release packaging.
 
@@ -41,6 +41,12 @@ bound to the exact owner/device/fingerprint/action digest. Approved sets apply
 under one PAN-OS config lock and automatically admin-revert if a later action
 fails. They then use the existing diff, full-validation, commit, or discard
 lifecycle. See [docs/V0.2_CHANGE_SETS.md](docs/V0.2_CHANGE_SETS.md).
+
+v0.2.1 makes PAN-OS configuration-lock release a confirmed state transition:
+commit/discard records clear `config_lock_held` only after the device accepts
+unlock, while a failed unlock is persisted as `indeterminate` for explicit
+reconciliation. It also records the default-trusted TLS and lab rollout
+evidence in [docs/V0.2.1_ACCEPTANCE.md](docs/V0.2.1_ACCEPTANCE.md).
 
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
