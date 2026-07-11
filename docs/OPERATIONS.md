@@ -11,9 +11,9 @@ checksum before extracting and compare the recorded Git commit with the release
 you approved:
 
 ```bash
-sha256sum --check rust-panosmcp-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf rust-panosmcp-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
-cat rust-panosmcp-v0.2.0/BUILD-INFO
+sha256sum --check rust-panosmcp-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf rust-panosmcp-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
+cat rust-panosmcp-v0.2.1/BUILD-INFO
 ```
 
 The build uses `Cargo.lock`, a fixed Rust MSRV, path remapping, a fixed source
@@ -81,6 +81,29 @@ The unit has no capabilities, a read-only operating-system and configuration
 tree, a single writable state directory, private temporary/devices namespaces,
 kernel and namespace protections, syscall/address-family restrictions, and
 bounded tasks/file descriptors.
+
+### Native TLS renewal for a private-address hostname
+
+When the listener hostname resolves only on private DNS, use ACME DNS-01 rather
+than HTTP-01. Keep the DNS provider credential off the application host when
+possible. In the lab, certbot and its mode-0600 Cloudflare credential live on
+`the Proxmox host`; the deploy hook `scripts/deploy-lab-certificate.sh` validates the
+chain, hostname, and key pair before using `pct push` to atomically replace the
+certificate on the lab LXC. A failed service restart restores the previous pair.
+
+Test issuance and deployment separately:
+
+```bash
+certbot renew --dry-run
+RENEWED_LINEAGE=/etc/letsencrypt/live/rust-panosmcp.mechub.org \
+  /etc/letsencrypt/renewal-hooks/deploy/rust-panosmcp-lxc
+curl --fail-with-body https://rust-panosmcp.mechub.org:30031/mcp
+```
+
+The unauthenticated MCP request is expected to return HTTP 401 after TLS
+verification succeeds. Never use `--insecure` as a health check. Rotate a DNS
+API token immediately if its plaintext reaches logs, terminal capture, or an
+unapproved secret store.
 
 ## Container installation
 
@@ -178,3 +201,10 @@ For suspected credential exposure, follow `SECURITY.md`. For process loss during
 mutation, keep write clients disabled, inspect PAN-OS jobs/change summary/locks,
 and reconcile manually before restart or discard. A successful process start is
 not proof that the PAN-OS candidate is clean.
+
+If a commit or discard succeeds on PAN-OS but configuration-lock removal
+fails, v0.2.1 persists the operation as `indeterminate` with
+`config_lock_held: true` and returns an error. Do not retry the mutation. Verify
+the job, candidate fingerprint, and live PAN-OS lock, remove the lock if
+required, then use the exact offline-resolution confirmation documented in
+`PHASE3_OPERATIONS.md`.

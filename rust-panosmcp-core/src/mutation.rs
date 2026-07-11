@@ -946,7 +946,7 @@ impl PanosService {
             config_lock_held = true;
             record.config_lock_held = true;
             if let Err(error) = self.mutations.update(record.clone()).await {
-                release_config_lock(&client).await;
+                release_config_lock_best_effort(&client).await;
                 self.mutations.remove(&operation_id).await;
                 return Err(error);
             }
@@ -955,7 +955,7 @@ impl PanosService {
             Ok(value) => value,
             Err(error) => {
                 if config_lock_held {
-                    release_config_lock(&client).await;
+                    release_config_lock_best_effort(&client).await;
                 }
                 self.mutations.remove(&operation_id).await;
                 return Err(error);
@@ -963,7 +963,7 @@ impl PanosService {
         };
         if let Err(error) = require_fingerprint(&input.expected_candidate_fingerprint, &before) {
             if config_lock_held {
-                release_config_lock(&client).await;
+                release_config_lock_best_effort(&client).await;
             }
             self.mutations.remove(&operation_id).await;
             return Err(error);
@@ -972,7 +972,7 @@ impl PanosService {
         change_set.operation_id = Some(operation_id.clone());
         if let Err(error) = self.mutations.update_change_set(change_set.clone()).await {
             if config_lock_held {
-                release_config_lock(&client).await;
+                release_config_lock_best_effort(&client).await;
             }
             self.mutations.remove(&operation_id).await;
             return Err(error);
@@ -1024,7 +1024,7 @@ impl PanosService {
             change_set.operation_id = Some(operation_id.clone());
             self.mutations.update_change_set(change_set).await?;
             if config_lock_held {
-                release_config_lock(&client).await;
+                release_config_lock_best_effort(&client).await;
             }
             audit(
                 AuditEvent {
@@ -1165,7 +1165,7 @@ impl PanosService {
         }
         .await;
         if result.is_err() && config_lock_held {
-            release_config_lock(&client).await;
+            release_config_lock_best_effort(&client).await;
         }
         if result.is_err() {
             self.mutations.remove(&operation_id).await;
@@ -1407,12 +1407,33 @@ impl PanosService {
             .await?;
         let after = candidate_fingerprint(&client, CancellationToken::new()).await?;
         record.current = after.clone();
+        if record.config_lock_held {
+            if let Err(error) = release_config_lock(&client).await {
+                let details = format!(
+                    "discard succeeded but PAN-OS configuration lock release failed: {error}; manual job/candidate/lock reconciliation required"
+                );
+                record.state = LifecycleState::Indeterminate;
+                record.details = Some(details.clone());
+                self.mutations.update(record.clone()).await?;
+                audit(
+                    AuditEvent {
+                        owner,
+                        device: &record.device,
+                        operation_id: &record.id,
+                        action: "discard",
+                        xpath: &record.xpath,
+                    },
+                    false,
+                    started.elapsed(),
+                    None,
+                );
+                return Err(PanosMcpError::Configuration(details));
+            }
+            record.config_lock_held = false;
+        }
         record.state = LifecycleState::Discarded;
         record.details = None;
         self.mutations.update(record.clone()).await?;
-        if record.config_lock_held {
-            release_config_lock(&client).await;
-        }
         audit(
             AuditEvent {
                 owner,
@@ -1468,7 +1489,7 @@ async fn commit_worker(
         escape(&record.id),
         escape(&admin)
     );
-    let result: Result<CommitOutput> = async {
+    let mut result: Result<CommitOutput> = async {
         let response = client
             .post_fields(
                 vec![
@@ -1489,7 +1510,7 @@ async fn commit_worker(
         record.current = current;
         record.details = status.details.clone();
         record.state = if status.succeeded() {
-            LifecycleState::Committed
+            LifecycleState::Committing
         } else {
             LifecycleState::Failed
         };
@@ -1504,14 +1525,27 @@ async fn commit_worker(
     }
     .await;
     drop(guard);
-    let release_lock = result
+    let commit_succeeded = result
         .as_ref()
         .is_ok_and(|output| output.succeeded == Some(true));
-    if record.config_lock_held && release_lock {
-        release_config_lock(&client).await;
-        record.config_lock_held = false;
-    }
-    if let Err(error) = &result {
+    if commit_succeeded && record.config_lock_held {
+        match release_config_lock(&client).await {
+            Ok(()) => {
+                record.config_lock_held = false;
+                record.state = LifecycleState::Committed;
+            }
+            Err(error) => {
+                let details = format!(
+                    "commit succeeded but PAN-OS configuration lock release failed: {error}; manual job/candidate/lock reconciliation required"
+                );
+                record.state = LifecycleState::Indeterminate;
+                record.details = Some(details.clone());
+                result = Err(PanosMcpError::Configuration(details));
+            }
+        }
+    } else if commit_succeeded {
+        record.state = LifecycleState::Committed;
+    } else if let Err(error) = &result {
         record.state = LifecycleState::Indeterminate;
         record.details = Some(error.to_string());
     }
@@ -1782,8 +1816,8 @@ async fn acquire_config_lock(client: &PanosClient, operation_id: &str) -> Result
     Ok(())
 }
 
-async fn release_config_lock(client: &PanosClient) {
-    let result = client
+async fn release_config_lock(client: &PanosClient) -> Result<()> {
+    client
         .post_fields(
             vec![
                 ("type", "op".to_owned()),
@@ -1794,8 +1828,12 @@ async fn release_config_lock(client: &PanosClient) {
             ],
             CancellationToken::new(),
         )
-        .await;
-    if let Err(error) = result {
+        .await?;
+    Ok(())
+}
+
+async fn release_config_lock_best_effort(client: &PanosClient) {
+    if let Err(error) = release_config_lock(client).await {
         tracing::error!(target: AUDIT_TARGET, device = client.device_name(), %error, "PAN-OS configuration lock release failed");
     }
 }

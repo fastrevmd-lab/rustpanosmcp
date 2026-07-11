@@ -45,7 +45,9 @@ Recommended sequence: fix and test lock-state reconciliation, establish
 default TLS trust, rerun the full main CI and the reversible lab
 apply/validate/diff/commit/discard smoke test, then tag and deploy v0.2.1.
 After the patch release, begin v0.3 discovery with Panorama device groups and
-commit-all, followed by multi-vsys and HA-aware workflows.
+commit-all, followed by multi-vsys and HA-aware workflows. The discovery
+questions and boundaries are recorded in
+[`docs/V0.3_PANORAMA_DISCOVERY.md`](docs/V0.3_PANORAMA_DISCOVERY.md).
 
 ## 2. Initial scope
 
