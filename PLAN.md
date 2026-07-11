@@ -1,7 +1,7 @@
 # rust-panosmcp project plan
 
-Status: v0.2.1 release candidate accepted and deployed to the PAN-OS 12.1.5
-lab; all release gates complete, 2026-07-11
+Status: v0.2.2 dependency-maintenance release preparation; v0.2.1 remains
+accepted and deployed to the PAN-OS 12.1.5 lab, 2026-07-11
 
 ## 1. Outcome
 
@@ -44,12 +44,20 @@ Keep v0.2.1 limited to the two findings from the v0.2.0 lab rollout:
 Completed sequence: fixed and tested lock-state reconciliation, established
 default TLS trust, reran the full main CI and the reversible lab
 apply/validate/diff/commit/discard smoke test, and rotated the least-privilege
-Cloudflare DNS-01 credential. Tag and release publication are the remaining
-administrative steps for v0.2.1.
+Cloudflare DNS-01 credential. The v0.2.1 tag and release were published after
+all release gates passed, and the accepted build was deployed to the lab.
 After the patch release, begin v0.3 discovery with Panorama device groups and
 commit-all, followed by multi-vsys and HA-aware workflows. The discovery
 questions and boundaries are recorded in
 [`docs/V0.3_PANORAMA_DISCOVERY.md`](docs/V0.3_PANORAMA_DISCOVERY.md).
+
+## v0.2.2 dependency-maintenance docket
+
+v0.2.2 packages the dependency and CI maintenance merged after v0.2.1. It
+does not change PAN-OS tools, authorization, inventory, mutation state, or
+permitted XPath roots. The multi-vsys and HA project is paused until a licensed
+multi-vsys lab resource and a second HA peer are available; Panorama remains
+deferred.
 
 ## 2. Initial scope
 
