@@ -1,7 +1,7 @@
 # rust-panosmcp project plan
 
-Status: v0.2.2 dependency-maintenance release preparation; v0.2.1 remains
-accepted and deployed to the PAN-OS 12.1.5 lab, 2026-07-11
+Status: v0.2.2 dependency-maintenance release accepted, published, and deployed
+to the PAN-OS 12.1.5 lab, 2026-07-11
 
 ## 1. Outcome
 
@@ -58,6 +58,11 @@ does not change PAN-OS tools, authorization, inventory, mutation state, or
 permitted XPath roots. The multi-vsys and HA project is paused until a licensed
 multi-vsys lab resource and a second HA peer are available; Panorama remains
 deferred.
+
+The release tag, artifacts, multi-platform image, guarded the lab LXC rollout,
+trusted TLS, reader MCP calls, rollback assets, and ending zero-operation and
+zero-lock state are accepted in
+[`docs/V0.2.2_ACCEPTANCE.md`](docs/V0.2.2_ACCEPTANCE.md).
 
 ## 2. Initial scope
 

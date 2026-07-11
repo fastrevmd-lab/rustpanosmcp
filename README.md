@@ -50,7 +50,9 @@ evidence in [docs/V0.2.1_ACCEPTANCE.md](docs/V0.2.1_ACCEPTANCE.md).
 
 v0.2.2 updates the maintained Rust dependency graph and GitHub Actions while
 preserving the v0.2.1 PAN-OS tool, authorization, inventory, and mutation-state
-interfaces. Multi-vsys, HA, and Panorama work remains deferred.
+interfaces. The published release and guarded lab rollout evidence is in
+[docs/V0.2.2_ACCEPTANCE.md](docs/V0.2.2_ACCEPTANCE.md). Multi-vsys, HA, and
+Panorama work remains deferred.
 
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
