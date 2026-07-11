@@ -1,6 +1,6 @@
 services:
   rust-panosmcp:
-    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.2.1
+    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.2.2
     user: "65532:65532"
     read_only: true
     cap_drop: ["ALL"]
