@@ -1,7 +1,7 @@
 # rust-panosmcp
 
 Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository contains the v0.2 development change set: a
+firewalls. The repository contains the released v0.2.0 change set: a
 bearer-protected server with a guarded PAN-OS candidate configuration
 lifecycle and hardened release packaging.
 
