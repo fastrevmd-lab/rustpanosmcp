@@ -1,7 +1,7 @@
 # rust-panosmcp project plan
 
-Status: v0.2.0 released and deployed to the PAN-OS 12.1.5 lab;
-v0.2.1 maintenance follow-ups open, 2026-07-10
+Status: v0.2.1 release candidate accepted and deployed to the PAN-OS 12.1.5
+lab; all release gates complete, 2026-07-11
 
 ## 1. Outcome
 
@@ -25,14 +25,14 @@ environment token, or synchronous request handling.
 
 Keep v0.2.1 limited to the two findings from the v0.2.0 lab rollout:
 
-- [ ] Replace the local-CA certificate at
+- [x] Replace the local-CA certificate at
   `https://rust-panosmcp.mechub.org:30031` with a certificate chain trusted by
   default client and system trust stores. Prefer ACME/public trust when the
   endpoint is eligible; otherwise formally distribute the private CA through
   each host's trust store. Acceptance: hostname, SAN, chain, and expiry
   verification pass from Codex, Claude Code, `curl`, and service health checks
   without `--insecure` or an ad hoc per-call CA argument.
-- [ ] Make persisted `config_lock_held` state reflect the confirmed result of
+- [x] Make persisted `config_lock_held` state reflect the confirmed result of
   PAN-OS lock release. Today, a successful discard releases the real lock but
   leaves `config_lock_held: true`, while the shared release helper logs and
   suppresses release failures. Return a typed result from lock release and
@@ -41,9 +41,11 @@ Keep v0.2.1 limited to the two findings from the v0.2.0 lab rollout:
   recovery state and do not report a false unlock; state-file restart tests
   preserve the correct result.
 
-Recommended sequence: fix and test lock-state reconciliation, establish
-default TLS trust, rerun the full main CI and the reversible lab
-apply/validate/diff/commit/discard smoke test, then tag and deploy v0.2.1.
+Completed sequence: fixed and tested lock-state reconciliation, established
+default TLS trust, reran the full main CI and the reversible lab
+apply/validate/diff/commit/discard smoke test, and rotated the least-privilege
+Cloudflare DNS-01 credential. Tag and release publication are the remaining
+administrative steps for v0.2.1.
 After the patch release, begin v0.3 discovery with Panorama device groups and
 commit-all, followed by multi-vsys and HA-aware workflows. The discovery
 questions and boundaries are recorded in
