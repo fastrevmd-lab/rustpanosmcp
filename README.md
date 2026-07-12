@@ -1,9 +1,18 @@
-# rust-panosmcp
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mechub-mark.svg">
+    <img src="docs/assets/mechub-mark-light.svg" width="72" alt="mechub mark">
+  </picture>
+</p>
 
-Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS
-firewalls. The repository contains the v0.2.2 dependency-maintenance release:
-a bearer-protected server with a guarded PAN-OS candidate configuration
-lifecycle and hardened release packaging.
+<h1 align="center">rust-panosmcp</h1>
+
+<p align="center"><strong>Async Rust Model Context Protocol server for Palo Alto Networks PAN-OS firewalls</strong><br>
+<em>a mechub project — sovereign network-security automation</em></p>
+
+> **Unofficial / community project.** This is an independent community project and does not claim affiliation with or endorsement by Palo Alto Networks. Product names and trademarks are used only to identify the systems with which the software interoperates.
+
+The repository contains the v0.2.2 dependency-maintenance release: a bearer-protected server with a guarded PAN-OS candidate configuration lifecycle and hardened release packaging.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -137,8 +146,13 @@ compile it twice and require byte identity with
 `scripts/verify-reproducible-build.sh`. Container/systemd installation is
 documented in the operator runbook.
 
-## Project stance
+---
 
-This is an independent community project and does not claim affiliation with
-or endorsement by Palo Alto Networks. Product names and trademarks are used
-only to identify the systems with which the software interoperates.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mechub-mark.svg">
+    <img src="docs/assets/mechub-mark-light.svg" width="28" alt="">
+  </picture><br>
+  <sub><code>a mechub project</code> · deterministic decides · the model explains · a human approves<br>
+  <a href="https://github.com/fastrevmd-lab">github.com/fastrevmd-lab</a></sub>
+</p>
