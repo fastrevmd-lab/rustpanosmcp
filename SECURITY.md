@@ -11,7 +11,7 @@ active.
 Do not open a public issue for a suspected vulnerability. Use GitHub's private
 security-advisory form for this repository:
 
-https://github.com/fastrevmd-lab/rust-panosmcp/security/advisories/new
+https://github.com/fastrevmd-lab/rustpanosmcp/security/advisories/new
 
 Include the affected commit/version, deployment mode, reproduction steps,
 impact, and whether any bearer token or PAN-OS API key may have been exposed.
