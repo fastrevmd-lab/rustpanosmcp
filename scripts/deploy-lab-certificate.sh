@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-VMID="${RUST_PANOSMCP_LAB_VMID:?vmid}"
-LINEAGE="${RENEWED_LINEAGE:-/etc/letsencrypt/live/rust-panosmcp.mechub.org}"
+VMID="${RUST_PANOSMCP_LAB_VMID:?set RUST_PANOSMCP_LAB_VMID to the target LXC vmid}"
+CERT_HOST="${RUST_PANOSMCP_CERT_HOST:?set RUST_PANOSMCP_CERT_HOST to the listener hostname}"
+LINEAGE="${RENEWED_LINEAGE:-/etc/letsencrypt/live/$CERT_HOST}"
 CERT_DEST=/etc/rust-panosmcp/server.crt
 KEY_DEST=/etc/rust-panosmcp/server.key
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -19,7 +20,7 @@ pct push "$VMID" "$LINEAGE/privkey.pem" "$KEY_DEST.new" \
 
 pct exec "$VMID" -- openssl verify -untrusted "$CERT_DEST.new" "$CERT_DEST.new"
 pct exec "$VMID" -- openssl x509 -in "$CERT_DEST.new" \
-    -checkhost rust-panosmcp.mechub.org -noout
+    -checkhost "$CERT_HOST" -noout
 
 CERT_KEY=$(
     pct exec "$VMID" -- sh -c \

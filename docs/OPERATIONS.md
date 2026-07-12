@@ -87,7 +87,7 @@ bounded tasks/file descriptors.
 When the listener hostname resolves only on private DNS, use ACME DNS-01 rather
 than HTTP-01. Keep the DNS provider credential off the application host when
 possible. In the lab, certbot and its mode-0600 Cloudflare credential live on
-`the Proxmox host`; the deploy hook `scripts/deploy-lab-certificate.sh` validates the
+the Proxmox host; the deploy hook `scripts/deploy-lab-certificate.sh` validates the
 chain, hostname, and key pair before using `pct push` to atomically replace the
 certificate on the lab LXC. A failed service restart restores the previous pair.
 
@@ -95,6 +95,8 @@ Test issuance and deployment separately:
 
 ```bash
 certbot renew --dry-run
+RUST_PANOSMCP_LAB_VMID=<vmid> \
+RUST_PANOSMCP_CERT_HOST=rust-panosmcp.mechub.org \
 RENEWED_LINEAGE=/etc/letsencrypt/live/rust-panosmcp.mechub.org \
   /etc/letsencrypt/renewal-hooks/deploy/rust-panosmcp-lxc
 curl --fail-with-body https://rust-panosmcp.mechub.org:30031/mcp

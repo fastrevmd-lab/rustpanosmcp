@@ -59,7 +59,7 @@ permitted XPath roots. The multi-vsys and HA project is paused until a licensed
 multi-vsys lab resource and a second HA peer are available; Panorama remains
 deferred.
 
-The release tag, artifacts, multi-platform image, guarded the lab LXC rollout,
+The release tag, artifacts, multi-platform image, guarded lab-LXC rollout,
 trusted TLS, reader MCP calls, rollback assets, and ending zero-operation and
 zero-lock state are accepted in
 [`docs/V0.2.2_ACCEPTANCE.md`](docs/V0.2.2_ACCEPTANCE.md).
