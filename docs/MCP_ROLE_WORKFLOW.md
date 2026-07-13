@@ -129,9 +129,15 @@ Ordered action 1:
 - XPath: /config/...
 - element: <entry name="example-address"><ip-netmask>192.0.2.10/32</ip-netmask><description>Documentation example</description></entry>
 
-Show the exact ordered action and explain whether it is within the available
-writer scope. Stop without changing server or PAN-OS state.
+Reproduce the exact ordered action. Check the XML and XPath for structural
+correctness and alignment with the authorized change request. State that
+server authorization is not yet verified. Stop without changing server or
+PAN-OS state.
 ```
+
+No read-only tool exposes the token mutation grant or inventory mutation roots;
+creation-time policy enforcement by `create_panos_change_set` is authoritative.
+An operator must not infer or broaden scope to bypass a refusal.
 
 `192.0.2.10/32` is an IANA documentation address, not a production value.
 
@@ -296,7 +302,8 @@ configuration in the change record.
 |---|---|---|
 | HTTP 401 | Bearer credential is missing, malformed, invalid, revoked, or expired | Reissue or rotate the correct least-privilege identity and reload the service; never paste the bearer value into a prompt or ticket |
 | HTTP 403 | The authenticated identity lacks the exact tool or device scope | Confirm the selected reader/writer/reviewer connection and requested inventory name; do not broaden scope merely to bypass the refusal |
-| Candidate fingerprint refusal | Candidate state changed after it was observed or after the operation staged | Inspect candidate state and create a new fingerprint-bound plan; do not reuse stale identifiers |
+| Pre-apply fingerprint refusal | Candidate state changed before an operation was created | Inspect current candidate state, obtain a fresh fingerprint, and create and independently approve a new plan; do not reuse stale identifiers |
+| Post-apply operation fingerprint refusal | Candidate state differs from the fingerprint recorded after staging/apply | Stop new plans and retries; inspect the existing operation, candidate changes, administrator attribution, PAN-OS jobs, and lock state; reconcile or discard the existing operation only when eligible, and do not create/apply another plan until it is terminal and its lock state is resolved |
 | Approval expired | The 15-minute plan approval window elapsed | Create a new plan and repeat independent review and approval |
 | Detached commit | Commit reconciliation continues after the caller disconnected or cancelled | Poll `get_panos_operation` with the original writer identity |
 | Indeterminate operation | The server cannot prove a terminal PAN-OS outcome | Stop retries and follow manual PAN-OS job, candidate, attribution, and lock reconciliation procedures |
