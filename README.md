@@ -72,7 +72,9 @@ Phase 2 acceptance evidence is recorded in
 acceptance is in [docs/PHASE3_ACCEPTANCE.md](docs/PHASE3_ACCEPTANCE.md), with
 operator requirements in [docs/PHASE3_OPERATIONS.md](docs/PHASE3_OPERATIONS.md).
 Phase 4 release evidence is in
-[docs/PHASE4_ACCEPTANCE.md](docs/PHASE4_ACCEPTANCE.md). Production deployment,
+[docs/PHASE4_ACCEPTANCE.md](docs/PHASE4_ACCEPTANCE.md). The role-separated
+reader, writer, and reviewer workflow is in
+[docs/MCP_ROLE_WORKFLOW.md](docs/MCP_ROLE_WORKFLOW.md). Production deployment,
 rotation, backup/recovery, and upgrades are covered by
 [docs/OPERATIONS.md](docs/OPERATIONS.md); see also
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md),
