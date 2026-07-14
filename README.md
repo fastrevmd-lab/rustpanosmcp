@@ -322,7 +322,7 @@ documented in the operator runbook.
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+Licensed under [MIT](LICENSE).
 
 ---
 
