@@ -152,6 +152,49 @@ impl Inventory {
         Self::load_with_environment(path, &ProcessEnvironment)
     }
 
+    /// Device names only, without resolving any credential.
+    ///
+    /// The token subcommands validate scope references against the inventory but
+    /// never contact a device, so requiring every API key to be present in the
+    /// environment just to mint a token blocks setup before credentials exist.
+    pub fn device_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
+        let path = path.as_ref();
+        let bytes = read_validated_file(path, FilePurpose::Inventory)?;
+        let parsed: InventoryFile = serde_json::from_slice(&bytes).map_err(|error| {
+            PanosMcpError::Inventory(format!("invalid JSON in '{}': {error}", path.display()))
+        })?;
+        if parsed.version != INVENTORY_VERSION {
+            return Err(PanosMcpError::Inventory(format!(
+                "unsupported inventory version {}; expected {INVENTORY_VERSION}",
+                parsed.version
+            )));
+        }
+        if parsed.devices.is_empty() {
+            return Err(PanosMcpError::Inventory(
+                "inventory must contain at least one device".to_owned(),
+            ));
+        }
+        if parsed.devices.len() > MAX_DEVICES {
+            return Err(PanosMcpError::Inventory(format!(
+                "inventory contains more than {MAX_DEVICES} devices"
+            )));
+        }
+
+        let mut names = Vec::with_capacity(parsed.devices.len());
+        let mut seen = BTreeSet::new();
+        for raw in parsed.devices {
+            validate_identifier("device name", &raw.name, MAX_DEVICE_NAME_BYTES)?;
+            if !seen.insert(raw.name.clone()) {
+                return Err(PanosMcpError::Inventory(format!(
+                    "duplicate device name '{}'",
+                    raw.name
+                )));
+            }
+            names.push(raw.name);
+        }
+        Ok(names)
+    }
+
     /// Load an inventory with an injectable environment resolver.
     pub fn load_with_environment(
         path: impl AsRef<Path>,
@@ -867,5 +910,52 @@ mod tests {
         let digest = parse_sha256(&format!("sha256:{}", "a5".repeat(32))).expect("fingerprint");
         assert!(digest.iter().all(|byte| *byte == 0xa5));
         assert!(parse_sha256("short").is_err());
+    }
+
+    #[test]
+    fn device_names_succeeds_without_credentials() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_inventory(
+            directory.path(),
+            r#"{
+                "version": 1,
+                "devices": [
+                    {"name": "fw-one", "endpoint": "https://one.test", "api_key": {"type": "env", "name": "MISSING_KEY_ONE"}},
+                    {"name": "fw-two", "endpoint": "https://two.test", "api_key": {"type": "env", "name": "MISSING_KEY_TWO"}}
+                ]
+            }"#,
+        );
+
+        let names = Inventory::device_names(&path).expect("device names without credentials");
+        assert_eq!(names, vec!["fw-one", "fw-two"]);
+
+        let error = Inventory::load_with_environment(&path, &TestEnvironment::default())
+            .expect_err("full load must fail without credentials");
+        assert!(error.to_string().contains("MISSING_KEY_ONE"));
+    }
+
+    #[test]
+    fn device_names_rejects_bad_version() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_inventory(
+            directory.path(),
+            r#"{"version": 999, "devices": [{"name": "fw", "endpoint": "https://fw.test", "api_key": {"type": "env", "name": "KEY"}}]}"#,
+        );
+        let error = Inventory::device_names(&path).expect_err("bad version rejected");
+        assert!(error.to_string().contains("unsupported inventory version"));
+    }
+
+    #[test]
+    fn device_names_rejects_duplicate_names() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_inventory(
+            directory.path(),
+            r#"{"version": 1, "devices": [
+                {"name": "fw", "endpoint": "https://one.test", "api_key": {"type": "env", "name": "KEY"}},
+                {"name": "fw", "endpoint": "https://two.test", "api_key": {"type": "env", "name": "KEY"}}
+            ]}"#,
+        );
+        let error = Inventory::device_names(&path).expect_err("duplicate names rejected");
+        assert!(error.to_string().contains("duplicate device name"));
     }
 }

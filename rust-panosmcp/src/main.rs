@@ -20,12 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = cli.command {
         match command {
             Command::Token { action } => {
-                let inventory = Inventory::load(&cli.device_mapping)?;
-                let known_devices = inventory
-                    .metadata()
-                    .into_iter()
-                    .map(|device| device.name)
-                    .collect::<Vec<_>>();
+                let known_devices = Inventory::device_names(&cli.device_mapping)?;
                 token_cmd::run(action, &known_devices)?;
             }
             Command::State {
