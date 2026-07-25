@@ -71,6 +71,35 @@ sudo systemctl enable --now rust-panosmcp
 
 This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-panosmcp` (config, root-owned) and `/var/lib/rust-panosmcp` (state). The extracted archive includes configuration examples in `config/` — use `devices.example.json` and `tokens.example.json` as starting templates under `/etc/rust-panosmcp` before starting. See [packaging/systemd/](packaging/systemd/) for unit details.
 
+#### LXC (Debian 13)
+
+For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspawn, the release tarball includes an idempotent installer that automates the manual sequence above.
+
+```bash
+# Download and verify
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+# Extract and run the installer
+tar xzf rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.3.0
+sudo packaging/lxc/install.sh
+
+# Configure the inventory and mint the first token
+sudo vi /etc/rust-panosmcp/devices.json
+sudo rust-panosmcp token add \
+  --tokens-file /etc/rust-panosmcp/tokens.json \
+  --name initial-token \
+  --devices fw-example \
+  --tools list_devices,gather_device_facts,execute_panos_op,get_panos_config
+
+# Start the service
+sudo systemctl enable --now rust-panosmcp.service
+```
+
+The installer creates the `rust-panosmcp` user and directories via `systemd-sysusers` and `systemd-tmpfiles`, installs the binary and unit, creates an empty `tokens.json` with mode 0600, and never overwrites `/var/lib/rust-panosmcp/mutation-state.json` if it exists (change-set audit trail). The endpoint listens on `http://127.0.0.1:30031/mcp` by default. See `packaging/lxc/install.sh` for environment-variable overrides and upgrade behavior.
+
 #### Docker / GHCR
 
 Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline.
