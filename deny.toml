@@ -24,3 +24,5 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Shared auth core, consumed by tag. First-party, same org as this repo.
+allow-git = ["https://github.com/fastrevmd-lab/mecmcp"]
