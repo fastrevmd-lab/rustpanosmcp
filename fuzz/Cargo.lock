@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-auth"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "mecmcp-auth",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "fastrand",
  "futures-util",

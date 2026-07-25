@@ -12,7 +12,7 @@
 
 > **Unofficial / community project.** This is an independent community project and does not claim affiliation with or endorsement by Palo Alto Networks. Product names and trademarks are used only to identify the systems with which the software interoperates.
 
-The repository contains the v0.2.2 dependency-maintenance release: a bearer-protected server with a guarded PAN-OS candidate configuration lifecycle and hardened release packaging.
+The repository contains the v0.3.0 release: a bearer-protected server with a guarded PAN-OS candidate configuration lifecycle and hardened release packaging, with authentication provided by the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -44,20 +44,20 @@ Choose one of three install paths:
 
 #### Release tarball (Linux x86_64)
 
-Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
+Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.2.2/rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.2.2/rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract
-tar xzf rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz
-cd rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu
+tar xzf rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.3.0
 
 # Install the binary and systemd assets
-sudo install -m 0755 rust-panosmcp /usr/local/bin/rust-panosmcp
+sudo install -m 0755 bin/rust-panosmcp /usr/local/bin/rust-panosmcp
 sudo install -m 0644 packaging/systemd/rust-panosmcp.sysusers /usr/lib/sysusers.d/rust-panosmcp.conf
 sudo install -m 0644 packaging/systemd/rust-panosmcp.tmpfiles /usr/lib/tmpfiles.d/rust-panosmcp.conf
 sudo install -m 0644 packaging/systemd/rust-panosmcp.service /etc/systemd/system/rust-panosmcp.service
@@ -181,6 +181,16 @@ preserving the v0.2.1 PAN-OS tool, authorization, inventory, and mutation-state
 interfaces. The published release and guarded lab rollout evidence is in
 [docs/V0.2.2_ACCEPTANCE.md](docs/V0.2.2_ACCEPTANCE.md). Multi-vsys, HA, and
 Panorama work remains deferred.
+
+v0.3.0 moves authentication onto the shared
+[`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate, retiring this
+repository's own token, store, and token-file implementations in favour of one
+shared, separately tested crate. The PAN-OS tool surface, authorization scopes,
+inventory, and mutation-state interfaces are unchanged. Two operator-visible
+changes: `tokens.json` must be mode 0600 or the server refuses to start, and the
+on-disk envelope version is now preserved on write so a file this release touches
+stays readable by the previous one. See [CHANGELOG.md](CHANGELOG.md) for the
+upgrade steps.
 
 The full HTTPS mock, MCP end-to-end, and explicitly configured `panosvm` lab
 firewall acceptance suites pass. Phase 1 is complete; the reproducible evidence
