@@ -1,10 +1,8 @@
 //! Digest-only token-store command implementation.
 
 use crate::cli::TokenAction;
-use chrono::{DateTime, Utc};
 use rust_panosmcp_auth::{
-    MutationAction, MutationGrant, ScopeSet, TokenEntry, TokenSecret, TokenStoreFile,
-    TokenStoreFileError, write_atomic,
+    KnownNames, MutationAction, MutationGrant, ScopeSet, TokenStoreFile, TokenStoreFileError,
 };
 use std::io::Write;
 
@@ -28,7 +26,12 @@ pub enum TokenCommandError {
 }
 
 /// Execute one token management command.
-pub fn run(action: TokenAction, _known_devices: &[String]) -> Result<(), TokenCommandError> {
+pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCommandError> {
+    let known = KnownNames {
+        devices: known_devices,
+        tools: rust_panosmcp_auth::KNOWN_TOOLS,
+    };
+
     match action {
         TokenAction::Add {
             tokens_file,
@@ -45,37 +48,15 @@ pub fn run(action: TokenAction, _known_devices: &[String]) -> Result<(), TokenCo
             let tools = parse_scope(tools, "tools")?;
             let mutation = parse_mutation_grant(mutation_roots, mutation_actions)?;
             let expires_at = resolve_expiry(expires_at_unix, expires_in_secs)?;
-
-            // Load existing tokens or create empty list
-            let mut entries = TokenStoreFile::load(&tokens_file)
-                .map(|file| file.store().entries().to_vec())
-                .unwrap_or_default();
-
-            // Check for duplicate name
-            if entries.iter().any(|e| e.name == name) {
-                return Err(TokenCommandError::Scope {
-                    field: "name",
-                    message: format!("token '{name}' already exists"),
-                });
-            }
-
-            // Mint new token
-            let (secret, digest) = TokenSecret::mint().map_err(|e| TokenCommandError::Scope {
-                field: "token",
-                message: format!("failed to generate token: {e}"),
-            })?;
-
-            entries.push(TokenEntry {
-                name,
-                digest,
+            let secret = TokenStoreFile::add_with_options(
+                &tokens_file,
+                &name,
                 devices,
                 tools,
-                created_at: Utc::now(),
                 expires_at,
-                grant: mutation,
-            });
-
-            write_atomic(&tokens_file, &entries)?;
+                mutation,
+                &known,
+            )?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
         }
@@ -121,17 +102,12 @@ pub fn run(action: TokenAction, _known_devices: &[String]) -> Result<(), TokenCo
             name,
             server_pid,
         } => {
-            let file = TokenStoreFile::load(&tokens_file)?;
-            let mut entries = file.store().entries().to_vec();
-            let initial_len = entries.len();
-            entries.retain(|e| e.name != name);
-
-            if entries.len() == initial_len {
-                eprintln!("token '{name}' did not exist");
-            } else {
-                write_atomic(&tokens_file, &entries)?;
+            let removed = TokenStoreFile::revoke(&tokens_file, &name, &known)?;
+            if removed {
                 eprintln!("revoked '{name}'");
                 signal_reload(server_pid)?;
+            } else {
+                eprintln!("token '{name}' did not exist");
             }
         }
         TokenAction::Rotate {
@@ -139,25 +115,7 @@ pub fn run(action: TokenAction, _known_devices: &[String]) -> Result<(), TokenCo
             name,
             server_pid,
         } => {
-            let file = TokenStoreFile::load(&tokens_file)?;
-            let mut entries = file.store().entries().to_vec();
-
-            let entry = entries.iter_mut().find(|e| e.name == name).ok_or_else(|| {
-                TokenCommandError::Scope {
-                    field: "name",
-                    message: format!("token '{name}' not found"),
-                }
-            })?;
-
-            // Mint new secret and update digest
-            let (secret, digest) = TokenSecret::mint().map_err(|e| TokenCommandError::Scope {
-                field: "token",
-                message: format!("failed to generate token: {e}"),
-            })?;
-            entry.digest = digest;
-            entry.created_at = Utc::now();
-
-            write_atomic(&tokens_file, &entries)?;
+            let secret = TokenStoreFile::rotate(&tokens_file, &name, &known)?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
         }
@@ -198,7 +156,7 @@ fn parse_mutation_grant(
 fn resolve_expiry(
     absolute: Option<u64>,
     lifetime: Option<u64>,
-) -> Result<Option<DateTime<Utc>>, TokenCommandError> {
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, TokenCommandError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| TokenCommandError::Scope {
@@ -221,7 +179,7 @@ fn resolve_expiry(
             message: "token expiry must be in the future".to_owned(),
         });
     }
-    Ok(expiry_unix.and_then(|ts| DateTime::from_timestamp(ts as i64, 0)))
+    Ok(expiry_unix.and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0)))
 }
 
 fn parse_scope(values: Vec<String>, field: &'static str) -> Result<ScopeSet, TokenCommandError> {

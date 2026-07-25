@@ -1066,8 +1066,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.1.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=auth-v0.1.0#420e6d994e9e73a14a6aae4b3aa1f4a905240356"
+version = "0.1.1"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=auth-v0.1.1#93024106712ccd52ce213a419950a2dcf089c5e0"
 dependencies = [
  "arc-swap",
  "chrono",

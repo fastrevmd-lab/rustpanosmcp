@@ -13,7 +13,7 @@ pub use secret::SecretString;
 pub use mecmcp_auth::{
     CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError,
     TokenDigest, TokenEntry as SharedTokenEntry, TokenError, TokenSecret, TokenStore as SharedStore,
-    TokenStoreFile as SharedFile, write_atomic,
+    TokenStoreFile as SharedFile, file::KnownNames, write_atomic,
 };
 
 /// PAN-OS token entry: the shared entry specialised to the PAN-OS grant.
