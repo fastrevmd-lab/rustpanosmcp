@@ -2,10 +2,9 @@
 
 use crate::cli::TokenAction;
 use rust_panosmcp_auth::{
-    MutationAction, MutationGrant, ScopeSet, TokenStoreFile, TokenStoreFileError,
+    KnownNames, MutationAction, MutationGrant, ScopeSet, TokenStoreFile, TokenStoreFileError,
 };
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Token command failure.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +27,11 @@ pub enum TokenCommandError {
 
 /// Execute one token management command.
 pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCommandError> {
+    let known = KnownNames {
+        devices: known_devices,
+        tools: rust_panosmcp_auth::KNOWN_TOOLS,
+    };
+
     match action {
         TokenAction::Add {
             tokens_file,
@@ -43,28 +47,28 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             let devices = parse_scope(devices, "devices")?;
             let tools = parse_scope(tools, "tools")?;
             let mutation = parse_mutation_grant(mutation_roots, mutation_actions)?;
-            let expires_at_unix = resolve_expiry(expires_at_unix, expires_in_secs)?;
+            let expires_at = resolve_expiry(expires_at_unix, expires_in_secs)?;
             let secret = TokenStoreFile::add_with_options(
                 &tokens_file,
                 &name,
                 devices,
                 tools,
-                expires_at_unix,
+                expires_at,
                 mutation,
-                known_devices,
+                &known,
             )?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
         }
         TokenAction::List { tokens_file } => {
-            let store = TokenStoreFile::load(&tokens_file, known_devices)?;
+            let file = TokenStoreFile::load(&tokens_file)?;
             let mut output = std::io::stdout().lock();
             writeln!(
                 output,
                 "NAME\tDEVICES\tTOOLS\tMUTATION\tCREATED_UNIX\tEXPIRES_UNIX"
             )?;
-            for entry in store.entries() {
-                let mutation = entry.mutation.as_ref().map_or_else(
+            for entry in file.store().entries() {
+                let mutation = entry.grant.as_ref().map_or_else(
                     || "-".to_owned(),
                     |grant| {
                         let actions = grant
@@ -86,10 +90,10 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
                     entry.devices.summary(),
                     entry.tools.summary(),
                     mutation,
-                    entry.created_at_unix,
+                    entry.created_at.timestamp(),
                     entry
-                        .expires_at_unix
-                        .map_or_else(|| "-".to_owned(), |value| value.to_string())
+                        .expires_at
+                        .map_or_else(|| "-".to_owned(), |value| value.timestamp().to_string())
                 )?;
             }
         }
@@ -98,7 +102,7 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             name,
             server_pid,
         } => {
-            let removed = TokenStoreFile::revoke(&tokens_file, &name, known_devices)?;
+            let removed = TokenStoreFile::revoke(&tokens_file, &name, &known)?;
             if removed {
                 eprintln!("revoked '{name}'");
                 signal_reload(server_pid)?;
@@ -111,7 +115,7 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             name,
             server_pid,
         } => {
-            let secret = TokenStoreFile::rotate(&tokens_file, &name, known_devices)?;
+            let secret = TokenStoreFile::rotate(&tokens_file, &name, &known)?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
         }
@@ -152,15 +156,15 @@ fn parse_mutation_grant(
 fn resolve_expiry(
     absolute: Option<u64>,
     lifetime: Option<u64>,
-) -> Result<Option<u64>, TokenCommandError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, TokenCommandError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| TokenCommandError::Scope {
             field: "expiry",
             message: "system clock is before Unix epoch".to_owned(),
         })?
         .as_secs();
-    let expiry = match (absolute, lifetime) {
+    let expiry_unix = match (absolute, lifetime) {
         (Some(value), None) => Some(value),
         (None, Some(value)) => Some(now.checked_add(value).ok_or(TokenCommandError::Scope {
             field: "expiry",
@@ -169,13 +173,13 @@ fn resolve_expiry(
         (None, None) => None,
         (Some(_), Some(_)) => unreachable!("clap rejects conflicting expiry options"),
     };
-    if expiry.is_some_and(|value| value <= now) {
+    if expiry_unix.is_some_and(|value| value <= now) {
         return Err(TokenCommandError::Scope {
             field: "expiry",
             message: "token expiry must be in the future".to_owned(),
         });
     }
-    Ok(expiry)
+    Ok(expiry_unix.and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0)))
 }
 
 fn parse_scope(values: Vec<String>, field: &'static str) -> Result<ScopeSet, TokenCommandError> {

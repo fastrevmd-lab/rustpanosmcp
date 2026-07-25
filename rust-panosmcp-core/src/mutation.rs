@@ -8,7 +8,7 @@ use crate::{
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
 use quick_xml::escape::escape;
-use rust_panosmcp_auth::{MutationAction, MutationGrant};
+use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

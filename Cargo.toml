@@ -19,12 +19,13 @@ authors = ["fastrevmd-lab"]
 arc-swap = "1"
 axum = "0.8"
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
-base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
 futures-util = "0.3"
 getrandom = "0.4"
 http = "1"
+mecmcp-auth = { git = "https://github.com/fastrevmd-lab/mecmcp", tag = "auth-v0.1.1", version = "0.1.1" }
 quick-xml = "0.41"
 reqwest = { version = "0.13", default-features = false, features = ["form", "rustls-no-provider", "stream"] }
 rmcp = { version = "2", default-features = false }

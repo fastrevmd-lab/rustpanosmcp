@@ -314,7 +314,10 @@ fn tool_call_exceeds_scope(value: &Value, caller: &CallerContext) -> bool {
     let Some(tool) = params.get("name").and_then(Value::as_str) else {
         return false;
     };
-    if !caller.tools.allows_tool(tool) {
+    if !caller
+        .tools
+        .allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS)
+    {
         return true;
     }
     params
@@ -395,7 +398,7 @@ mod tests {
             token_name: "test".to_owned(),
             tools,
             devices,
-            mutation: None,
+            grant: None,
         }
     }
 
@@ -435,14 +438,14 @@ mod tests {
 
     #[test]
     fn token_store_fixture_authenticates_without_exposing_digest() {
-        let store = TokenStore::new(vec![TokenEntry {
+        let store = TokenStore::try_new(vec![TokenEntry {
             name: "test".to_owned(),
             digest: TokenDigest::from_secret("secret"),
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
-            created_at_unix: 1,
-            expires_at_unix: None,
-            mutation: None,
+            created_at: chrono::DateTime::from_timestamp(1, 0).expect("timestamp"),
+            expires_at: None,
+            grant: None,
         }])
         .expect("store");
         assert_eq!(

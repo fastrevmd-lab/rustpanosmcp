@@ -12,12 +12,12 @@ fn benchmark_maximum_token_store_lookup() {
             digest: TokenDigest::from_secret(&format!("fixture-secret-{index:04}")),
             devices: ScopeSet::Wildcard,
             tools: ScopeSet::Wildcard,
-            created_at_unix: 1,
-            expires_at_unix: None,
-            mutation: None,
+            created_at: chrono::DateTime::from_timestamp(1, 0).expect("timestamp"),
+            expires_at: None,
+            grant: None,
         })
         .collect();
-    let store = TokenStore::new(entries).expect("maximum supported token store");
+    let store = TokenStore::try_new(entries).expect("maximum supported token store");
 
     let iterations = 10_000_u32;
     let started = Instant::now();
