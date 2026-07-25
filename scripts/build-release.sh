@@ -34,7 +34,7 @@ cargo build "${BUILD_ARGS[@]}"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 PKG="$STAGING/rust-panosmcp-v${VERSION}"
-install -d "$PKG/bin" "$PKG/packaging/systemd" "$PKG/docs"
+install -d "$PKG/bin" "$PKG/packaging/systemd" "$PKG/docs" "$PKG/config"
 install -m 0755 "$TARGET_DIR/release/rust-panosmcp" "$PKG/bin/rust-panosmcp"
 install -m 0644 LICENSE README.md SECURITY.md "$PKG/"
 install -m 0644 docs/OPERATIONS.md docs/COMPATIBILITY.md docs/BENCHMARKS.md \
@@ -42,6 +42,9 @@ install -m 0644 docs/OPERATIONS.md docs/COMPATIBILITY.md docs/BENCHMARKS.md \
 install -m 0644 packaging/systemd/rust-panosmcp.service \
     packaging/systemd/rust-panosmcp.sysusers \
     packaging/systemd/rust-panosmcp.tmpfiles "$PKG/packaging/systemd/"
+install -m 0644 config/devices.example.json \
+    config/devices.mutation.example.json \
+    config/tokens.example.json "$PKG/config/"
 {
     printf 'version=%s\n' "$VERSION"
     printf 'git_commit=%s\n' "$COMMIT"

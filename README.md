@@ -69,7 +69,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now rust-panosmcp
 ```
 
-This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-panosmcp` (config, root-owned) and `/var/lib/rust-panosmcp` (state). Place `devices.json` and `tokens.json` under `/etc/rust-panosmcp` before starting; see [packaging/systemd/](packaging/systemd/) for unit details.
+This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-panosmcp` (config, root-owned) and `/var/lib/rust-panosmcp` (state). The extracted archive includes configuration examples in `config/` — use `devices.example.json` and `tokens.example.json` as starting templates under `/etc/rust-panosmcp` before starting. See [packaging/systemd/](packaging/systemd/) for unit details.
 
 #### Docker / GHCR
 
