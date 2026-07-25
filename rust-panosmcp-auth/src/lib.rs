@@ -1,8 +1,8 @@
 //! PAN-OS authorization vocabulary over the shared mecmcp auth core.
 
 pub mod bearer;
-pub mod secret;
 mod grant;
+pub mod secret;
 
 pub use bearer::{BearerHeaderError, parse_bearer_header};
 pub use grant::{MutationAction, MutationGrant};
@@ -11,8 +11,8 @@ pub use secret::SecretString;
 // Shared core, re-exported so downstream `use rust_panosmcp_auth::…` paths
 // keep working unchanged.
 pub use mecmcp_auth::{
-    CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError,
-    TokenDigest, TokenEntry as SharedTokenEntry, TokenError, TokenSecret, TokenStore as SharedStore,
+    CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError, TokenDigest,
+    TokenEntry as SharedTokenEntry, TokenError, TokenSecret, TokenStore as SharedStore,
     TokenStoreFile as SharedFile, file::KnownNames, write_atomic,
 };
 

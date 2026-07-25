@@ -138,10 +138,7 @@ fn load_snapshot(
         None => PanosService::new_with_state(inventory, state_path)?,
     });
     let tokens = token_path
-        .map(|path| {
-            TokenStoreFile::load(path)
-                .map(|file| file.store())
-        })
+        .map(|path| TokenStoreFile::load(path).map(|file| file.store()))
         .transpose()?;
     Ok(RuntimeSnapshot { service, tokens })
 }
@@ -209,7 +206,10 @@ impl PanosMcpServer {
         device: Option<&str>,
     ) -> Option<CallToolResult> {
         let caller = caller?;
-        if !caller.tools.allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS) {
+        if !caller
+            .tools
+            .allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS)
+        {
             return Some(CallToolResult::error(vec![ContentBlock::text(format!(
                 "token '{}' is not authorized for tool '{tool}'",
                 caller.token_name

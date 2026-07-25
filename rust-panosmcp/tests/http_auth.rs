@@ -53,16 +53,10 @@ fn fixture(devices: ScopeSet, tools: ScopeSet) -> Fixture {
         devices: &["lab-fw".to_owned()],
         tools: rust_panosmcp_auth::KNOWN_TOOLS,
     };
-    let secret = TokenStoreFile::add(
-        &token_path,
-        "reader",
-        devices,
-        tools,
-        &known,
-    )
-    .expect("token add")
-    .expose_secret()
-    .to_owned();
+    let secret = TokenStoreFile::add(&token_path, "reader", devices, tools, &known)
+        .expect("token add")
+        .expose_secret()
+        .to_owned();
     let runtime = RuntimeState::load(&inventory_path, Some(&token_path)).expect("runtime");
     Fixture {
         _directory: directory,
@@ -216,10 +210,7 @@ async fn revoked_token_is_rejected_after_reload() {
         devices: &["lab-fw".to_owned()],
         tools: rust_panosmcp_auth::KNOWN_TOOLS,
     };
-    assert!(
-        TokenStoreFile::revoke(&fixture.token_path, "reader", &known)
-            .expect("revoke")
-    );
+    assert!(TokenStoreFile::revoke(&fixture.token_path, "reader", &known).expect("revoke"));
     fixture.runtime.reload().expect("reload revocation");
     assert_eq!(
         status(&fixture.runtime, options(), post(INITIALIZE, Some(&bearer))).await,

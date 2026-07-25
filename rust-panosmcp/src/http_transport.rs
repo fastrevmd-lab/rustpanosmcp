@@ -314,7 +314,10 @@ fn tool_call_exceeds_scope(value: &Value, caller: &CallerContext) -> bool {
     let Some(tool) = params.get("name").and_then(Value::as_str) else {
         return false;
     };
-    if !caller.tools.allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS) {
+    if !caller
+        .tools
+        .allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS)
+    {
         return true;
     }
     params
