@@ -251,6 +251,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
                     },
                 ],
             },
+            None,
             "writer",
             Some(&grant),
             CancellationToken::new(),
@@ -268,7 +269,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     assert!(
         fixture
             .service
-            .approve_change_set(approval.clone(), "writer")
+            .approve_change_set(approval.clone(), None, "writer")
             .await
             .is_err(),
         "self approval must fail"
@@ -278,14 +279,14 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     assert!(
         fixture
             .service
-            .approve_change_set(wrong, "reviewer")
+            .approve_change_set(wrong, None, "reviewer")
             .await
             .is_err(),
         "digest mismatch must fail"
     );
     let approved = fixture
         .service
-        .approve_change_set(approval, "reviewer")
+        .approve_change_set(approval, None, "reviewer")
         .await
         .expect("independent approval");
     assert_eq!(approved.state, "approved");
@@ -303,6 +304,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
         recovered
             .apply_change_set(
                 apply.clone(),
+                None,
                 "reviewer",
                 Some(&grant),
                 CancellationToken::new(),
@@ -314,11 +316,18 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     let (first_apply, second_apply) = tokio::join!(
         recovered.apply_change_set(
             apply.clone(),
+            None,
             "writer",
             Some(&grant),
             CancellationToken::new(),
         ),
-        recovered.apply_change_set(apply, "writer", Some(&grant), CancellationToken::new(),),
+        recovered.apply_change_set(
+            apply,
+            None,
+            "writer",
+            Some(&grant),
+            CancellationToken::new(),
+        ),
     );
     assert_ne!(
         first_apply.is_ok(),

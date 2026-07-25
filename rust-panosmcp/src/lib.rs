@@ -282,9 +282,10 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .create_change_set(input, principal, grant.as_ref(), cancellation)
+                .create_change_set(input, caller, principal, grant.as_ref(), cancellation)
                 .await,
         )
     }
@@ -311,7 +312,8 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.approve_change_set(input, principal).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(service.approve_change_set(input, caller, principal).await)
     }
 
     /// Inspect the exact persistent plan, approval, expiry, and apply state.
@@ -361,9 +363,10 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .apply_change_set(input, principal, grant.as_ref(), cancellation)
+                .apply_change_set(input, caller, principal, grant.as_ref(), cancellation)
                 .await,
         )
     }
