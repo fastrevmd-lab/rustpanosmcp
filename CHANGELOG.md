@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-25
+
+> **Operators: check your token-file permissions before upgrading.** The server
+> now refuses to start if `tokens.json` is group- or world-readable. Run
+> `chmod 600` on it first; see *Upgrade notes* below.
+
+### Changed
+
+- **Authentication now comes from the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate** (`auth-v0.1.4`), replacing this repo's own `token.rs`, `store.rs`, and `file.rs`. `rust-panosmcp-auth` is now a thin vendor layer holding the PAN-OS write grant (`MutationGrant`) and the tool registry. Roughly 1,200 lines of duplicated authentication code were removed. Token scopes, the change-set lifecycle, and the MCP tool surface are unchanged.
+- A **new** `tokens.json` is written with envelope `version` 1 rather than 2. Both are accepted on read, and prior releases accept either, so this is compatible in both directions.
+
+### Fixed
+
+- **The on-disk envelope `version` is preserved on write.** Between adopting the shared crate and this release, a `tokens.json` written by the server lost its `version` field entirely, which prior releases require — meaning a rollback could not read the file the newer binary had written. The version a file is read with is now the version it is written back with.
+- `token add`, `rotate`, and `revoke` again validate that a token's scopes reference known devices and known tools, and reject duplicate token names. That validation was briefly lost when the lifecycle operations were reimplemented inline.
+
+### Security
+
+- **`tokens.json` must be mode 0600.** A group- or world-readable token file is refused and the server exits rather than starting with credentials exposed. The error names the file, its mode, both uids, and the `chmod 600` remedy.
+- Secret zeroing now uses the `zeroize` crate, and the process uid lookup uses `rustix`, so the authentication crate contains no `unsafe`.
+
+### Upgrade notes
+
+```bash
+# 1. Verify the token file is not group- or world-readable.
+stat -c '%a %U:%G' /var/lib/rust-panosmcp/tokens.json   # expect 600
+chmod 600 /var/lib/rust-panosmcp/tokens.json            # if it is not
+
+# 2. Preserve change-set state across the upgrade — it holds approval records.
+#    /var/lib/rust-panosmcp/mutation-state.json must not be deleted or reset.
+```
+
+No token needs to be reissued and no client needs a new credential.
+
 ## [0.2.2] - 2026-07-11
 
 [Release](https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.2)
