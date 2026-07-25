@@ -37,6 +37,7 @@ async fn all_phase_one_reads_succeed_on_explicit_lab_firewall() {
             GatherDeviceFactsInput {
                 device: device.clone(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -52,6 +53,7 @@ async fn all_phase_one_reads_succeed_on_explicit_lab_firewall() {
                 max_bytes: Some(256 * 1024),
                 max_lines: Some(5_000),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -67,6 +69,7 @@ async fn all_phase_one_reads_succeed_on_explicit_lab_firewall() {
                 max_bytes: Some(1024 * 1024),
                 max_lines: Some(20_000),
             },
+            None,
             CancellationToken::new(),
         )
         .await

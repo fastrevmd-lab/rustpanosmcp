@@ -26,6 +26,7 @@ async fn guarded_add_commit_delete_commit_round_trip() {
             GatherDeviceFactsInput {
                 device: device.clone(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -131,6 +132,7 @@ async fn read_parent(service: &PanosService, device: &str, xpath: &str) -> Strin
                 max_bytes: Some(512 * 1024),
                 max_lines: Some(10_000),
             },
+            None,
             CancellationToken::new(),
         )
         .await

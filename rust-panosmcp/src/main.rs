@@ -14,8 +14,24 @@ use std::net::{IpAddr, SocketAddr};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    rust_panosmcp_core::observability::init_tracing();
     let cli = Cli::parse();
+
+    let audit_format = rust_panosmcp_core::observability::AuditFormat::parse(&cli.audit_format);
+    let redaction = if let Some(ref policy) = cli.audit_redact {
+        Some(rust_panosmcp_core::observability::AuditRedaction::parse(
+            policy,
+            cli.audit_hmac_key_file.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let audit_cfg = rust_panosmcp_core::observability::AuditConfig {
+        format: audit_format,
+        audit_log_file: cli.audit_log_file.clone(),
+        redaction,
+        journald: cli.audit_journald,
+    };
+    rust_panosmcp_core::observability::init_tracing(&audit_cfg)?;
 
     if let Some(command) = cli.command {
         match command {

@@ -599,7 +599,12 @@ impl PanosMcpServer {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.gather_device_facts(input, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .gather_device_facts(input, caller, cancellation)
+                .await,
+        )
     }
 
     /// Execute only a single `<show>` operational command.
@@ -621,7 +626,8 @@ impl PanosMcpServer {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.execute_panos_op(input, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(service.execute_panos_op(input, caller, cancellation).await)
     }
 
     /// Read running or candidate configuration under `/config`.
@@ -643,7 +649,8 @@ impl PanosMcpServer {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.get_panos_config(input, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(service.get_panos_config(input, caller, cancellation).await)
     }
 }
 

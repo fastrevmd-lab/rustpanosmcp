@@ -1,21 +1,16 @@
-//! Tracing conventions for binaries and future structured audit events.
+//! Tracing and audit initialization via mecmcp-audit.
 
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+pub use mecmcp_audit::{
+    Attribution, AuditConfig, AuditFormat, AuditRedaction, AuditScope, Principal, RedactError,
+    init_tracing,
+};
 
-/// Dedicated target for security-relevant audit events.
-pub const AUDIT_TARGET: &str = "rust_panosmcp::audit";
-
-/// Install the default stderr tracing subscriber.
+/// Initialize tracing with the given audit configuration.
 ///
-/// `RUST_LOG` controls filtering. If it is absent or invalid, an `info`
-/// default is used. Repeated initialization is harmless, which keeps test and
-/// embedding scenarios straightforward.
-pub fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let subscriber = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr));
-    let _already_initialized = subscriber.try_init();
+/// This is a convenience wrapper that maps Result to bool for backward compatibility.
+/// Returns `true` on success, `false` if initialization fails (e.g., journald unavailable).
+pub fn init_with_config(cfg: &AuditConfig) -> bool {
+    init_tracing(cfg).is_ok()
 }
 
 #[cfg(test)]
@@ -23,7 +18,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audit_target_is_stable() {
-        assert_eq!(AUDIT_TARGET, "rust_panosmcp::audit");
+    fn init_with_defaults_succeeds() {
+        let cfg = AuditConfig {
+            format: AuditFormat::Text,
+            audit_log_file: None,
+            redaction: None,
+            journald: false,
+        };
+        assert!(init_with_config(&cfg));
     }
 }

@@ -3,7 +3,6 @@
 use crate::{
     PanosMcpError, Result,
     client::PanosClient,
-    observability::AUDIT_TARGET,
     tools::PanosService,
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
@@ -653,7 +652,7 @@ impl MutationCoordinator {
         let mut state = self.state.lock().await;
         state.operations.remove(operation_id);
         if let Err(error) = self.persist_locked(&state) {
-            tracing::error!(target: AUDIT_TARGET, %error, "mutation state persistence failed");
+            tracing::error!(target: "audit", %error, "mutation state persistence failed");
         }
     }
 
@@ -1834,7 +1833,7 @@ async fn release_config_lock(client: &PanosClient) -> Result<()> {
 
 async fn release_config_lock_best_effort(client: &PanosClient) {
     if let Err(error) = release_config_lock(client).await {
-        tracing::error!(target: AUDIT_TARGET, device = client.device_name(), %error, "PAN-OS configuration lock release failed");
+        tracing::error!(target: "audit", device = client.device_name(), %error, "PAN-OS configuration lock release failed");
     }
 }
 
@@ -2071,7 +2070,7 @@ struct AuditEvent<'a> {
 fn audit(event: AuditEvent<'_>, succeeded: bool, duration: Duration, job_id: Option<&str>) {
     let xpath_fingerprint = format!("sha256:{}", digest_hex(event.xpath.as_bytes()));
     tracing::info!(
-        target: AUDIT_TARGET,
+        target: "audit",
         principal = event.owner,
         device = event.device,
         operation_id = event.operation_id,
