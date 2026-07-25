@@ -16,6 +16,7 @@ path = "src/main.rs"
 arc-swap.workspace = true
 axum.workspace = true
 axum-server.workspace = true
+chrono.workspace = true
 clap.workspace = true
 http.workspace = true
 rmcp = { workspace = true, features = ["macros", "schemars", "server", "transport-io", "transport-streamable-http-server"] }

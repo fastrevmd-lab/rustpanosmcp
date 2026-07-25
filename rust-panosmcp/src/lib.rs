@@ -133,17 +133,15 @@ fn load_snapshot(
     state_path: Option<&Path>,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
     let inventory = Inventory::load(inventory_path)?;
-    let names: Vec<String> = inventory
-        .metadata()
-        .into_iter()
-        .map(|device| device.name)
-        .collect();
     let service = Arc::new(match previous_service {
         Some(previous) => PanosService::reload(inventory, previous)?,
         None => PanosService::new_with_state(inventory, state_path)?,
     });
     let tokens = token_path
-        .map(|path| TokenStoreFile::load(path, &names).map(Arc::new))
+        .map(|path| {
+            TokenStoreFile::load(path)
+                .map(|file| file.store())
+        })
         .transpose()?;
     Ok(RuntimeSnapshot { service, tokens })
 }
@@ -211,7 +209,7 @@ impl PanosMcpServer {
         device: Option<&str>,
     ) -> Option<CallToolResult> {
         let caller = caller?;
-        if !caller.tools.allows_tool(tool) {
+        if !caller.tools.allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS) {
             return Some(CallToolResult::error(vec![ContentBlock::text(format!(
                 "token '{}' is not authorized for tool '{tool}'",
                 caller.token_name
@@ -245,12 +243,12 @@ impl PanosMcpServer {
     ) -> Result<(&str, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
         let principal = Self::mutation_principal(extensions)?;
         let caller = Self::caller(extensions);
-        if caller.is_some_and(|caller| caller.mutation.is_none()) {
+        if caller.is_some_and(|caller| caller.grant.is_none()) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
                 "v0.2 change-set writes require a token-specific mutation grant",
             )]));
         }
-        Ok((principal, caller.and_then(|caller| caller.mutation.clone())))
+        Ok((principal, caller.and_then(|caller| caller.grant.clone())))
     }
 }
 

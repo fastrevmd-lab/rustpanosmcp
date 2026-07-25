@@ -1,18 +1,31 @@
-//! Authentication, digest-only token persistence, and authorization scopes.
+//! PAN-OS authorization vocabulary over the shared mecmcp auth core.
 
 pub mod bearer;
-pub mod file;
 pub mod secret;
-pub mod store;
-pub mod token;
+mod grant;
 
 pub use bearer::{BearerHeaderError, parse_bearer_header};
-pub use file::{TokenStoreFile, TokenStoreFileError};
+pub use grant::{MutationAction, MutationGrant};
 pub use secret::SecretString;
-pub use store::{CallerContext, MutationAction, MutationGrant, ScopeSet, TokenEntry, TokenStore};
-pub use token::{TokenDigest, TokenError, TokenSecret};
 
-/// Exact Phase 2 tool registry used to validate token scopes.
+// Shared core, re-exported so downstream `use rust_panosmcp_auth::…` paths
+// keep working unchanged.
+pub use mecmcp_auth::{
+    CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError,
+    TokenDigest, TokenEntry as SharedTokenEntry, TokenError, TokenSecret, TokenStore as SharedStore,
+    TokenStoreFile as SharedFile, write_atomic,
+};
+
+/// PAN-OS token entry: the shared entry specialised to the PAN-OS grant.
+pub type TokenEntry = SharedTokenEntry<MutationGrant>;
+/// PAN-OS token store.
+pub type TokenStore = SharedStore<MutationGrant>;
+/// PAN-OS token file.
+pub type TokenStoreFile = SharedFile<MutationGrant>;
+/// PAN-OS caller context with mutation grant.
+pub type CallerContext = CallerCtx<MutationGrant>;
+
+/// Exact tool registry used to validate token scopes.
 pub const KNOWN_TOOLS: &[&str] = &[
     "apply_panos_change_set",
     "approve_panos_change_set",

@@ -16,7 +16,7 @@ use rust_panosmcp::{
     http_transport::{HttpOptions, build_router, serve},
     tls,
 };
-use rust_panosmcp_auth::{ScopeSet, TokenStoreFile};
+use rust_panosmcp_auth::ScopeSet;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -49,16 +49,21 @@ fn fixture(devices: ScopeSet, tools: ScopeSet) -> Fixture {
     .expect("inventory fixture");
 
     let token_path = directory.path().join("tokens.json");
-    let secret = TokenStoreFile::add(
-        &token_path,
-        "reader",
+
+    // Mint token manually
+    let (secret_token, digest) = rust_panosmcp_auth::TokenSecret::mint().expect("mint");
+    let secret = secret_token.expose_secret().to_owned();
+    let entry = rust_panosmcp_auth::TokenEntry {
+        name: "reader".to_owned(),
+        digest,
         devices,
         tools,
-        &["lab-fw".to_owned()],
-    )
-    .expect("token add")
-    .expose_secret()
-    .to_owned();
+        created_at: chrono::Utc::now(),
+        expires_at: None,
+        grant: None,
+    };
+    rust_panosmcp_auth::write_atomic(&token_path, &[entry]).expect("write tokens");
+    make_private(&token_path);
     let runtime = RuntimeState::load(&inventory_path, Some(&token_path)).expect("runtime");
     Fixture {
         _directory: directory,
@@ -161,10 +166,17 @@ async fn valid_token_initializes_but_wrong_tool_or_device_is_http_forbidden() {
 async fn rotation_revocation_and_failed_reload_are_atomic() {
     let fixture = fixture(ScopeSet::Wildcard, ScopeSet::Wildcard);
     let old_bearer = format!("Bearer {}", fixture.secret);
-    let rotated = TokenStoreFile::rotate(&fixture.token_path, "reader", &["lab-fw".to_owned()])
-        .expect("rotate")
-        .expose_secret()
-        .to_owned();
+
+    // Rotate the token manually
+    let file = rust_panosmcp_auth::TokenStoreFile::load(&fixture.token_path).expect("load");
+    let mut entries = file.store().entries().to_vec();
+    let entry = entries.iter_mut().find(|e| e.name == "reader").expect("find token");
+    let (new_secret, new_digest) = rust_panosmcp_auth::TokenSecret::mint().expect("mint");
+    let rotated = new_secret.expose_secret().to_owned();
+    entry.digest = new_digest;
+    entry.created_at = chrono::Utc::now();
+    rust_panosmcp_auth::write_atomic(&fixture.token_path, &entries).expect("write rotated");
+
     fixture.runtime.reload().expect("reload rotation");
     assert_eq!(
         status(
@@ -204,10 +216,13 @@ async fn rotation_revocation_and_failed_reload_are_atomic() {
 async fn revoked_token_is_rejected_after_reload() {
     let fixture = fixture(ScopeSet::Wildcard, ScopeSet::Wildcard);
     let bearer = format!("Bearer {}", fixture.secret);
-    assert!(
-        TokenStoreFile::revoke(&fixture.token_path, "reader", &["lab-fw".to_owned()])
-            .expect("revoke")
-    );
+
+    // Revoke the token manually
+    let file = rust_panosmcp_auth::TokenStoreFile::load(&fixture.token_path).expect("load");
+    let mut entries = file.store().entries().to_vec();
+    entries.retain(|e| e.name != "reader");
+    rust_panosmcp_auth::write_atomic(&fixture.token_path, &entries).expect("write revoked");
+
     fixture.runtime.reload().expect("reload revocation");
     assert_eq!(
         status(&fixture.runtime, options(), post(INITIALIZE, Some(&bearer))).await,
