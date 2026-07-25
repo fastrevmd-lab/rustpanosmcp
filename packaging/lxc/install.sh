@@ -2,7 +2,11 @@
 # Installer for the extracted rust-panosmcp LXC package.
 set -euo pipefail
 
-PACKAGE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# The script ships at <package>/packaging/lxc/install.sh, so the package root is
+# two levels up — not the script's own directory. Getting this wrong makes the
+# installer refuse a perfectly good archive with "package payload is missing
+# bin/rust-panosmcp".
+PACKAGE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 INSTALL_ROOT="${PANOSMCP_INSTALL_ROOT:-/}"
 SERVICE_USER="${PANOSMCP_SERVICE_USER:-rust-panosmcp}"
 SERVICE_GROUP="${PANOSMCP_SERVICE_GROUP:-rust-panosmcp}"
