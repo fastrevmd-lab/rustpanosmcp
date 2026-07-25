@@ -27,8 +27,11 @@ pub enum TokenCommandError {
 
 /// Execute one token management command.
 pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCommandError> {
+    // `Some` keeps device-name validation strict: this server always knows its
+    // own inventory, so a token naming an unknown device is a typo, not a
+    // legitimate forward reference.
     let known = KnownNames {
-        devices: known_devices,
+        devices: Some(known_devices),
         tools: rust_panosmcp_auth::KNOWN_TOOLS,
     };
 
