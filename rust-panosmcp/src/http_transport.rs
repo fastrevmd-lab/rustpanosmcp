@@ -1,30 +1,24 @@
-//! Bearer-protected MCP Streamable HTTP transport and boundary controls.
+//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport.
 
 use crate::{PanosMcpServer, RuntimeState};
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ConnectInfo,
-    http::{HeaderMap, Method, Request, StatusCode, header},
+    extract::Request,
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
+};
+use mecmcp_transport::{
+    LimitsConfig, OptionalPreflight, PrometheusRuntime, ScopePreflight, TransportIdentity,
+    apply_rate_limit, preflight::run_preflight,
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use rust_panosmcp_auth::{CallerContext, parse_bearer_header};
+use rust_panosmcp_auth::{CallerContext, MUTATION_TOOLS, parse_bearer_header};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::sync::Mutex;
-
-const RATE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_IP_WINDOWS: usize = 8_192;
-const MAX_TOKEN_WINDOWS: usize = 2_048;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Validated transport settings.
 #[derive(Debug, Clone)]
@@ -62,67 +56,161 @@ pub enum HttpTransportError {
     Serve(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone)]
+/// PAN-OS scope preflight implementation.
+struct PanosPreflight;
+
+impl ScopePreflight for PanosPreflight {
+    fn check(&self, body: &[u8], caller: &mecmcp_auth::CallerCtx) -> Result<(), String> {
+        if request_exceeds_scope(body, caller) {
+            Err("insufficient_scope".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn request_exceeds_scope(bytes: &[u8], caller: &mecmcp_auth::CallerCtx) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| tool_call_exceeds_scope(value, caller)),
+        value => tool_call_exceeds_scope(&value, caller),
+    }
+}
+
+fn tool_call_exceeds_scope(value: &Value, caller: &mecmcp_auth::CallerCtx) -> bool {
+    if value.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return false;
+    }
+    let Some(params) = value.get("params") else {
+        return false;
+    };
+    let Some(tool) = params.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    if !caller.tools.allows_tool(tool, MUTATION_TOOLS) {
+        return true;
+    }
+    params
+        .get("arguments")
+        .and_then(|arguments| arguments.get("device"))
+        .and_then(Value::as_str)
+        .is_some_and(|device| !caller.devices.allows(device))
+}
+
+#[derive(Clone)]
 struct SecurityState {
     runtime: RuntimeState,
+    identity: TransportIdentity,
+    preflight: OptionalPreflight,
     body_limit: usize,
-    ip_limiter: FixedWindowLimiter,
-    token_limiter: FixedWindowLimiter,
 }
 
-#[derive(Debug, Clone)]
-struct FixedWindowLimiter {
-    limit: u32,
-    maximum_keys: usize,
-    windows: Arc<Mutex<HashMap<String, Window>>>,
-}
+async fn security_boundary(
+    axum::extract::State(state): axum::extract::State<SecurityState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Bearer authentication
+    let snapshot = state.runtime.snapshot();
+    let caller = if let Some(store) = &snapshot.tokens {
+        let Some(candidate) = bearer_candidate(request.headers()) else {
+            return unauthorized(&state.identity.bearer_realm);
+        };
+        let Some(entry) = store.authenticate(candidate) else {
+            return unauthorized(&state.identity.bearer_realm);
+        };
+        Some(CallerContext::from(entry))
+    } else {
+        None
+    };
+    drop(snapshot);
 
-#[derive(Debug, Clone, Copy)]
-struct Window {
-    started: Instant,
-    count: u32,
-}
-
-impl FixedWindowLimiter {
-    fn new(limit: u32, maximum_keys: usize) -> Self {
-        Self {
-            limit,
-            maximum_keys,
-            windows: Arc::new(Mutex::new(HashMap::new())),
+    // Buffer and limit body size
+    let (mut parts, body) = request.into_parts();
+    let body_bytes = match to_bytes(body, state.body_limit).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return payload_too_large();
         }
+    };
+
+    // Scope preflight check if caller is present
+    if let Some(caller) = &caller {
+        let caller_ctx = mecmcp_auth::CallerCtx {
+            token_name: caller.token_name.clone(),
+            devices: caller.devices.clone(),
+            tools: caller.tools.clone(),
+            grant: None,
+        };
+        if let Err(reason) = run_preflight(&state.preflight, &body_bytes, &caller_ctx) {
+            return forbidden(&state.identity.bearer_realm, &reason);
+        }
+        // Insert CallerCtx into extensions for apply_rate_limit
+        parts.extensions.insert(caller_ctx);
     }
 
-    async fn check(&self, key: &str) -> Result<(), u64> {
-        let now = Instant::now();
-        let mut windows = self.windows.lock().await;
-        if windows.len() >= self.maximum_keys && !windows.contains_key(key) {
-            windows.retain(|_, window| now.duration_since(window.started) < RATE_WINDOW);
-            if windows.len() >= self.maximum_keys {
-                return Err(RATE_WINDOW.as_secs());
-            }
-        }
-        let window = windows.entry(key.to_owned()).or_insert(Window {
-            started: now,
-            count: 0,
-        });
-        let elapsed = now.duration_since(window.started);
-        if elapsed >= RATE_WINDOW {
-            *window = Window {
-                started: now,
-                count: 1,
-            };
-            return Ok(());
-        }
-        if window.count >= self.limit {
-            return Err((RATE_WINDOW - elapsed).as_secs().max(1));
-        }
-        window.count += 1;
-        Ok(())
+    // Insert local caller context into extensions for downstream handlers
+    if let Some(caller) = caller {
+        parts.extensions.insert(caller);
     }
+    let request = Request::from_parts(parts, Body::from(body_bytes));
+
+    next.run(request).await
+}
+
+fn bearer_candidate(headers: &HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    parse_bearer_header(value.to_str().ok()?).ok()
+}
+
+fn unauthorized(realm: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            header::WWW_AUTHENTICATE,
+            format!("Bearer realm=\"{realm}\", error=\"invalid_token\""),
+        )],
+        axum::Json(json!({"error": "invalid_token"})),
+    )
+        .into_response()
+}
+
+fn forbidden(realm: &str, reason: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(
+            header::WWW_AUTHENTICATE,
+            format!("Bearer realm=\"{realm}\", error=\"{reason}\""),
+        )],
+        axum::Json(json!({"error": reason})),
+    )
+        .into_response()
+}
+
+fn payload_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        axum::Json(json!({"error": "request_too_large"})),
+    )
+        .into_response()
 }
 
 /// Build the fully protected `/mcp` router. Exposed for integration tests.
-pub fn build_router(runtime: RuntimeState, options: HttpOptions) -> Router {
+pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics: bool) -> Router {
+    let identity =
+        TransportIdentity::new("panosmcp", "panos", "rust-panosmcp", ["device", "devices"]);
+
     let mut config = StreamableHttpServerConfig::default();
     config = config.with_allowed_origins(origins(&options));
     config.allowed_hosts.extend(options.allowed_hosts);
@@ -135,15 +223,41 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions) -> Router {
         Arc::new(LocalSessionManager::default()),
         config,
     );
+
     let security = SecurityState {
         runtime,
+        identity: identity.clone(),
+        preflight: Some(Arc::new(PanosPreflight)),
         body_limit: options.request_body_limit,
-        ip_limiter: FixedWindowLimiter::new(options.ip_rate_per_minute, MAX_IP_WINDOWS),
-        token_limiter: FixedWindowLimiter::new(options.token_rate_per_minute, MAX_TOKEN_WINDOWS),
     };
-    Router::new()
-        .nest_service("/mcp", service)
-        .layer(middleware::from_fn_with_state(security, security_boundary))
+
+    // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
+    // Burst = rate to allow the full per-minute quota within the first second.
+    let rate_config = LimitsConfig {
+        max_requests_per_second_per_ip: u64::from(options.ip_rate_per_minute),
+        max_request_burst_per_ip: u64::from(options.ip_rate_per_minute),
+        max_requests_per_second_per_token: u64::from(options.token_rate_per_minute),
+        max_request_burst_per_token: u64::from(options.token_rate_per_minute),
+        ..Default::default()
+    };
+
+    // Layer order: layers added first wrap innermost, so request order is reversed.
+    // We want: rate limit → auth → MCP service
+    // So add: MCP service, then rate limit, then auth
+    // This ensures auth runs before rate limiting, so CallerCtx exists when the rate
+    // limiter checks per-token limits.
+    let mut app = Router::new().nest_service("/mcp", service);
+    app = apply_rate_limit(app, &rate_config);
+    app = app.layer(middleware::from_fn_with_state(security, security_boundary));
+
+    if enable_metrics {
+        let metrics_runtime =
+            PrometheusRuntime::install(&identity.metric_prefix, &identity.server_label)
+                .expect("Prometheus metrics initialization");
+        app = app.merge(metrics_runtime.router());
+    }
+
+    app
 }
 
 fn origins(options: &HttpOptions) -> Vec<String> {
@@ -166,7 +280,7 @@ pub async fn serve(
     options: HttpOptions,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> Result<(), HttpTransportError> {
-    let app = build_router(runtime, options);
+    let app = build_router(runtime, options, false);
     if let Some(config) = tls {
         tracing::info!(%address, "Streamable HTTP listening with TLS");
         let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
@@ -188,213 +302,13 @@ pub async fn serve(
     Ok(())
 }
 
-async fn security_boundary(
-    axum::extract::State(state): axum::extract::State<SecurityState>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response {
-    let started = Instant::now();
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let source = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|connect| connect.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    if let Err(retry) = state.ip_limiter.check(&source).await {
-        return audited(
-            too_many_requests(retry),
-            started,
-            &method,
-            &path,
-            &source,
-            None,
-        );
-    }
-
-    let snapshot = state.runtime.snapshot();
-    let caller = if let Some(store) = &snapshot.tokens {
-        let Some(candidate) = bearer_candidate(request.headers()) else {
-            return audited(unauthorized(), started, &method, &path, &source, None);
-        };
-        let Some(entry) = store.authenticate(candidate) else {
-            return audited(unauthorized(), started, &method, &path, &source, None);
-        };
-        let caller = CallerContext::from(entry);
-        if let Err(retry) = state.token_limiter.check(&caller.token_name).await {
-            return audited(
-                too_many_requests(retry),
-                started,
-                &method,
-                &path,
-                &source,
-                Some(&caller.token_name),
-            );
-        }
-        Some(caller)
-    } else {
-        None
-    };
-    drop(snapshot);
-
-    let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, state.body_limit).await {
-        Ok(body) => body,
-        Err(_) => {
-            return audited(
-                payload_too_large(),
-                started,
-                &method,
-                &path,
-                &source,
-                caller.as_ref().map(|value| value.token_name.as_str()),
-            );
-        }
-    };
-    if let Some(caller) = &caller
-        && request_exceeds_scope(&body, caller)
-    {
-        return audited(
-            forbidden(),
-            started,
-            &method,
-            &path,
-            &source,
-            Some(&caller.token_name),
-        );
-    }
-    request = Request::from_parts(parts, Body::from(body));
-    if let Some(caller) = caller.clone() {
-        request.extensions_mut().insert(caller);
-    }
-
-    let response = next.run(request).await;
-    audited(
-        response,
-        started,
-        &method,
-        &path,
-        &source,
-        caller.as_ref().map(|value| value.token_name.as_str()),
-    )
-}
-
-fn bearer_candidate(headers: &HeaderMap) -> Option<&str> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    parse_bearer_header(value.to_str().ok()?).ok()
-}
-
-fn request_exceeds_scope(bytes: &[u8], caller: &CallerContext) -> bool {
-    if bytes.is_empty() {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        return false;
-    };
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .any(|value| tool_call_exceeds_scope(value, caller)),
-        value => tool_call_exceeds_scope(&value, caller),
-    }
-}
-
-fn tool_call_exceeds_scope(value: &Value, caller: &CallerContext) -> bool {
-    if value.get("method").and_then(Value::as_str) != Some("tools/call") {
-        return false;
-    }
-    let Some(params) = value.get("params") else {
-        return false;
-    };
-    let Some(tool) = params.get("name").and_then(Value::as_str) else {
-        return false;
-    };
-    if !caller
-        .tools
-        .allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS)
-    {
-        return true;
-    }
-    params
-        .get("arguments")
-        .and_then(|arguments| arguments.get("device"))
-        .and_then(Value::as_str)
-        .is_some_and(|device| !caller.devices.allows(device))
-}
-
-fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(
-            header::WWW_AUTHENTICATE,
-            "Bearer realm=\"rust-panosmcp\", error=\"invalid_token\"",
-        )],
-        axum::Json(json!({"error": "invalid_token"})),
-    )
-        .into_response()
-}
-
-fn forbidden() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [(
-            header::WWW_AUTHENTICATE,
-            "Bearer realm=\"rust-panosmcp\", error=\"insufficient_scope\"",
-        )],
-        axum::Json(json!({"error": "insufficient_scope"})),
-    )
-        .into_response()
-}
-
-fn too_many_requests(retry_after: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, retry_after.to_string())],
-        axum::Json(json!({"error": "rate_limited"})),
-    )
-        .into_response()
-}
-
-fn payload_too_large() -> Response {
-    (
-        StatusCode::PAYLOAD_TOO_LARGE,
-        axum::Json(json!({"error": "request_too_large"})),
-    )
-        .into_response()
-}
-
-fn audited(
-    response: Response,
-    started: Instant,
-    method: &Method,
-    path: &str,
-    source: &str,
-    token_name: Option<&str>,
-) -> Response {
-    tracing::info!(
-        %method,
-        path,
-        source_ip = source,
-        token_name = token_name.unwrap_or("anonymous"),
-        status = response.status().as_u16(),
-        duration_ms = started.elapsed().as_millis(),
-        "MCP HTTP request"
-    );
-    response
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_panosmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
+    use mecmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
 
-    fn caller(tools: ScopeSet, devices: ScopeSet) -> CallerContext {
-        CallerContext {
+    fn caller(tools: ScopeSet, devices: ScopeSet) -> mecmcp_auth::CallerCtx {
+        mecmcp_auth::CallerCtx {
             token_name: "test".to_owned(),
             tools,
             devices,
@@ -427,18 +341,9 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn limiter_enforces_fixed_window() {
-        let limiter = FixedWindowLimiter::new(2, 4);
-        assert!(limiter.check("one").await.is_ok());
-        assert!(limiter.check("one").await.is_ok());
-        assert!(limiter.check("one").await.is_err());
-        assert!(limiter.check("two").await.is_ok());
-    }
-
     #[test]
     fn token_store_fixture_authenticates_without_exposing_digest() {
-        let store = TokenStore::try_new(vec![TokenEntry {
+        let store: TokenStore = TokenStore::try_new(vec![TokenEntry {
             name: "test".to_owned(),
             digest: TokenDigest::from_secret("secret"),
             devices: ScopeSet::Wildcard,

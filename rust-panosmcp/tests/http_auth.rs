@@ -98,7 +98,7 @@ async fn status(
     options: HttpOptions,
     request: Request<Body>,
 ) -> StatusCode {
-    build_router(runtime.clone(), options)
+    build_router(runtime.clone(), options, false)
         .oneshot(request)
         .await
         .expect("infallible router")
@@ -120,7 +120,7 @@ async fn missing_malformed_and_invalid_tokens_are_rfc6750_unauthorized() {
         );
     }
 
-    let response = build_router(fixture.runtime.clone(), options())
+    let response = build_router(fixture.runtime.clone(), options(), false)
         .oneshot(post(INITIALIZE, None))
         .await
         .expect("router");
@@ -258,8 +258,8 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
     );
 
     let mut rate_limited = options();
-    rate_limited.ip_rate_per_minute = 1;
-    let router = build_router(fixture.runtime.clone(), rate_limited);
+    rate_limited.token_rate_per_minute = 1;
+    let router = build_router(fixture.runtime.clone(), rate_limited, false);
     assert_eq!(
         router
             .clone()

@@ -13,6 +13,11 @@ allow = [
     "ISC",
     "MIT",
     "Unicode-3.0",
+    # foldhash, reached transitively through hashbrown. Permissive, OSI-approved.
+    # Arrives with mecmcp-transport via metrics-exporter-prometheus -> metrics-util
+    # -> hashbrown. mecmcp and rustjunosmcp already allow it; this closes the drift
+    # rather than introducing a new exception.
+    "Zlib",
 ]
 
 [bans]
