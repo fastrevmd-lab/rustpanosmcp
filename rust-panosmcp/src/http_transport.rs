@@ -4,31 +4,21 @@ use crate::{PanosMcpServer, RuntimeState};
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Request},
+    extract::Request,
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 use mecmcp_transport::{
-    OptionalPreflight, PrometheusRuntime, ScopePreflight, TransportIdentity,
-    preflight::run_preflight,
+    LimitsConfig, OptionalPreflight, PrometheusRuntime, ScopePreflight, TransportIdentity,
+    apply_rate_limit, preflight::run_preflight,
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use rust_panosmcp_auth::{CallerContext, MUTATION_TOOLS, parse_bearer_header};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::sync::Mutex;
-
-const RATE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_IP_WINDOWS: usize = 8_192;
-const MAX_TOKEN_WINDOWS: usize = 2_048;
+use std::{net::SocketAddr, sync::Arc};
 
 /// Validated transport settings.
 #[derive(Debug, Clone)]
@@ -120,59 +110,6 @@ struct SecurityState {
     identity: TransportIdentity,
     preflight: OptionalPreflight,
     body_limit: usize,
-    ip_limiter: FixedWindowLimiter,
-    token_limiter: FixedWindowLimiter,
-}
-
-#[derive(Debug, Clone)]
-struct FixedWindowLimiter {
-    limit: u32,
-    maximum_keys: usize,
-    windows: Arc<Mutex<HashMap<String, Window>>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Window {
-    started: Instant,
-    count: u32,
-}
-
-impl FixedWindowLimiter {
-    fn new(limit: u32, maximum_keys: usize) -> Self {
-        Self {
-            limit,
-            maximum_keys,
-            windows: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn check(&self, key: &str) -> Result<(), u64> {
-        let now = Instant::now();
-        let mut windows = self.windows.lock().await;
-        if windows.len() >= self.maximum_keys && !windows.contains_key(key) {
-            windows.retain(|_, window| now.duration_since(window.started) < RATE_WINDOW);
-            if windows.len() >= self.maximum_keys {
-                return Err(RATE_WINDOW.as_secs());
-            }
-        }
-        let window = windows.entry(key.to_owned()).or_insert(Window {
-            started: now,
-            count: 0,
-        });
-        let elapsed = now.duration_since(window.started);
-        if elapsed >= RATE_WINDOW {
-            *window = Window {
-                started: now,
-                count: 1,
-            };
-            return Ok(());
-        }
-        if window.count >= self.limit {
-            return Err((RATE_WINDOW - elapsed).as_secs().max(1));
-        }
-        window.count += 1;
-        Ok(())
-    }
 }
 
 async fn security_boundary(
@@ -180,18 +117,6 @@ async fn security_boundary(
     request: Request,
     next: Next,
 ) -> Response {
-    // Extract source IP, defaulting to "unknown" if ConnectInfo isn't available (e.g., in tests)
-    let source = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|connect| connect.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    // IP rate limiting
-    if let Err(retry) = state.ip_limiter.check(&source).await {
-        return too_many_requests(retry);
-    }
-
     // Bearer authentication
     let snapshot = state.runtime.snapshot();
     let caller = if let Some(store) = &snapshot.tokens {
@@ -201,13 +126,7 @@ async fn security_boundary(
         let Some(entry) = store.authenticate(candidate) else {
             return unauthorized(&state.identity.bearer_realm);
         };
-        let caller = CallerContext::from(entry);
-
-        // Token rate limiting
-        if let Err(retry) = state.token_limiter.check(&caller.token_name).await {
-            return too_many_requests(retry);
-        }
-        Some(caller)
+        Some(CallerContext::from(entry))
     } else {
         None
     };
@@ -233,9 +152,11 @@ async fn security_boundary(
         if let Err(reason) = run_preflight(&state.preflight, &body_bytes, &caller_ctx) {
             return forbidden(&state.identity.bearer_realm, &reason);
         }
+        // Insert CallerCtx into extensions for apply_rate_limit
+        parts.extensions.insert(caller_ctx);
     }
 
-    // Insert caller into request extensions and reconstruct request
+    // Insert local caller context into extensions for downstream handlers
     if let Some(caller) = caller {
         parts.extensions.insert(caller);
     }
@@ -277,15 +198,6 @@ fn forbidden(realm: &str, reason: &str) -> Response {
         .into_response()
 }
 
-fn too_many_requests(retry_after: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, retry_after.to_string())],
-        axum::Json(json!({"error": "rate_limited"})),
-    )
-        .into_response()
-}
-
 fn payload_too_large() -> Response {
     (
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -317,13 +229,26 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
         identity: identity.clone(),
         preflight: Some(Arc::new(PanosPreflight)),
         body_limit: options.request_body_limit,
-        ip_limiter: FixedWindowLimiter::new(options.ip_rate_per_minute, MAX_IP_WINDOWS),
-        token_limiter: FixedWindowLimiter::new(options.token_rate_per_minute, MAX_TOKEN_WINDOWS),
     };
 
-    let mut app = Router::new()
-        .nest_service("/mcp", service)
-        .layer(middleware::from_fn_with_state(security, security_boundary));
+    // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
+    // Burst = rate to allow the full per-minute quota within the first second.
+    let rate_config = LimitsConfig {
+        max_requests_per_second_per_ip: u64::from(options.ip_rate_per_minute),
+        max_request_burst_per_ip: u64::from(options.ip_rate_per_minute),
+        max_requests_per_second_per_token: u64::from(options.token_rate_per_minute),
+        max_request_burst_per_token: u64::from(options.token_rate_per_minute),
+        ..Default::default()
+    };
+
+    // Layer order: layers added first wrap innermost, so request order is reversed.
+    // We want: rate limit → auth → MCP service
+    // So add: MCP service, then rate limit, then auth
+    // This ensures auth runs before rate limiting, so CallerCtx exists when the rate
+    // limiter checks per-token limits.
+    let mut app = Router::new().nest_service("/mcp", service);
+    app = apply_rate_limit(app, &rate_config);
+    app = app.layer(middleware::from_fn_with_state(security, security_boundary));
 
     if enable_metrics {
         let metrics_runtime =
@@ -414,15 +339,6 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-b"}}}"#,
             &limited,
         ));
-    }
-
-    #[tokio::test]
-    async fn limiter_enforces_fixed_window() {
-        let limiter = FixedWindowLimiter::new(2, 4);
-        assert!(limiter.check("one").await.is_ok());
-        assert!(limiter.check("one").await.is_ok());
-        assert!(limiter.check("one").await.is_err());
-        assert!(limiter.check("two").await.is_ok());
     }
 
     #[test]

@@ -258,7 +258,7 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
     );
 
     let mut rate_limited = options();
-    rate_limited.ip_rate_per_minute = 1;
+    rate_limited.token_rate_per_minute = 1;
     let router = build_router(fixture.runtime.clone(), rate_limited, false);
     assert_eq!(
         router

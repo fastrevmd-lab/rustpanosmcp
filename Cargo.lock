@@ -1165,8 +1165,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.1.5"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.5#55ae13dc0c43b13aea5cfcbc926c4efa8f5c6817"
+version = "0.1.6"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.6#1c3c0d0ecb4212af56bbe86c73f844dae0500b74"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -1183,8 +1183,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.1.5"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.5#55ae13dc0c43b13aea5cfcbc926c4efa8f5c6817"
+version = "0.1.6"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.6#1c3c0d0ecb4212af56bbe86c73f844dae0500b74"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1201,8 +1201,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-transport"
-version = "0.1.5"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.5#55ae13dc0c43b13aea5cfcbc926c4efa8f5c6817"
+version = "0.1.6"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.6#1c3c0d0ecb4212af56bbe86c73f844dae0500b74"
 dependencies = [
  "axum",
  "dashmap",
