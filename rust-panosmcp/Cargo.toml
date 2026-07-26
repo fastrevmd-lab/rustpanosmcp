@@ -19,6 +19,8 @@ axum-server.workspace = true
 chrono.workspace = true
 clap.workspace = true
 http.workspace = true
+mecmcp-auth.workspace = true
+mecmcp-transport.workspace = true
 rmcp = { workspace = true, features = ["macros", "schemars", "server", "transport-io", "transport-streamable-http-server"] }
 rust-panosmcp-auth = { version = "0.4.0", path = "../rust-panosmcp-auth" }
 rust-panosmcp-core = { version = "0.4.0", path = "../rust-panosmcp-core" }
