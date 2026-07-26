@@ -80,6 +80,30 @@ pub struct Cli {
     #[arg(long, default_value_t = 1024 * 1024)]
     pub request_body_limit: usize,
 
+    /// Max concurrent in-flight requests across all callers. 0 = unlimited.
+    #[arg(long, default_value_t = 64)]
+    pub max_inflight_requests: usize,
+
+    /// Max concurrent in-flight requests per bearer token. 0 = unlimited.
+    #[arg(long, default_value_t = 16)]
+    pub max_inflight_requests_per_token: usize,
+
+    /// Max concurrent in-flight requests per target device. 0 = unlimited.
+    #[arg(long, default_value_t = 4)]
+    pub max_inflight_requests_per_target: usize,
+
+    /// Max concurrent MCP sessions. 0 = unlimited.
+    #[arg(long, default_value_t = 128)]
+    pub max_sessions: usize,
+
+    /// Max concurrent MCP sessions per bearer token. 0 = unlimited.
+    #[arg(long, default_value_t = 16)]
+    pub max_sessions_per_token: usize,
+
+    /// Expose unauthenticated Prometheus metrics at /metrics (streamable-http only).
+    #[arg(long)]
+    pub enable_metrics: bool,
+
     /// Audit log format: `text` or `json`.
     #[arg(long, default_value = "text")]
     pub audit_format: String,
@@ -223,6 +247,12 @@ mod tests {
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, 30031);
         assert_eq!(cli.request_body_limit, 1024 * 1024);
+        assert_eq!(cli.max_inflight_requests, 64);
+        assert_eq!(cli.max_inflight_requests_per_token, 16);
+        assert_eq!(cli.max_inflight_requests_per_target, 4);
+        assert_eq!(cli.max_sessions, 128);
+        assert_eq!(cli.max_sessions_per_token, 16);
+        assert!(!cli.enable_metrics);
         assert!(cli.command.is_none());
     }
 
