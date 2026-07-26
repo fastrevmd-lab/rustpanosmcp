@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **CLI, signal handling, graceful shutdown, and the token subcommands now come
+  from the shared `mecmcp-runtime` crate.** No user-visible change: every flag
+  keeps its spelling and defaults, `state resolve` remains PAN-OS-only, and
+  `mutation-state.json` is untouched in both format and location handling.
+
+- **TLS loading moved to `mecmcp-transport`.** This repo's `src/tls.rs` was the
+  original hardened loader — `O_NOFOLLOW`, size caps, a mode check and an owner
+  check, `Zeroizing` on the key bytes — and it was lifted into the shared crate
+  during Phase 3a so `rustjunosmcp` could adopt it too. The local copy is now
+  deleted and this server calls the shared one: the same code, same behaviour.
+  Its two unit tests went with it; the shared crate carries those plus a
+  symlink-refusal test, and `mcp_https.rs` still covers the wiring end to end
+  here.
+
 ## [0.4.0] - 2026-07-25
 
 ### Added
