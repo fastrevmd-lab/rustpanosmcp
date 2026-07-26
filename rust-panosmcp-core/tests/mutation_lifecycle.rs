@@ -209,6 +209,18 @@ fn recovered_service(fixture: &Fixture) -> PanosService {
 
 #[tokio::test]
 async fn change_set_requires_exact_independent_approval_and_applies_as_one_operation() {
+    // Set up audit capture for the entire test
+    use mecmcp_audit::testutil::CapturingWriter;
+    let cap = CapturingWriter::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(cap.clone())
+            .with_ansi(false)
+            .with_target(true)
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    );
+
     let fixture = fixture(false, false).await;
     let initial = fixture
         .service
@@ -284,11 +296,49 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
             .is_err(),
         "digest mismatch must fail"
     );
+    // Perform the approval - audit events will be captured
     let approved = fixture
         .service
         .approve_change_set(approval, None, "reviewer")
         .await
         .expect("independent approval");
+
+    // Extract captured audit output
+    let audit_output = {
+        let bytes = cap.0.lock().expect("lock audit capture").clone();
+        String::from_utf8(bytes).expect("valid UTF-8 audit output")
+    };
+
+    // Verify audit contains the critical binding: change_set_id + digest + owner
+    // The successful approval is the last audit event
+    let successful_approval = audit_output
+        .lines()
+        .rfind(|line| line.contains("approve_panos_change_set") && line.contains("result=ok"))
+        .expect("successful approval audit event must exist");
+
+    assert!(
+        successful_approval.contains(&planned.change_set_id),
+        "audit must contain change_set_id={}, got:\n{}",
+        planned.change_set_id,
+        successful_approval
+    );
+    assert!(
+        successful_approval.contains(&planned.digest),
+        "audit must contain digest={}, got:\n{}",
+        planned.digest,
+        successful_approval
+    );
+    assert!(
+        successful_approval.contains("owner=writer"),
+        "audit must identify the plan owner, got:\n{}",
+        successful_approval
+    );
+    assert!(
+        successful_approval.contains("result=ok"),
+        "audit must confirm successful approval, got:\n{}",
+        successful_approval
+    );
+
     assert_eq!(approved.state, "approved");
     assert_eq!(approved.approver.as_deref(), Some("reviewer"));
 
