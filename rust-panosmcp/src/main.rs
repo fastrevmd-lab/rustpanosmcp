@@ -7,7 +7,7 @@ use rust_panosmcp::{
     cli::{Cli, Command, StateAction, StateDisposition, Transport},
     cli_validate,
     http_transport::{self, HttpOptions},
-    tls, token_cmd,
+    token_cmd,
 };
 use rust_panosmcp_core::inventory::Inventory;
 use std::net::{IpAddr, SocketAddr};
@@ -93,7 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ip: IpAddr = cli.host.parse()?;
             let address = SocketAddr::new(ip, cli.port);
             let listener_tls = match (cli.tls_cert.as_deref(), cli.tls_key.as_deref()) {
-                (Some(cert), Some(key)) => Some(tls::load(cert, key)?),
+                (Some(cert), Some(key)) => {
+                    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+                    Some(mecmcp_transport::tls::load(cert, key, provider)?)
+                }
                 (None, None) => None,
                 _ => unreachable!("CLI refusal matrix validated the TLS pair"),
             };

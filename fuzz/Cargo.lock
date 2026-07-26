@@ -693,7 +693,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-audit"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.6#1c3c0d0ecb4212af56bbe86c73f844dae0500b74"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -711,7 +711,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-auth"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=transport-v0.1.6#1c3c0d0ecb4212af56bbe86c73f844dae0500b74"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
 dependencies = [
  "arc-swap",
  "chrono",

@@ -14,7 +14,6 @@ use rmcp::{
 use rust_panosmcp::{
     RuntimeState,
     http_transport::{HttpOptions, build_router, serve},
-    tls,
 };
 use rust_panosmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use std::{
@@ -301,7 +300,8 @@ async fn native_tls_listener_completes_authenticated_mcp_initialize() {
     fs::write(&cert_path, &cert_pem).expect("certificate");
     fs::write(&key_path, issued.signing_key.serialize_pem()).expect("private key");
     make_private(&key_path);
-    let tls = tls::load(&cert_path, &key_path).expect("listener TLS");
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let tls = mecmcp_transport::tls::load(&cert_path, &key_path, provider).expect("listener TLS");
 
     let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await

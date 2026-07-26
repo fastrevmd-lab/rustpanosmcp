@@ -3,7 +3,6 @@
 pub mod cli;
 pub mod cli_validate;
 pub mod http_transport;
-pub mod tls;
 pub mod token_cmd;
 
 use arc_swap::ArcSwap;

@@ -1,4 +1,4 @@
-//! Digest-only token-store command implementation.
+//! Digest-only token-store command implementation with PAN-OS mutation grants.
 
 use crate::cli::TokenAction;
 use rust_panosmcp_auth::{
