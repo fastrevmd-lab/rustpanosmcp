@@ -94,6 +94,11 @@ async fn per_token_rate_limit_enforces_429() {
         ip_rate_per_minute: 0,
         token_rate_per_minute: 2,
         request_body_limit: 1024 * 1024,
+        max_inflight_requests: 64,
+        max_inflight_requests_per_token: 16,
+        max_inflight_requests_per_target: 4,
+        max_sessions: 128,
+        max_sessions_per_token: 16,
     };
 
     let app = build_router(fixture.runtime, options, false);

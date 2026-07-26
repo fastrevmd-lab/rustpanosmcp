@@ -76,6 +76,11 @@ fn options() -> HttpOptions {
         ip_rate_per_minute: 1_000,
         token_rate_per_minute: 1_000,
         request_body_limit: 1024 * 1024,
+        max_inflight_requests: 64,
+        max_inflight_requests_per_token: 16,
+        max_inflight_requests_per_target: 4,
+        max_sessions: 128,
+        max_sessions_per_token: 16,
     }
 }
 
@@ -308,7 +313,9 @@ async fn native_tls_listener_completes_authenticated_mcp_initialize() {
     listener_options.tls = true;
     let runtime = fixture.runtime.clone();
     let server =
-        tokio::spawn(async move { serve(runtime, address, listener_options, Some(tls)).await });
+        tokio::spawn(
+            async move { serve(runtime, address, listener_options, false, Some(tls)).await },
+        );
 
     let root = reqwest::Certificate::from_pem(cert_pem.as_bytes()).expect("root certificate");
     let client = reqwest::Client::builder()
@@ -359,7 +366,8 @@ async fn rmcp_client_observes_handler_level_device_scope_over_http() {
     let mut listener_options = options();
     listener_options.port = address.port();
     let runtime = fixture.runtime.clone();
-    let server = tokio::spawn(async move { serve(runtime, address, listener_options, None).await });
+    let server =
+        tokio::spawn(async move { serve(runtime, address, listener_options, false, None).await });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let transport = StreamableHttpClientTransport::from_config(

@@ -105,8 +105,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ip_rate_per_minute: cli.ip_rate_per_minute,
                 token_rate_per_minute: cli.token_rate_per_minute,
                 request_body_limit: cli.request_body_limit,
+                max_inflight_requests: cli.max_inflight_requests,
+                max_inflight_requests_per_token: cli.max_inflight_requests_per_token,
+                max_inflight_requests_per_target: cli.max_inflight_requests_per_target,
+                max_sessions: cli.max_sessions,
+                max_sessions_per_token: cli.max_sessions_per_token,
             };
-            http_transport::serve(runtime, address, options, listener_tls).await?;
+            http_transport::serve(runtime, address, options, cli.enable_metrics, listener_tls)
+                .await?;
         }
     }
     Ok(())

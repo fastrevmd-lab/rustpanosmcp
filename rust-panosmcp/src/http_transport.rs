@@ -10,8 +10,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use mecmcp_transport::{
-    LimitsConfig, OptionalPreflight, PrometheusRuntime, ScopePreflight, TransportIdentity,
-    apply_rate_limit, preflight::run_preflight,
+    ConcurrencyState, LimitedSessionManager, LimitsConfig, OptionalPreflight, PrometheusRuntime,
+    ScopePreflight, TransportIdentity, apply_body_limit, apply_rate_limit, concurrency_middleware,
+    preflight::run_preflight,
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -37,6 +38,16 @@ pub struct HttpOptions {
     pub token_rate_per_minute: u32,
     /// Maximum request body bytes.
     pub request_body_limit: usize,
+    /// Maximum concurrent in-flight requests across all callers.
+    pub max_inflight_requests: usize,
+    /// Maximum concurrent in-flight requests per bearer token.
+    pub max_inflight_requests_per_token: usize,
+    /// Maximum concurrent in-flight requests per target device.
+    pub max_inflight_requests_per_target: usize,
+    /// Maximum concurrent MCP sessions.
+    pub max_sessions: usize,
+    /// Maximum concurrent MCP sessions per bearer token.
+    pub max_sessions_per_token: usize,
 }
 
 /// Listener setup or runtime failure.
@@ -215,12 +226,36 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
     config = config.with_allowed_origins(origins(&options));
     config.allowed_hosts.extend(options.allowed_hosts);
 
+    // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
+    // Burst = rate to allow the full per-minute quota within the first second.
+    let limits = LimitsConfig {
+        max_request_body_bytes: options.request_body_limit,
+        max_requests_per_second_per_ip: u64::from(options.ip_rate_per_minute),
+        max_request_burst_per_ip: u64::from(options.ip_rate_per_minute),
+        max_requests_per_second_per_token: u64::from(options.token_rate_per_minute),
+        max_request_burst_per_token: u64::from(options.token_rate_per_minute),
+        max_sessions: options.max_sessions,
+        max_sessions_per_token: options.max_sessions_per_token,
+        max_inflight_requests: options.max_inflight_requests,
+        max_inflight_requests_per_token: options.max_inflight_requests_per_token,
+        max_inflight_requests_per_router: options.max_inflight_requests_per_target,
+        session_idle_timeout_secs: 300,
+        session_max_lifetime_secs: 3600,
+    };
+
+    let session_mgr = LimitedSessionManager::new(LocalSessionManager::default(), &limits);
+    let conc = ConcurrencyState::new(
+        &limits,
+        identity.target_keys.clone(),
+        Some(session_mgr.tracker()),
+    );
+
     let service = StreamableHttpService::new(
         {
             let runtime = runtime.clone();
             move || Ok::<_, std::io::Error>(PanosMcpServer::from_runtime(runtime.clone()))
         },
-        Arc::new(LocalSessionManager::default()),
+        session_mgr,
         config,
     );
 
@@ -231,24 +266,17 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
         body_limit: options.request_body_limit,
     };
 
-    // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
-    // Burst = rate to allow the full per-minute quota within the first second.
-    let rate_config = LimitsConfig {
-        max_requests_per_second_per_ip: u64::from(options.ip_rate_per_minute),
-        max_request_burst_per_ip: u64::from(options.ip_rate_per_minute),
-        max_requests_per_second_per_token: u64::from(options.token_rate_per_minute),
-        max_request_burst_per_token: u64::from(options.token_rate_per_minute),
-        ..Default::default()
-    };
+    // Layer order (innermost to outermost in request flow):
+    // 1. Concurrency middleware (enforces session/inflight caps)
+    // 2. Rate limiting (enforces per-IP/token RPS)
+    // 3. Auth + scope preflight (validates bearer token and scope)
+    // 4. Body limit (rejects oversized bodies before buffering)
+    let rmcp_router = Router::new().nest_service("/mcp", service);
 
-    // Layer order: layers added first wrap innermost, so request order is reversed.
-    // We want: rate limit → auth → MCP service
-    // So add: MCP service, then rate limit, then auth
-    // This ensures auth runs before rate limiting, so CallerCtx exists when the rate
-    // limiter checks per-token limits.
-    let mut app = Router::new().nest_service("/mcp", service);
-    app = apply_rate_limit(app, &rate_config);
+    let mut app = rmcp_router.layer(middleware::from_fn_with_state(conc, concurrency_middleware));
+    app = apply_rate_limit(app, &limits);
     app = app.layer(middleware::from_fn_with_state(security, security_boundary));
+    app = apply_body_limit(app, &limits);
 
     if enable_metrics {
         let metrics_runtime =
@@ -278,9 +306,10 @@ pub async fn serve(
     runtime: RuntimeState,
     address: SocketAddr,
     options: HttpOptions,
+    enable_metrics: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> Result<(), HttpTransportError> {
-    let app = build_router(runtime, options, false);
+    let app = build_router(runtime, options, enable_metrics);
     if let Some(config) = tls {
         tracing::info!(%address, "Streamable HTTP listening with TLS");
         let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
