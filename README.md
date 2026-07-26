@@ -12,7 +12,7 @@
 
 > **Unofficial / community project.** This is an independent community project and does not claim affiliation with or endorsement by Palo Alto Networks. Product names and trademarks are used only to identify the systems with which the software interoperates.
 
-The repository contains the v0.3.0 release: a bearer-protected server with a guarded PAN-OS candidate configuration lifecycle and hardened release packaging, with authentication provided by the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate.
+The repository contains the v0.4.0 release: a bearer-protected server with structured audit logging, guarded PAN-OS candidate configuration lifecycle, and hardened release packaging, with authentication and auditing provided by the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) and [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crates.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -44,17 +44,17 @@ Choose one of three install paths:
 
 #### Release tarball (Linux x86_64)
 
-Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
+Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract
-tar xzf rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd rust-panosmcp-v0.3.0
+tar xzf rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.4.0
 
 # Install the binary and systemd assets
 sudo install -m 0755 bin/rust-panosmcp /usr/local/bin/rust-panosmcp
@@ -77,13 +77,13 @@ For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspa
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.3.0/rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract and run the installer
-tar xzf rust-panosmcp-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd rust-panosmcp-v0.3.0
+tar xzf rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.4.0
 sudo packaging/lxc/install.sh
 
 # Configure the inventory and mint the first token
@@ -275,6 +275,22 @@ Three example files in [config/](config/) demonstrate the configuration surface:
 - **[`devices.mutation.example.json`](config/devices.mutation.example.json)** — Inventory variant demonstrating mutation-root configuration and admin-scoped candidate workflow fields.
 
 Inventory files never hold inline credentials: each device's `api_key` is a reference — `{"type": "env", "name": "VAR_NAME"}` for an environment variable or `{"type": "file", "path": "/protected/path"}` for a mode-restricted secret file.
+
+## Audit logging
+
+v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
+
+Change-set lifecycle auditing provides independent evidence of approval: the `approve_panos_change_set` event carries both the change-set id and the fingerprint digest, proving that a second principal reviewed the exact digest later applied via `apply_panos_change_set`.
+
+### Audit configuration flags
+
+- **`--audit-format {json|pretty}`** — Choose `json` (default, machine-parseable) or `pretty` (human-readable).
+- **`--audit-log-file <PATH>`** — Write audit events to a file path.
+- **`--audit-journald`** — Emit audit events to the systemd journal.
+- **`--audit-redact`** — HMAC-pseudonymise declared fields (device names, caller identity) so the log can be shipped to a SIEM without leaking operational identifiers.
+- **`--audit-hmac-key-file <PATH>`** — Path to the HMAC key for redaction; required when `--audit-redact` is enabled.
+
+All audit targets are optional and can be combined. When no audit target is specified, audit events are not emitted.
 
 ## Security
 

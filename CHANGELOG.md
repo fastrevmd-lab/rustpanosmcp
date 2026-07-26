@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-25
+
+### Added
+
+- **Structured audit logging via the shared [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crate** (`audit-v0.1.5`). One event per tool call with caller attribution, target devices, outcome, and execution duration. Previously the server contained only an `AUDIT_TARGET` constant with no active logging.
+- **Change-set lifecycle auditing.** `create_panos_change_set`, `approve_panos_change_set`, and `apply_panos_change_set` each emit an audit event. The approval event carries both the **change-set id and the fingerprint digest**, providing independent evidence that a second principal reviewed the exact digest later applied. Previously `mutation-state.json` — a file the server itself rewrites — was the only record of approval.
+- **New CLI flags for audit configuration:**
+  - `--audit-format` — choose `json` (default, machine-parseable) or `pretty` (human-readable).
+  - `--audit-log-file` — write audit events to a file path.
+  - `--audit-journald` — emit audit events to systemd journal.
+  - `--audit-redact` — HMAC-pseudonymise declared fields (device names, caller identity) so the log can be shipped to a SIEM without leaking operational identifiers.
+  - `--audit-hmac-key-file` — path to the HMAC key for redaction; required when `--audit-redact` is enabled.
+- Structured `Attribution` (Human/Agent, `on_behalf_of`, `change_ref`) carried through the audit path and included in every logged event.
+
 ## [0.3.0] - 2026-07-25
 
 > **Operators: check your token-file permissions before upgrading.** The server
