@@ -12,6 +12,7 @@ authors.workspace = true
 fastrand.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+mecmcp-audit.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 rust-panosmcp-auth = { version = "0.3.0", path = "../rust-panosmcp-auth" }
@@ -32,6 +33,7 @@ tempfile = "3"
 [dev-dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+mecmcp-audit = { workspace = true, features = ["test-util"] }
 rcgen = "0.14"
 tempfile = "3"
 

@@ -4,8 +4,10 @@ use crate::{
     PanosMcpError, Result,
     client::PanosClient,
     inventory::{DeviceMetadata, Inventory},
+    observability::AuditScope,
     xml::{DeviceFacts, parse_device_facts, validate_read_only_op_command, validate_read_xpath},
 };
+use rust_panosmcp_auth::CallerContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -72,13 +74,38 @@ impl PanosService {
     pub async fn gather_device_facts(
         &self,
         input: GatherDeviceFactsInput,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<GatherDeviceFactsOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "gather_device_facts",
+                "gather-facts",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "gather_device_facts",
+                "gather-facts",
+                vec![input.device.clone()],
+            ),
+        };
         let client = self.client(&input.device)?;
-        let response = client
-            .operational(SYSTEM_INFO_COMMAND, cancellation)
-            .await?;
-        let facts = parse_device_facts(&response)?;
+        let response = match client.operational(SYSTEM_INFO_COMMAND, cancellation).await {
+            Ok(r) => r,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        let facts = match parse_device_facts(&response) {
+            Ok(f) => f,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        audit.succeed();
         Ok(GatherDeviceFactsOutput {
             device: input.device,
             facts,
@@ -89,45 +116,81 @@ impl PanosService {
     pub async fn execute_panos_op(
         &self,
         input: ExecutePanosOpInput,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<XmlToolOutput> {
-        validate_read_only_op_command(&input.command)?;
-        let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
-        let client = self.client(&input.device)?;
-        let response = client.operational(&input.command, cancellation).await?;
-        Ok(XmlToolOutput {
-            device: input.device,
-            status: response.status,
-            code: response.code,
-            output: bounded_text(&response.xml, limits),
-        })
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "execute_panos_op",
+                "show-op",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("execute_panos_op", "show-op", vec![input.device.clone()]),
+        };
+        let result = async {
+            validate_read_only_op_command(&input.command)?;
+            let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
+            let client = self.client(&input.device)?;
+            let response = client.operational(&input.command, cancellation).await?;
+            Ok(XmlToolOutput {
+                device: input.device,
+                status: response.status,
+                code: response.code,
+                output: bounded_text(&response.xml, limits),
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Read running or candidate configuration under `/config`.
     pub async fn get_panos_config(
         &self,
         input: GetPanosConfigInput,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<ConfigToolOutput> {
-        let xpath = input.xpath.unwrap_or_else(|| "/config".to_owned());
-        validate_read_xpath(&xpath)?;
-        let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
-        let client = self.client(&input.device)?;
-        let response = client
-            .configuration(
-                input.source == ConfigSource::Candidate,
-                &xpath,
-                cancellation,
-            )
-            .await?;
-        Ok(ConfigToolOutput {
-            device: input.device,
-            source: input.source,
-            xpath,
-            status: response.status,
-            code: response.code,
-            output: bounded_text(&response.xml, limits),
-        })
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_config",
+                "get-config",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("get_panos_config", "get-config", vec![input.device.clone()]),
+        };
+        let result = async {
+            let xpath = input.xpath.unwrap_or_else(|| "/config".to_owned());
+            validate_read_xpath(&xpath)?;
+            let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
+            let client = self.client(&input.device)?;
+            let response = client
+                .configuration(
+                    input.source == ConfigSource::Candidate,
+                    &xpath,
+                    cancellation,
+                )
+                .await?;
+            Ok(ConfigToolOutput {
+                device: input.device,
+                source: input.source,
+                xpath,
+                status: response.status,
+                code: response.code,
+                output: bounded_text(&response.xml, limits),
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     pub(crate) fn client(&self, name: &str) -> Result<Arc<PanosClient>> {

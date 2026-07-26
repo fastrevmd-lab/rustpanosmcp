@@ -3,11 +3,12 @@
 use crate::{
     PanosMcpError, Result,
     client::PanosClient,
-    observability::AUDIT_TARGET,
+    observability::AuditScope,
     tools::PanosService,
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
 use quick_xml::escape::escape;
+use rust_panosmcp_auth::CallerContext;
 use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -653,7 +654,7 @@ impl MutationCoordinator {
         let mut state = self.state.lock().await;
         state.operations.remove(operation_id);
         if let Err(error) = self.persist_locked(&state) {
-            tracing::error!(target: AUDIT_TARGET, %error, "mutation state persistence failed");
+            tracing::error!(target: "audit", %error, "mutation state persistence failed");
         }
     }
 
@@ -754,81 +755,144 @@ impl PanosService {
     pub async fn create_change_set(
         &self,
         input: CreateChangeSetInput,
+        ctx: Option<&CallerContext>,
         owner: &str,
         grant: Option<&MutationGrant>,
         cancellation: CancellationToken,
     ) -> Result<ChangeSetOutput> {
-        validate_fingerprint(&input.expected_candidate_fingerprint)?;
-        let client = self.client(&input.device)?;
-        let policy = require_policy(&client)?;
-        validate_change_set_actions(&input.actions, policy, grant)?;
-        let current = candidate_fingerprint(&client, cancellation).await?;
-        require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
-        let now = now_unix()?;
-        let id = new_operation_id()?;
-        let digest = change_set_digest(
-            owner,
-            &input.device,
-            &input.expected_candidate_fingerprint,
-            &input.actions,
-        )?;
-        let record = ChangeSetRecord {
-            id,
-            owner: owner.to_owned(),
-            device: input.device,
-            expected_candidate_fingerprint: input.expected_candidate_fingerprint,
-            actions: input.actions,
-            digest,
-            state: ChangeSetState::Planned,
-            approver: None,
-            expires_at_unix: now.saturating_add(APPROVAL_TTL_SECS),
-            operation_id: None,
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "create_panos_change_set",
+                "plan",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "create_panos_change_set",
+                "plan",
+                vec![input.device.clone()],
+            ),
         };
-        self.mutations.insert_change_set(record.clone()).await?;
-        Ok(record.into())
+
+        let result = async {
+            validate_fingerprint(&input.expected_candidate_fingerprint)?;
+            let client = self.client(&input.device)?;
+            let policy = require_policy(&client)?;
+            validate_change_set_actions(&input.actions, policy, grant)?;
+            let current = candidate_fingerprint(&client, cancellation).await?;
+            require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
+            let now = now_unix()?;
+            let id = new_operation_id()?;
+            let digest = change_set_digest(
+                owner,
+                &input.device,
+                &input.expected_candidate_fingerprint,
+                &input.actions,
+            )?;
+            let record = ChangeSetRecord {
+                id: id.clone(),
+                owner: owner.to_owned(),
+                device: input.device.clone(),
+                expected_candidate_fingerprint: input.expected_candidate_fingerprint,
+                actions: input.actions,
+                digest: digest.clone(),
+                state: ChangeSetState::Planned,
+                approver: None,
+                expires_at_unix: now.saturating_add(APPROVAL_TTL_SECS),
+                operation_id: None,
+            };
+            self.mutations.insert_change_set(record.clone()).await?;
+
+            audit.meta("change_set_id", id);
+            audit.meta("digest", digest);
+            audit.meta("action_count", record.actions.len() as u64);
+
+            Ok(record.into())
+        }
+        .await;
+
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Approve the exact digest of another principal's unexpired plan.
     pub async fn approve_change_set(
         &self,
         input: ApproveChangeSetInput,
+        ctx: Option<&CallerContext>,
         approver: &str,
     ) -> Result<ChangeSetOutput> {
-        validate_digest(&input.expected_digest, "expected_digest")?;
-        let mut record = self
-            .mutations
-            .change_set(&input.change_set_id, &input.device)
-            .await?;
-        if record.owner == approver {
-            return Err(policy(
-                "change_set_id",
-                "the change-set owner cannot approve their own plan",
-            ));
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "approve_panos_change_set",
+                "approve",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "approve_panos_change_set",
+                "approve",
+                vec![input.device.clone()],
+            ),
+        };
+
+        // Add change_set_id and digest to audit metadata BEFORE any checks
+        // so they're emitted even on denial/failure
+        audit.meta("change_set_id", input.change_set_id.clone());
+        audit.meta("digest", input.expected_digest.clone());
+
+        let result = async {
+            validate_digest(&input.expected_digest, "expected_digest")?;
+            let mut record = self
+                .mutations
+                .change_set(&input.change_set_id, &input.device)
+                .await?;
+            if record.owner == approver {
+                return Err(policy(
+                    "change_set_id",
+                    "the change-set owner cannot approve their own plan",
+                ));
+            }
+            if record.state != ChangeSetState::Planned {
+                return Err(policy(
+                    "change_set_id",
+                    "change set is not awaiting approval",
+                ));
+            }
+            if now_unix()? >= record.expires_at_unix {
+                record.state = ChangeSetState::Expired;
+                self.mutations.update_change_set(record).await?;
+                return Err(policy(
+                    "change_set_id",
+                    "change-set approval window expired",
+                ));
+            }
+            if record.digest != input.expected_digest {
+                return Err(policy(
+                    "expected_digest",
+                    "digest does not match the exact stored change set",
+                ));
+            }
+            record.state = ChangeSetState::Approved;
+            record.approver = Some(approver.to_owned());
+            self.mutations.update_change_set(record.clone()).await?;
+
+            // Add owner to metadata after successful approval
+            audit.meta("owner", record.owner.clone());
+            audit.meta("action_count", record.actions.len() as u64);
+
+            Ok(record.into())
         }
-        if record.state != ChangeSetState::Planned {
-            return Err(policy(
-                "change_set_id",
-                "change set is not awaiting approval",
-            ));
+        .await;
+
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
         }
-        if now_unix()? >= record.expires_at_unix {
-            record.state = ChangeSetState::Expired;
-            self.mutations.update_change_set(record).await?;
-            return Err(policy(
-                "change_set_id",
-                "change-set approval window expired",
-            ));
-        }
-        if record.digest != input.expected_digest {
-            return Err(policy(
-                "expected_digest",
-                "digest does not match the exact stored change set",
-            ));
-        }
-        record.state = ChangeSetState::Approved;
-        record.approver = Some(approver.to_owned());
-        self.mutations.update_change_set(record.clone()).await?;
-        Ok(record.into())
+        result
     }
 
     /// Return an exact persistent plan for independent review or recovery.
@@ -852,11 +916,28 @@ impl PanosService {
     pub async fn apply_change_set(
         &self,
         input: ApplyChangeSetInput,
+        ctx: Option<&CallerContext>,
         owner: &str,
         grant: Option<&MutationGrant>,
         cancellation: CancellationToken,
     ) -> Result<StageConfigOutput> {
-        let started = Instant::now();
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "apply_panos_change_set",
+                "apply",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "apply_panos_change_set",
+                "apply",
+                vec![input.device.clone()],
+            ),
+        };
+
+        audit.meta("change_set_id", input.change_set_id.clone());
+        audit.meta("digest", input.expected_digest.clone());
+
         validate_digest(&input.expected_digest, "expected_digest")?;
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
         let mut change_set = self
@@ -1026,18 +1107,8 @@ impl PanosService {
             if config_lock_held {
                 release_config_lock_best_effort(&client).await;
             }
-            audit(
-                AuditEvent {
-                    owner,
-                    device: &input.device,
-                    operation_id: &operation_id,
-                    action: "apply_change_set",
-                    xpath: &record.xpath,
-                },
-                false,
-                started.elapsed(),
-                None,
-            );
+            audit.meta("operation_id", operation_id.clone());
+            audit.fail(&error);
             return match reverted {
                 Ok(()) => Err(error),
                 Err(revert) => Err(PanosMcpError::Configuration(format!(
@@ -1055,8 +1126,10 @@ impl PanosService {
                 ));
                 self.mutations.update(record).await?;
                 change_set.state = ChangeSetState::Failed;
-                change_set.operation_id = Some(operation_id);
+                change_set.operation_id = Some(operation_id.clone());
                 self.mutations.update_change_set(change_set).await?;
+                audit.meta("operation_id", operation_id);
+                audit.fail(&error);
                 return Err(error);
             }
         };
@@ -1065,19 +1138,13 @@ impl PanosService {
         self.mutations.update(record).await?;
         change_set.state = ChangeSetState::Applied;
         change_set.operation_id = Some(operation_id.clone());
-        self.mutations.update_change_set(change_set).await?;
-        audit(
-            AuditEvent {
-                owner,
-                device: &input.device,
-                operation_id: &operation_id,
-                action: "apply_change_set",
-                xpath: &input.change_set_id,
-            },
-            true,
-            started.elapsed(),
-            None,
-        );
+        self.mutations.update_change_set(change_set.clone()).await?;
+
+        audit.meta("operation_id", operation_id.clone());
+        audit.meta("approver", change_set.approver.unwrap_or_default());
+        audit.meta("action_count", change_set.actions.len() as u64);
+        audit.succeed();
+
         Ok(StageConfigOutput {
             operation_id,
             device: input.device,
@@ -1834,7 +1901,7 @@ async fn release_config_lock(client: &PanosClient) -> Result<()> {
 
 async fn release_config_lock_best_effort(client: &PanosClient) {
     if let Err(error) = release_config_lock(client).await {
-        tracing::error!(target: AUDIT_TARGET, device = client.device_name(), %error, "PAN-OS configuration lock release failed");
+        tracing::error!(target: "audit", device = client.device_name(), %error, "PAN-OS configuration lock release failed");
     }
 }
 
@@ -2071,7 +2138,7 @@ struct AuditEvent<'a> {
 fn audit(event: AuditEvent<'_>, succeeded: bool, duration: Duration, job_id: Option<&str>) {
     let xpath_fingerprint = format!("sha256:{}", digest_hex(event.xpath.as_bytes()));
     tracing::info!(
-        target: AUDIT_TARGET,
+        target: "audit",
         principal = event.owner,
         device = event.device,
         operation_id = event.operation_id,

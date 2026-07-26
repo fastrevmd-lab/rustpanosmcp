@@ -79,6 +79,26 @@ pub struct Cli {
     /// Maximum Streamable HTTP request body in bytes.
     #[arg(long, default_value_t = 1024 * 1024)]
     pub request_body_limit: usize,
+
+    /// Audit log format: `text` or `json`.
+    #[arg(long, default_value = "text")]
+    pub audit_format: String,
+
+    /// Optional dedicated JSON audit log file path.
+    #[arg(long)]
+    pub audit_log_file: Option<PathBuf>,
+
+    /// Enable journald audit sink for `target="audit"` events.
+    #[arg(long)]
+    pub audit_journald: bool,
+
+    /// Optional per-field redaction policy (e.g., `devices=hmac,host=drop`).
+    #[arg(long)]
+    pub audit_redact: Option<String>,
+
+    /// HMAC key file for audit redaction (required if audit-redact requests hmac).
+    #[arg(long)]
+    pub audit_hmac_key_file: Option<PathBuf>,
 }
 
 /// Top-level management commands.
