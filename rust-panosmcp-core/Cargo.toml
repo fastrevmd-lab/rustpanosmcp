@@ -15,7 +15,7 @@ getrandom.workspace = true
 mecmcp-audit.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
-rust-panosmcp-auth = { version = "0.3.0", path = "../rust-panosmcp-auth" }
+rust-panosmcp-auth = { version = "0.4.0", path = "../rust-panosmcp-auth" }
 rustix.workspace = true
 rustls.workspace = true
 schemars.workspace = true

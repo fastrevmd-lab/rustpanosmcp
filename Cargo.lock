@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "mecmcp-auth",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "axum-server",
