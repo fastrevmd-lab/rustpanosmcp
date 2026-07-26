@@ -4,13 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Supported MCP transports.
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum Transport {
-    /// Local child-process transport with no listening socket.
-    Stdio,
-    /// MCP Streamable HTTP transport.
-    StreamableHttp,
-}
+pub use mecmcp_runtime::cli::Transport;
 
 /// Process arguments.
 #[derive(Debug, Parser)]
