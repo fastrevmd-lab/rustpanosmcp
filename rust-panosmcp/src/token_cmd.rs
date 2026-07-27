@@ -27,14 +27,6 @@ pub enum TokenCommandError {
 
 /// Execute one token management command.
 pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCommandError> {
-    // `Some` keeps device-name validation strict: this server always knows its
-    // own inventory, so a token naming an unknown device is a typo, not a
-    // legitimate forward reference.
-    let known = KnownNames {
-        devices: Some(known_devices),
-        tools: rust_panosmcp_auth::KNOWN_TOOLS,
-    };
-
     match action {
         TokenAction::Add {
             tokens_file,
@@ -47,6 +39,14 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             expires_in_secs,
             server_pid,
         } => {
+            // `Some` keeps device-name validation strict: this server always knows its
+            // own inventory, so a token naming an unknown device is a typo, not a
+            // legitimate forward reference. Add is the only operation that creates
+            // new scopes, so it's the only one that needs to validate device names.
+            let known = KnownNames {
+                devices: Some(known_devices),
+                tools: rust_panosmcp_auth::KNOWN_TOOLS,
+            };
             let devices = parse_scope(devices, "devices")?;
             let tools = parse_scope(tools, "tools")?;
             let mutation = parse_mutation_grant(mutation_roots, mutation_actions)?;
@@ -64,6 +64,7 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             signal_reload(server_pid)?;
         }
         TokenAction::List { tokens_file } => {
+            // List is read-only and doesn't modify scopes, so no inventory validation needed.
             let file = TokenStoreFile::load(&tokens_file)?;
             let mut output = std::io::stdout().lock();
             writeln!(
@@ -105,6 +106,15 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             name,
             server_pid,
         } => {
+            // Revoke doesn't create new scopes; it only removes an entry.
+            // Skip device validation so revocation succeeds even when the inventory
+            // is inaccessible (e.g., permission denied). This is critical: the failure
+            // mode of a revocation path should be "credential is gone" not "credential
+            // still works because the command failed".
+            let known = KnownNames {
+                devices: None,
+                tools: rust_panosmcp_auth::KNOWN_TOOLS,
+            };
             let removed = TokenStoreFile::revoke(&tokens_file, &name, &known)?;
             if removed {
                 eprintln!("revoked '{name}'");
@@ -118,6 +128,13 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             name,
             server_pid,
         } => {
+            // Rotate doesn't create new scopes; it only replaces the secret while
+            // preserving existing scopes. Skip device validation so rotation succeeds
+            // even when the inventory is inaccessible.
+            let known = KnownNames {
+                devices: None,
+                tools: rust_panosmcp_auth::KNOWN_TOOLS,
+            };
             let secret = TokenStoreFile::rotate(&tokens_file, &name, &known)?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
