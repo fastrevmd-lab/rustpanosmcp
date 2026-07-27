@@ -7,13 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Rate limiting now uses a token-bucket algorithm instead of a fixed sliding window**, via the shared [`mecmcp-transport`](https://github.com/fastrevmd-lab/mecmcp) crate (`transport-v0.1.6`). The CLI flags `--ip-rate-per-minute` and `--token-rate-per-minute` are unchanged, but the enforcement is stricter: the old fixed-window implementation admitted up to 2× the nominal rate across a window boundary (a client bursting exactly at the edge of a 60-second window could send the full per-minute quota twice). The token bucket does not allow this — sustained requests are bounded to exactly the configured rate, and clients that previously survived a boundary burst will now receive HTTP 429. This matches `rust-junosmcp`'s behavior as of its v0.8.0 release.
-
-  *(Moved here from the 0.4.0 section, where it was filed by mistake. v0.4.0's tree still contains `FixedWindowLimiter`; the token bucket landed afterwards in #54. Anyone reading 0.4.0's notes would have believed boundary bursts were already bounded.)*
+## [0.5.0] - 2026-07-26
 
 ### Added
+
+- **Session and concurrency caps, enforced by default.** New flags with the
+  defaults shown:
+
+  | Flag | Default |
+  |---|---|
+  | `--max-sessions` | 128 |
+  | `--max-sessions-per-token` | 16 |
+  | `--max-inflight-requests` | 64 |
+  | `--max-inflight-requests-per-token` | 16 |
+  | `--max-inflight-requests-per-target` | 4 |
+
+  **These are active on upgrade, not opt-in.** This server previously had no
+  session or concurrency limits at all, so a deployment that routinely holds
+  more than 128 sessions, or issues more than 16 concurrent requests on one
+  token, will begin receiving **HTTP 503** where it previously succeeded. Set a
+  flag to `0` to disable that dimension if the defaults are too tight for your
+  workload.
+
+  The values match `rustjunosmcp`'s, so the two servers behave alike out of the
+  box.
+
+- **`/metrics`, behind `--enable-metrics`.** Exports `panosmcp_*` Prometheus
+  series — active sessions, limit hits, tool duration, sessions reaped. Off by
+  default.
+
+  **The endpoint is unauthenticated.** Bind it somewhere your scrape target can
+  reach and callers cannot, or leave it off.
 
 - **Blocklist guardrails for read-only tools.** `execute_panos_op` and
   `get_panos_config` now evaluate an optional per-inventory blocklist through
@@ -36,8 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moving mutations onto the blocklist would have silently widened what a
   mutation token can reach.
 
-
 ### Changed
+
+- **Rate limiting now uses a token-bucket algorithm instead of a fixed sliding window**, via the shared [`mecmcp-transport`](https://github.com/fastrevmd-lab/mecmcp) crate (`transport-v0.1.6`). The CLI flags `--ip-rate-per-minute` and `--token-rate-per-minute` are unchanged, but the enforcement is stricter: the old fixed-window implementation admitted up to 2× the nominal rate across a window boundary (a client bursting exactly at the edge of a 60-second window could send the full per-minute quota twice). The token bucket does not allow this — sustained requests are bounded to exactly the configured rate, and clients that previously survived a boundary burst will now receive HTTP 429. This matches `rust-junosmcp`'s behavior as of its v0.8.0 release.
+
+  *(Moved here from the 0.4.0 section, where it was filed by mistake. v0.4.0's tree still contains `FixedWindowLimiter`; the token bucket landed afterwards in #54. Anyone reading 0.4.0's notes would have believed boundary bursts were already bounded.)*
 
 - **Inventory loading moved to the shared `mecmcp-inventory` crate.** The
   `{"version":1,"devices":[…]}` envelope parses exactly as before — the trait
