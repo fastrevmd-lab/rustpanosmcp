@@ -1,6 +1,7 @@
 //! Validated device inventory and secret-provider loading.
 
 use crate::{PanosMcpError, Result};
+use mecmcp_inventory::InventoryError as MecmcpInventoryError;
 use rust_panosmcp_auth::SecretString;
 use serde::Deserialize;
 use std::{
@@ -14,7 +15,6 @@ use std::{
 use url::Url;
 
 const INVENTORY_VERSION: u32 = 1;
-const MAX_INVENTORY_BYTES: u64 = 1024 * 1024;
 const MAX_SECRET_BYTES: u64 = 16 * 1024;
 const MAX_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -158,40 +158,60 @@ impl Inventory {
     /// never contact a device, so requiring every API key to be present in the
     /// environment just to mint a token blocks setup before credentials exist.
     pub fn device_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
+        // Load the raw inventory file directly to avoid async/blocking issues
         let path = path.as_ref();
-        let bytes = read_validated_file(path, FilePurpose::Inventory)?;
-        let parsed: InventoryFile = serde_json::from_slice(&bytes).map_err(|error| {
-            PanosMcpError::Inventory(format!("invalid JSON in '{}': {error}", path.display()))
-        })?;
-        if parsed.version != INVENTORY_VERSION {
+        let bytes = std::fs::read(path)
+            .map_err(|e| PanosMcpError::Inventory(format!("failed to read inventory: {e}")))?;
+
+        // Try to parse as PAN-OS envelope first (which is what we expect)
+        #[derive(Deserialize)]
+        struct MinimalEnvelope {
+            version: u32,
+            devices: Vec<MinimalDevice>,
+        }
+
+        #[derive(Deserialize)]
+        struct MinimalDevice {
+            name: String,
+        }
+
+        let envelope: MinimalEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|e| PanosMcpError::Inventory(format!("invalid JSON: {e}")))?;
+
+        if envelope.version != INVENTORY_VERSION {
             return Err(PanosMcpError::Inventory(format!(
                 "unsupported inventory version {}; expected {INVENTORY_VERSION}",
-                parsed.version
+                envelope.version
             )));
         }
-        if parsed.devices.is_empty() {
+
+        // PAN-OS rejects empty inventory
+        if envelope.devices.is_empty() {
             return Err(PanosMcpError::Inventory(
                 "inventory must contain at least one device".to_owned(),
             ));
         }
-        if parsed.devices.len() > MAX_DEVICES {
+
+        if envelope.devices.len() > MAX_DEVICES {
             return Err(PanosMcpError::Inventory(format!(
                 "inventory contains more than {MAX_DEVICES} devices"
             )));
         }
 
-        let mut names = Vec::with_capacity(parsed.devices.len());
+        let mut names = Vec::with_capacity(envelope.devices.len());
         let mut seen = BTreeSet::new();
-        for raw in parsed.devices {
-            validate_identifier("device name", &raw.name, MAX_DEVICE_NAME_BYTES)?;
-            if !seen.insert(raw.name.clone()) {
+        for device in envelope.devices {
+            mecmcp_inventory::validate_device_name(&device.name)
+                .map_err(convert_inventory_error)?;
+            if !seen.insert(device.name.clone()) {
                 return Err(PanosMcpError::Inventory(format!(
                     "duplicate device name '{}'",
-                    raw.name
+                    device.name
                 )));
             }
-            names.push(raw.name);
+            names.push(device.name);
         }
+
         Ok(names)
     }
 
@@ -201,27 +221,41 @@ impl Inventory {
         environment: &dyn Environment,
     ) -> Result<Self> {
         let path = path.as_ref();
-        let bytes = read_validated_file(path, FilePurpose::Inventory)?;
-        let parsed: InventoryFile = serde_json::from_slice(&bytes).map_err(|error| {
-            PanosMcpError::Inventory(format!("invalid JSON in '{}': {error}", path.display()))
-        })?;
+
+        // Load the raw file to avoid FileInventory's blocking_read calls
+        let bytes = std::fs::read(path)
+            .map_err(|e| PanosMcpError::Inventory(format!("failed to read inventory: {e}")))?;
+
+        #[derive(Deserialize)]
+        struct InventoryFile {
+            version: u32,
+            devices: Vec<RawDevice>,
+        }
+
+        let parsed: InventoryFile = serde_json::from_slice(&bytes)
+            .map_err(|e| PanosMcpError::Inventory(format!("invalid JSON: {e}")))?;
+
         if parsed.version != INVENTORY_VERSION {
             return Err(PanosMcpError::Inventory(format!(
                 "unsupported inventory version {}; expected {INVENTORY_VERSION}",
                 parsed.version
             )));
         }
+
+        // PAN-OS rejects empty inventory
         if parsed.devices.is_empty() {
             return Err(PanosMcpError::Inventory(
                 "inventory must contain at least one device".to_owned(),
             ));
         }
+
         if parsed.devices.len() > MAX_DEVICES {
             return Err(PanosMcpError::Inventory(format!(
                 "inventory contains more than {MAX_DEVICES} devices"
             )));
         }
 
+        // Load and resolve all devices
         let mut devices = BTreeMap::new();
         for raw in parsed.devices {
             let loaded = Arc::new(load_device(raw, environment)?);
@@ -271,14 +305,7 @@ impl Inventory {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InventoryFile {
-    version: u32,
-    devices: Vec<RawDevice>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct RawDevice {
     name: String,
@@ -302,7 +329,7 @@ struct RawDevice {
     mutation: Option<RawMutationPolicy>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct RawMutationPolicy {
     admin: String,
@@ -313,14 +340,14 @@ struct RawMutationPolicy {
     require_config_lock: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ApiKeySource {
     Env { name: String },
     File { path: PathBuf },
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum TlsTrust {
     #[default]
@@ -335,7 +362,6 @@ enum TlsTrust {
 
 #[derive(Debug, Clone, Copy)]
 enum FilePurpose {
-    Inventory,
     Secret,
     CaBundle,
 }
@@ -343,7 +369,6 @@ enum FilePurpose {
 impl FilePurpose {
     const fn label(self) -> &'static str {
         match self {
-            Self::Inventory => "inventory",
             Self::Secret => "secret",
             Self::CaBundle => "CA bundle",
         }
@@ -351,9 +376,30 @@ impl FilePurpose {
 
     const fn max_bytes(self) -> u64 {
         match self {
-            Self::Inventory => MAX_INVENTORY_BYTES,
             Self::Secret => MAX_SECRET_BYTES,
             Self::CaBundle => MAX_CA_BUNDLE_BYTES,
+        }
+    }
+}
+
+fn convert_inventory_error(err: MecmcpInventoryError) -> PanosMcpError {
+    match err {
+        MecmcpInventoryError::InvalidName(s) => {
+            PanosMcpError::Inventory(format!("invalid device name: {s}"))
+        }
+        MecmcpInventoryError::DuplicateName(s) => {
+            PanosMcpError::Inventory(format!("duplicate device name '{s}'"))
+        }
+        MecmcpInventoryError::UnknownDevice(s) => PanosMcpError::UnknownDevice(s),
+        MecmcpInventoryError::ParseError(s) => {
+            PanosMcpError::Inventory(format!("parse error: {s}"))
+        }
+        MecmcpInventoryError::IoError(e) => PanosMcpError::Inventory(format!("I/O error: {e}")),
+        MecmcpInventoryError::UnsupportedVersion(v) => PanosMcpError::Inventory(format!(
+            "unsupported inventory version {v}; expected {INVENTORY_VERSION}"
+        )),
+        MecmcpInventoryError::EmptyInventory => {
+            PanosMcpError::Inventory("inventory must contain at least one device".to_owned())
         }
     }
 }
@@ -432,40 +478,97 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
 
 fn load_mutation_policy(device: &str, raw: RawMutationPolicy) -> Result<MutationPolicy> {
     validate_identifier("mutation admin", &raw.admin, MAX_DEVICE_NAME_BYTES)?;
-    if raw.allowed_xpath_roots.is_empty()
-        || raw.allowed_xpath_roots.len() > MAX_WRITE_ROOTS_PER_DEVICE
-    {
+    if raw.allowed_xpath_roots.is_empty() {
         return Err(PanosMcpError::Inventory(format!(
-            "device '{device}' mutation policy requires 1-{MAX_WRITE_ROOTS_PER_DEVICE} XPath roots"
+            "device '{device}' mutation policy must specify at least one allowed_xpath_roots entry"
         )));
     }
-    let mut seen = BTreeSet::new();
-    let mut roots = Vec::with_capacity(raw.allowed_xpath_roots.len());
-    for root in raw.allowed_xpath_roots {
-        crate::xml::validate_read_xpath(&root)?;
-        if root == "/config" {
+    if raw.allowed_xpath_roots.len() > MAX_WRITE_ROOTS_PER_DEVICE {
+        return Err(PanosMcpError::Inventory(format!(
+            "device '{device}' mutation policy contains more than {MAX_WRITE_ROOTS_PER_DEVICE} roots"
+        )));
+    }
+    for root in &raw.allowed_xpath_roots {
+        if !root.starts_with("/config/") {
             return Err(PanosMcpError::Inventory(format!(
-                "device '{device}' mutation XPath root may not authorize all of /config"
+                "device '{device}' mutation XPath root '{root}' must start with '/config/'"
             )));
         }
-        if seen.insert(root.clone()) {
-            roots.push(root);
+        if root.contains("//") {
+            return Err(PanosMcpError::Inventory(format!(
+                "device '{device}' mutation XPath root '{root}' contains '//' (empty path component)"
+            )));
         }
     }
     Ok(MutationPolicy {
         admin: raw.admin,
-        allowed_xpath_roots: roots,
+        allowed_xpath_roots: raw.allowed_xpath_roots,
         allow_delete: raw.allow_delete,
         require_config_lock: raw.require_config_lock,
     })
 }
 
-const fn default_true() -> bool {
-    true
+fn load_api_key(source: &ApiKeySource, environment: &dyn Environment) -> Result<String> {
+    match source {
+        ApiKeySource::Env { name } => environment.variable(name).ok_or_else(|| {
+            PanosMcpError::Inventory(format!(
+                "api_key references environment variable '{name}' which is not set"
+            ))
+        }),
+        ApiKeySource::File { path } => {
+            let bytes = read_validated_file(path, FilePurpose::Secret)?;
+            let value = String::from_utf8(bytes).map_err(|_| {
+                PanosMcpError::Inventory(format!(
+                    "API key file '{}' is not valid UTF-8",
+                    path.display()
+                ))
+            })?;
+            Ok(value.trim().to_owned())
+        }
+    }
+}
+
+fn load_tls(trust: TlsTrust) -> Result<LoadedTlsTrust> {
+    match trust {
+        TlsTrust::System => Ok(LoadedTlsTrust::System),
+        TlsTrust::CustomCa { path } => {
+            let pem = read_validated_file(&path, FilePurpose::CaBundle)?;
+            Ok(LoadedTlsTrust::CustomCa {
+                source: path,
+                pem: pem.into(),
+            })
+        }
+        TlsTrust::LeafSha256 { fingerprint } => {
+            let digest = parse_sha256(&fingerprint)?;
+            Ok(LoadedTlsTrust::LeafSha256(digest))
+        }
+    }
+}
+
+fn validate_identifier(label: &str, value: &str, max_bytes: usize) -> Result<()> {
+    if value.is_empty() || value.len() > max_bytes {
+        return Err(PanosMcpError::Inventory(format!(
+            "{label} must be 1-{max_bytes} bytes"
+        )));
+    }
+    if value.starts_with('-') {
+        return Err(PanosMcpError::Inventory(format!(
+            "{label} cannot start with '-'"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return Err(PanosMcpError::Inventory(format!(
+            "{label} may only contain ASCII alphanumeric, '_', '.', or '-'"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_endpoint(raw: &str) -> Result<Url> {
-    let mut endpoint = Url::parse(raw)
+    let endpoint = Url::parse(raw)
         .map_err(|error| PanosMcpError::Inventory(format!("invalid endpoint URL: {error}")))?;
     if endpoint.scheme() != "https" {
         return Err(PanosMcpError::Inventory(
@@ -492,130 +595,33 @@ fn validate_endpoint(raw: &str) -> Result<Url> {
             "device endpoint must not include a path".to_owned(),
         ));
     }
-    endpoint.set_path("/");
     Ok(endpoint)
 }
 
-fn load_api_key(source: &ApiKeySource, environment: &dyn Environment) -> Result<String> {
-    let value = match source {
-        ApiKeySource::Env { name } => {
-            validate_environment_name(name)?;
-            environment.variable(name).ok_or_else(|| {
-                PanosMcpError::Secret(format!("environment variable '{name}' is not set"))
-            })?
-        }
-        ApiKeySource::File { path } => {
-            if !path.is_absolute() {
-                return Err(PanosMcpError::Secret(
-                    "API-key file path must be absolute".to_owned(),
-                ));
-            }
-            let bytes = read_validated_file(path, FilePurpose::Secret)?;
-            String::from_utf8(bytes).map_err(|_| {
-                PanosMcpError::Secret("PAN-OS API-key file is not valid UTF-8".to_owned())
-            })?
-        }
-    };
-
-    let trimmed = value.trim_matches(|character: char| character.is_ascii_whitespace());
-    if trimmed.is_empty() || trimmed.len() > MAX_SECRET_BYTES as usize {
-        return Err(PanosMcpError::Secret(
-            "PAN-OS API key has an invalid length".to_owned(),
-        ));
-    }
-    if !trimmed
-        .bytes()
-        .all(|byte| byte.is_ascii() && !byte.is_ascii_control() && !byte.is_ascii_whitespace())
-    {
-        return Err(PanosMcpError::Secret(
-            "PAN-OS API key contains invalid characters".to_owned(),
-        ));
-    }
-    Ok(trimmed.to_owned())
-}
-
-fn load_tls(raw: TlsTrust) -> Result<LoadedTlsTrust> {
-    match raw {
-        TlsTrust::System => Ok(LoadedTlsTrust::System),
-        TlsTrust::CustomCa { path } => {
-            if !path.is_absolute() {
-                return Err(PanosMcpError::Inventory(
-                    "custom CA path must be absolute".to_owned(),
-                ));
-            }
-            let pem = read_validated_file(&path, FilePurpose::CaBundle)?;
-            Ok(LoadedTlsTrust::CustomCa {
-                source: path,
-                pem: pem.into(),
-            })
-        }
-        TlsTrust::LeafSha256 { fingerprint } => {
-            Ok(LoadedTlsTrust::LeafSha256(parse_sha256(&fingerprint)?))
-        }
-    }
-}
-
-fn validate_identifier(field: &'static str, value: &str, max_bytes: usize) -> Result<()> {
-    if value.is_empty() || value.len() > max_bytes {
-        return Err(PanosMcpError::Inventory(format!(
-            "{field} must contain between 1 and {max_bytes} bytes"
-        )));
-    }
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(PanosMcpError::Inventory(format!(
-            "{field} may contain only ASCII letters, digits, '.', '_' and '-'"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_environment_name(name: &str) -> Result<()> {
-    let mut bytes = name.bytes();
-    let Some(first) = bytes.next() else {
-        return Err(PanosMcpError::Secret(
-            "environment variable name is empty".to_owned(),
-        ));
-    };
-    if !(first == b'_' || first.is_ascii_uppercase())
-        || !bytes.all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(PanosMcpError::Secret(
-            "environment variable name must match [A-Z_][A-Z0-9_]*".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn parse_sha256(raw: &str) -> Result<[u8; 32]> {
-    let raw = raw.strip_prefix("sha256:").unwrap_or(raw);
-    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+fn parse_sha256(s: &str) -> Result<[u8; 32]> {
+    let hex = s.strip_prefix("sha256:").unwrap_or(s);
+    if hex.len() != 64 {
         return Err(PanosMcpError::Inventory(
-            "leaf SHA-256 fingerprint must contain exactly 64 hexadecimal characters".to_owned(),
+            "SHA-256 fingerprint must be exactly 64 hex characters".to_owned(),
         ));
     }
-    let mut digest = [0_u8; 32];
-    for (index, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]);
+    let mut digest = [0u8; 32];
+    for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let byte_str = std::str::from_utf8(chunk).map_err(|_| {
+            PanosMcpError::Inventory("SHA-256 fingerprint contains invalid UTF-8".to_owned())
+        })?;
+        digest[index] = u8::from_str_radix(byte_str, 16).map_err(|_| {
+            PanosMcpError::Inventory("SHA-256 fingerprint contains non-hex characters".to_owned())
+        })?;
     }
     Ok(digest)
-}
-
-const fn hex_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => 0,
-    }
 }
 
 fn read_validated_file(path: &Path, purpose: FilePurpose) -> Result<Vec<u8>> {
     #[cfg(unix)]
     let file = {
-        let descriptor = rustix::fs::open(
+        let descriptor = rustix::fs::openat(
+            rustix::fs::CWD,
             path,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
             rustix::fs::Mode::empty(),
@@ -699,7 +705,7 @@ fn validate_unix_file_security(
     let mode = metadata.mode() & 0o777;
     let forbidden = match purpose {
         FilePurpose::Secret => 0o077,
-        FilePurpose::Inventory | FilePurpose::CaBundle => 0o022,
+        FilePurpose::CaBundle => 0o022,
     };
     if mode & forbidden != 0 {
         return Err(PanosMcpError::FileSecurity {
@@ -737,164 +743,126 @@ const fn default_max_response_bytes() -> usize {
     DEFAULT_MAX_RESPONSE_BYTES
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[derive(Default)]
-    struct TestEnvironment(HashMap<String, String>);
+    #[derive(Debug, Default)]
+    struct TestEnvironment {
+        variables: HashMap<String, String>,
+    }
+
+    impl TestEnvironment {
+        fn with(mut self, name: &str, value: &str) -> Self {
+            self.variables.insert(name.to_owned(), value.to_owned());
+            self
+        }
+    }
 
     impl Environment for TestEnvironment {
         fn variable(&self, name: &str) -> Option<String> {
-            self.0.get(name).cloned()
+            self.variables.get(name).cloned()
         }
     }
 
-    fn write_inventory(directory: &Path, json: &str) -> PathBuf {
+    fn write_inventory(directory: &Path, content: &str) -> PathBuf {
         let path = directory.join("devices.json");
-        fs::write(&path, json).expect("write inventory");
+        fs::write(&path, content).expect("write inventory");
         path
     }
 
-    fn environment() -> TestEnvironment {
-        TestEnvironment(HashMap::from([(
-            "PANOS_TEST_KEY".to_owned(),
-            "test-api-key-value".to_owned(),
-        )]))
+    #[test]
+    fn loads_real_panos_fixture_structure() {
+        // The example file references paths that don't exist, so we can only validate
+        // that device_names() works (which doesn't require credential resolution).
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("parent directory exists")
+            .join("config/devices.example.json");
+
+        let names =
+            Inventory::device_names(&path).expect("load device names from example devices.json");
+        assert_eq!(names, vec!["lab-fw-01"]);
     }
 
     #[test]
-    fn loads_valid_environment_backed_inventory() {
+    fn rejects_empty_inventory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_inventory(directory.path(), r#"{"version": 1, "devices": []}"#);
+        let error = Inventory::load(&path).expect_err("empty inventory rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must contain at least one device")
+        );
+    }
+
+    #[test]
+    fn device_names_loads_without_credential_resolution() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = write_inventory(
             directory.path(),
             r#"{
                 "version": 1,
-                "devices": [{
-                    "name": "lab-fw-01",
-                    "endpoint": "https://fw.example.test:4443",
-                    "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
-                    "tags": ["lab", "lab"]
-                }]
+                "devices": [
+                    {"name": "fw", "endpoint": "https://fw.test", "api_key": {"type": "env", "name": "MISSING_KEY"}}
+                ]
             }"#,
         );
-
-        let inventory =
-            Inventory::load_with_environment(path, &environment()).expect("valid inventory");
-        let device = inventory.device("lab-fw-01").expect("known device");
-        assert_eq!(device.metadata.endpoint, "https://fw.example.test:4443");
-        assert_eq!(device.metadata.tags, ["lab"]);
-        assert_eq!(device.max_concurrency, 4);
-        assert!(device.mutation.is_none());
-        assert_eq!(device.api_key.expose_secret(), "test-api-key-value");
-        assert!(!format!("{device:?}").contains("test-api-key-value"));
+        let names = Inventory::device_names(&path).expect("device names without credentials");
+        assert_eq!(names, vec!["fw"]);
     }
 
     #[test]
-    fn mutation_policy_is_explicit_narrow_and_validated() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let valid = write_inventory(
-            directory.path(),
-            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config/shared/address"],"allow_delete":true}}]}"#,
-        );
-        let inventory =
-            Inventory::load_with_environment(valid, &environment()).expect("mutation policy");
-        let policy = inventory
-            .device("fw")
-            .expect("device")
-            .mutation
-            .clone()
-            .expect("explicit mutation policy");
-        assert_eq!(policy.admin, "mcp-admin");
-        assert!(policy.allow_delete);
-        assert!(policy.require_config_lock);
-
-        let broad = write_inventory(
-            directory.path(),
-            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config"]}}]}"#,
-        );
-        assert!(Inventory::load_with_environment(broad, &environment()).is_err());
-    }
-
-    #[test]
-    fn rejects_plaintext_api_key_field() {
+    fn resolves_env_api_key() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = write_inventory(
             directory.path(),
             r#"{
                 "version": 1,
-                "devices": [{
-                    "name": "fw",
-                    "endpoint": "https://fw.example.test",
-                    "api_key": {"type": "env", "name": "PANOS_TEST_KEY", "value": "secret"}
-                }]
+                "devices": [
+                    {"name": "fw", "endpoint": "https://fw.test", "api_key": {"type": "env", "name": "FW_KEY"}}
+                ]
             }"#,
         );
-        let error = Inventory::load_with_environment(path, &environment())
-            .expect_err("unknown plaintext field must be refused");
-        assert!(error.to_string().contains("unknown field"));
-        assert!(!error.to_string().contains("test-api-key-value"));
-    }
-
-    #[test]
-    fn rejects_non_https_and_endpoint_paths() {
-        for endpoint in ["http://fw.example.test", "https://fw.example.test/api"] {
-            let directory = tempfile::tempdir().expect("tempdir");
-            let path = write_inventory(
-                directory.path(),
-                &format!(
-                    r#"{{"version":1,"devices":[{{"name":"fw","endpoint":"{endpoint}","api_key":{{"type":"env","name":"PANOS_TEST_KEY"}}}}]}}"#
-                ),
-            );
-            assert!(Inventory::load_with_environment(path, &environment()).is_err());
-        }
-    }
-
-    #[test]
-    fn rejects_duplicate_names_and_excessive_concurrency() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let duplicate = write_inventory(
-            directory.path(),
-            r#"{"version":1,"devices":[
-                {"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"}},
-                {"name":"fw","endpoint":"https://two.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"}}
-            ]}"#,
+        let environment = TestEnvironment::default().with("FW_KEY", "env-backed-key");
+        let inventory = Inventory::load_with_environment(&path, &environment).expect("load");
+        assert_eq!(
+            inventory
+                .device("fw")
+                .expect("device")
+                .api_key
+                .expose_secret(),
+            "env-backed-key"
         );
-        assert!(Inventory::load_with_environment(duplicate, &environment()).is_err());
-
-        let too_many = write_inventory(
-            directory.path(),
-            r#"{"version":1,"devices":[
-                {"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"max_concurrency":6}
-            ]}"#,
-        );
-        assert!(Inventory::load_with_environment(too_many, &environment()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn secret_file_requires_private_permissions() {
+    fn resolves_file_api_key() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().expect("tempdir");
-        let secret = directory.path().join("api-key");
-        fs::write(&secret, "file-backed-api-key").expect("write secret");
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let key_file = directory.path().join("key.txt");
+        fs::write(&key_file, "file-backed-api-key\n").expect("write key file");
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).expect("chmod");
         let path = write_inventory(
             directory.path(),
             &format!(
-                r#"{{"version":1,"devices":[{{"name":"fw","endpoint":"https://one.test","api_key":{{"type":"file","path":"{}"}}}}]}}"#,
-                secret.display()
+                r#"{{
+                    "version": 1,
+                    "devices": [
+                        {{"name": "fw", "endpoint": "https://fw.test", "api_key": {{"type": "file", "path": "{}"}}}}
+                    ]
+                }}"#,
+                key_file.display()
             ),
         );
-        let error = Inventory::load_with_environment(&path, &environment())
-            .expect_err("world-readable secret must be refused");
-        assert!(error.to_string().contains("too permissive"));
-
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).expect("chmod");
-        let inventory =
-            Inventory::load_with_environment(path, &environment()).expect("private secret");
+        let inventory = Inventory::load(&path).expect("load");
         assert_eq!(
             inventory
                 .device("fw")
@@ -957,5 +925,156 @@ mod tests {
         );
         let error = Inventory::device_names(&path).expect_err("duplicate names rejected");
         assert!(error.to_string().contains("duplicate device name"));
+    }
+
+    #[test]
+    fn loads_valid_environment_backed_inventory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = write_inventory(
+            directory.path(),
+            r#"{
+                "version": 1,
+                "devices": [{
+                    "name": "lab-fw-01",
+                    "endpoint": "https://fw.example.test:4443",
+                    "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                    "tags": ["lab", "lab"]
+                }]
+            }"#,
+        );
+
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+        let inventory =
+            Inventory::load_with_environment(path, &environment).expect("valid inventory");
+        let device = inventory.device("lab-fw-01").expect("known device");
+        assert_eq!(device.metadata.endpoint, "https://fw.example.test:4443");
+        assert_eq!(device.metadata.tags, ["lab"]);
+        assert_eq!(device.max_concurrency, 4);
+        assert!(device.mutation.is_none());
+        assert_eq!(device.api_key.expose_secret(), "test-api-key-value");
+        assert!(!format!("{device:?}").contains("test-api-key-value"));
+    }
+
+    #[test]
+    fn mutation_policy_is_explicit_narrow_and_validated() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+
+        let valid = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config/shared/address"],"allow_delete":true}}]}"#,
+        );
+        let inventory =
+            Inventory::load_with_environment(valid, &environment).expect("mutation policy");
+        let policy = inventory
+            .device("fw")
+            .expect("device")
+            .mutation
+            .clone()
+            .expect("explicit mutation policy");
+        assert_eq!(policy.admin, "mcp-admin");
+        assert!(policy.allow_delete);
+        assert!(policy.require_config_lock);
+
+        let broad = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[{"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"mutation":{"admin":"mcp-admin","allowed_xpath_roots":["/config"]}}]}"#,
+        );
+        assert!(Inventory::load_with_environment(broad, &environment).is_err());
+    }
+
+    #[test]
+    fn rejects_plaintext_api_key_field() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+
+        let path = write_inventory(
+            directory.path(),
+            r#"{
+                "version": 1,
+                "devices": [{
+                    "name": "fw",
+                    "endpoint": "https://fw.example.test",
+                    "api_key": {"type": "env", "name": "PANOS_TEST_KEY", "value": "secret"}
+                }]
+            }"#,
+        );
+        let error = Inventory::load_with_environment(path, &environment)
+            .expect_err("unknown plaintext field must be refused");
+        assert!(error.to_string().contains("unknown field"));
+        assert!(!error.to_string().contains("test-api-key-value"));
+    }
+
+    #[test]
+    fn rejects_non_https_and_endpoint_paths() {
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+        for endpoint in ["http://fw.example.test", "https://fw.example.test/api"] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let path = write_inventory(
+                directory.path(),
+                &format!(
+                    r#"{{"version":1,"devices":[{{"name":"fw","endpoint":"{endpoint}","api_key":{{"type":"env","name":"PANOS_TEST_KEY"}}}}]}}"#
+                ),
+            );
+            assert!(Inventory::load_with_environment(path, &environment).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_names_and_excessive_concurrency() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+
+        let duplicate = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[
+                {"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"}},
+                {"name":"fw","endpoint":"https://two.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"}}
+            ]}"#,
+        );
+        assert!(Inventory::load_with_environment(duplicate, &environment).is_err());
+
+        let too_many = write_inventory(
+            directory.path(),
+            r#"{"version":1,"devices":[
+                {"name":"fw","endpoint":"https://one.test","api_key":{"type":"env","name":"PANOS_TEST_KEY"},"max_concurrency":6}
+            ]}"#,
+        );
+        assert!(Inventory::load_with_environment(too_many, &environment).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_requires_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default();
+
+        let secret = directory.path().join("api-key");
+        fs::write(&secret, "file-backed-api-key").expect("write secret");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let path = write_inventory(
+            directory.path(),
+            &format!(
+                r#"{{"version":1,"devices":[{{"name":"fw","endpoint":"https://one.test","api_key":{{"type":"file","path":"{}"}}}}]}}"#,
+                secret.display()
+            ),
+        );
+        let error = Inventory::load_with_environment(&path, &environment)
+            .expect_err("world-readable secret must be refused");
+        assert!(error.to_string().contains("too permissive"));
+
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).expect("chmod");
+        let inventory =
+            Inventory::load_with_environment(path, &environment).expect("private secret");
+        assert_eq!(
+            inventory
+                .device("fw")
+                .expect("device")
+                .api_key
+                .expose_secret(),
+            "file-backed-api-key"
+        );
     }
 }

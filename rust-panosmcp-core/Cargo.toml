@@ -13,6 +13,8 @@ fastrand.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 mecmcp-audit.workspace = true
+mecmcp-inventory.workspace = true
+mecmcp-policy.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 rust-panosmcp-auth = { version = "0.4.0", path = "../rust-panosmcp-auth" }

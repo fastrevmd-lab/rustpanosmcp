@@ -252,6 +252,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -720,6 +730,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,7 +1195,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mecmcp-audit"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -1190,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-auth"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1206,9 +1229,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mecmcp-inventory"
+version = "0.1.6"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "mecmcp-policy"
+version = "0.1.6"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+dependencies = [
+ "globset",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "mecmcp-runtime"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
 dependencies = [
  "anyhow",
  "clap",
@@ -1222,7 +1268,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-transport"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=runtime-v0.1.6#633f370d082f9cb88f73bde3254aba10cd267aa8"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
 dependencies = [
  "axum",
  "dashmap",
@@ -1807,6 +1853,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "mecmcp-audit",
+ "mecmcp-inventory",
+ "mecmcp-policy",
  "quick-xml",
  "rcgen",
  "reqwest",
