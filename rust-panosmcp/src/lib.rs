@@ -336,7 +336,8 @@ impl PanosMcpServer {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.change_set_status(input).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(service.change_set_status(input, caller).await)
     }
 
     /// Apply one independently approved plan as a normal staged operation.
@@ -389,7 +390,12 @@ impl PanosMcpServer {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.candidate_fingerprint(input, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .candidate_fingerprint(input, caller, cancellation)
+                .await,
+        )
     }
 
     /// Stage one guarded set/delete candidate action.
@@ -415,7 +421,12 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.stage_config(input, principal, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .stage_config(input, principal, caller, cancellation)
+                .await,
+        )
     }
 
     /// Read a bounded PAN-OS running/candidate change summary.
@@ -441,7 +452,12 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.diff_candidate(input, principal, cancellation).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .diff_candidate(input, principal, caller, cancellation)
+                .await,
+        )
     }
 
     /// Run full PAN-OS validation for the staged fingerprint.
@@ -467,9 +483,10 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .validate_candidate(input, principal, cancellation)
+                .validate_candidate(input, principal, caller, cancellation)
                 .await,
         )
     }
@@ -497,9 +514,10 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .commit_candidate(input, principal, cancellation)
+                .commit_candidate(input, principal, caller, cancellation)
                 .await,
         )
     }
@@ -527,9 +545,10 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .discard_candidate(input, principal, cancellation)
+                .discard_candidate(input, principal, caller, cancellation)
                 .await,
         )
     }
@@ -556,7 +575,8 @@ impl PanosMcpServer {
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
-        Self::to_call_result(service.operation_status(input, principal).await)
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(service.operation_status(input, principal, caller).await)
     }
 
     /// List devices visible to the authenticated caller.
@@ -573,7 +593,7 @@ impl PanosMcpServer {
         if let Some(denial) = Self::authorize(caller, "list_devices", None) {
             return Ok(denial);
         }
-        let mut output = self.runtime.snapshot().service.list_devices();
+        let mut output = self.runtime.snapshot().service.list_devices(caller);
         if let Some(caller) = caller {
             output
                 .devices

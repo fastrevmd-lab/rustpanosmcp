@@ -58,7 +58,7 @@ async fn unconfigured_blocklist_leaves_execute_panos_op_unchanged() {
     // (or an empty policy was constructed). Either way, this is the baseline behavior.
     // We can't actually execute the command without a real device, but we've verified
     // that the service builds without error and policy is None or empty.
-    assert!(service.list_devices().devices.len() == 1);
+    assert!(service.list_devices(None).devices.len() == 1);
 }
 
 /// Regression: with NO blocklist configured, get_panos_config behaves exactly as before.
@@ -91,7 +91,7 @@ async fn unconfigured_blocklist_leaves_get_panos_config_unchanged() {
     };
 
     // Same as above: service builds without error, no policy restrictions.
-    assert!(service.list_devices().devices.len() == 1);
+    assert!(service.list_devices(None).devices.len() == 1);
 }
 
 /// With a blocklist configured, a denied command is refused.

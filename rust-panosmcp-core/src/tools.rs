@@ -143,10 +143,17 @@ impl PanosService {
 
     /// Return only non-secret inventory metadata in stable name order.
     #[must_use]
-    pub fn list_devices(&self) -> ListDevicesOutput {
-        ListDevicesOutput {
+    pub fn list_devices(&self, ctx: Option<&CallerContext>) -> ListDevicesOutput {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(ctx, "list_devices", "list", vec![]),
+            None => AuditScope::stdio("list_devices", "list", vec![]),
+        };
+        let result = ListDevicesOutput {
             devices: self.inventory.metadata(),
-        }
+        };
+        audit.meta("device_count", result.devices.len() as u64);
+        audit.succeed();
+        result
     }
 
     /// Gather selected facts via the documented `show system info` command.

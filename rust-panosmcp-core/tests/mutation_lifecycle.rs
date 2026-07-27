@@ -228,6 +228,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -310,7 +311,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     };
 
     // Verify audit contains the critical binding: change_set_id + digest + owner
-    // The successful approval is the last audit event
+    // The successful approval is the last audit event with result=ok
     let successful_approval = audit_output
         .lines()
         .rfind(|line| line.contains("approve_panos_change_set") && line.contains("result=ok"))
@@ -386,10 +387,13 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     );
     let staged = first_apply.or(second_apply).expect("one apply succeeds");
     let status = recovered
-        .change_set_status(ChangeSetStatusInput {
-            device: "mock-fw".to_owned(),
-            change_set_id: planned.change_set_id,
-        })
+        .change_set_status(
+            ChangeSetStatusInput {
+                device: "mock-fw".to_owned(),
+                change_set_id: planned.change_set_id,
+            },
+            None,
+        )
         .await
         .expect("status");
     assert_eq!(status.state, "applied");
@@ -406,6 +410,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
                 expected_candidate_fingerprint: staged.candidate_fingerprint,
             },
             "writer",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -422,6 +427,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
                     operation_id,
                 },
                 "writer",
+                None
             )
             .await
             .expect("discard status after restart")
@@ -439,6 +445,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -457,6 +464,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await;
@@ -476,6 +484,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -488,20 +497,20 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
     assert!(
         fixture
             .service
-            .commit_candidate(operation.clone(), "token-a", CancellationToken::new())
+            .commit_candidate(operation.clone(), "token-a", None, CancellationToken::new())
             .await
             .is_err(),
         "commit must refuse an unvalidated operation"
     );
     let diff = fixture
         .service
-        .diff_candidate(operation.clone(), "token-a", CancellationToken::new())
+        .diff_candidate(operation.clone(), "token-a", None, CancellationToken::new())
         .await
         .expect("diff");
     assert!(diff.change_summary.contains("/config/shared/address"));
     let validated = fixture
         .service
-        .validate_candidate(operation.clone(), "token-a", CancellationToken::new())
+        .validate_candidate(operation.clone(), "token-a", None, CancellationToken::new())
         .await
         .expect("validate");
     assert!(validated.succeeded);
@@ -510,7 +519,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
     cancelled.cancel();
     let commit = fixture
         .service
-        .commit_candidate(operation, "token-a", cancelled)
+        .commit_candidate(operation, "token-a", None, cancelled)
         .await
         .expect("detached commit");
     assert_eq!(commit.disposition, CommitDisposition::Detached);
@@ -524,6 +533,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                     operation_id: staged.operation_id.clone(),
                 },
                 "token-a",
+                None,
             )
             .await
             .expect("status");
@@ -545,6 +555,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                     operation_id: staged.operation_id.clone(),
                 },
                 "token-a",
+                None
             )
             .await
             .expect("commit status after restart")
@@ -558,6 +569,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -575,6 +587,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 destructive_confirmation: Some(format!("DELETE {xpath}")),
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -589,6 +602,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 expected_candidate_fingerprint: deletion.candidate_fingerprint,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -610,6 +624,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -628,6 +643,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -640,14 +656,14 @@ async fn failed_commit_remains_recoverable_by_discard() {
     assert!(
         fixture
             .service
-            .validate_candidate(operation.clone(), "token-a", CancellationToken::new())
+            .validate_candidate(operation.clone(), "token-a", None, CancellationToken::new())
             .await
             .expect("validation")
             .succeeded
     );
     let commit = fixture
         .service
-        .commit_candidate(operation.clone(), "token-a", CancellationToken::new())
+        .commit_candidate(operation.clone(), "token-a", None, CancellationToken::new())
         .await
         .expect("terminal failed commit");
     assert_eq!(commit.succeeded, Some(false));
@@ -659,13 +675,14 @@ async fn failed_commit_remains_recoverable_by_discard() {
                 operation_id: staged.operation_id,
             },
             "token-a",
+            None,
         )
         .await
         .expect("status");
     assert_eq!(status.state, "failed");
     fixture
         .service
-        .discard_candidate(operation, "token-a", CancellationToken::new())
+        .discard_candidate(operation, "token-a", None, CancellationToken::new())
         .await
         .expect("failed commit discard");
     let state = fixture.state.lock().expect("state");
@@ -682,6 +699,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -700,6 +718,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -713,6 +732,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
                 expected_candidate_fingerprint: staged.candidate_fingerprint,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -736,6 +756,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
                     operation_id: staged.operation_id,
                 },
                 "token-a",
+                None
             )
             .await
             .expect("indeterminate status after restart")
@@ -753,6 +774,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
             CandidateFingerprintInput {
                 device: "mock-fw".to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -771,6 +793,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             CancellationToken::new(),
         )
         .await
@@ -783,14 +806,14 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
     assert!(
         fixture
             .service
-            .validate_candidate(operation.clone(), "token-a", CancellationToken::new())
+            .validate_candidate(operation.clone(), "token-a", None, CancellationToken::new())
             .await
             .expect("validation")
             .succeeded
     );
     let error = fixture
         .service
-        .commit_candidate(operation, "token-a", CancellationToken::new())
+        .commit_candidate(operation, "token-a", None, CancellationToken::new())
         .await
         .expect_err("successful commit with failed unlock must require reconciliation");
     assert!(error.to_string().contains("lock release"));
@@ -812,6 +835,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
                     operation_id: staged.operation_id,
                 },
                 "token-a",
+                None
             )
             .await
             .expect("indeterminate commit after restart")
