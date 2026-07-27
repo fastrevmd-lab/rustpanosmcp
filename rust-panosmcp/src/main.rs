@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         RuntimeState::load_with_state(&cli.device_mapping, tokens, cli.state_file.as_deref())?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
-        devices = runtime.snapshot().service.list_devices().devices.len(),
+        devices = runtime.snapshot().service.list_devices(None).devices.len(),
         authenticated = runtime.snapshot().tokens.is_some(),
         "validated PAN-OS runtime"
     );

@@ -19,7 +19,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -740,15 +740,37 @@ impl PanosService {
     pub async fn candidate_fingerprint(
         &self,
         input: CandidateFingerprintInput,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<CandidateFingerprintOutput> {
-        let client = self.client(&input.device)?;
-        require_policy(&client)?;
-        let candidate = candidate_fingerprint(&client, cancellation).await?;
-        Ok(CandidateFingerprintOutput {
-            device: input.device,
-            candidate_fingerprint: candidate,
-        })
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_candidate_fingerprint",
+                "get-fingerprint",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_candidate_fingerprint",
+                "get-fingerprint",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            require_policy(&client)?;
+            let candidate = candidate_fingerprint(&client, cancellation).await?;
+            Ok(CandidateFingerprintOutput {
+                device: input.device,
+                candidate_fingerprint: candidate,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Plan and persist an exact multi-action change set without mutating PAN-OS.
@@ -896,20 +918,46 @@ impl PanosService {
     }
 
     /// Return an exact persistent plan for independent review or recovery.
-    pub async fn change_set_status(&self, input: ChangeSetStatusInput) -> Result<ChangeSetOutput> {
-        let mut record = self
-            .mutations
-            .change_set(&input.change_set_id, &input.device)
-            .await?;
-        if matches!(
-            record.state,
-            ChangeSetState::Planned | ChangeSetState::Approved
-        ) && now_unix()? >= record.expires_at_unix
-        {
-            record.state = ChangeSetState::Expired;
-            self.mutations.update_change_set(record.clone()).await?;
+    pub async fn change_set_status(
+        &self,
+        input: ChangeSetStatusInput,
+        ctx: Option<&CallerContext>,
+    ) -> Result<ChangeSetOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_change_set",
+                "get-change-set",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_change_set",
+                "get-change-set",
+                vec![input.device.clone()],
+            ),
+        };
+        audit.meta("change_set_id", input.change_set_id.clone());
+        let result = async {
+            let mut record = self
+                .mutations
+                .change_set(&input.change_set_id, &input.device)
+                .await?;
+            if matches!(
+                record.state,
+                ChangeSetState::Planned | ChangeSetState::Approved
+            ) && now_unix()? >= record.expires_at_unix
+            {
+                record.state = ChangeSetState::Expired;
+                self.mutations.update_change_set(record.clone()).await?;
+            }
+            Ok(record.into())
         }
-        Ok(record.into())
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Apply an independently approved change set as one guarded lifecycle operation.
@@ -1159,9 +1207,18 @@ impl PanosService {
         &self,
         input: StageConfigInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<StageConfigOutput> {
-        let started = Instant::now();
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "stage_panos_config",
+                "stage",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("stage_panos_config", "stage", vec![input.device.clone()]),
+        };
         let client = self.client(&input.device)?;
         let policy = require_policy(&client)?.clone();
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
@@ -1237,18 +1294,11 @@ impl PanosService {
         if result.is_err() {
             self.mutations.remove(&operation_id).await;
         }
-        audit(
-            AuditEvent {
-                owner,
-                device: &input.device,
-                operation_id: &operation_id,
-                action: input.action.api_name(),
-                xpath: &input.xpath,
-            },
-            result.is_ok(),
-            started.elapsed(),
-            None,
-        );
+        audit.meta("operation_id", operation_id.clone());
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
         result
     }
 
@@ -1257,39 +1307,59 @@ impl PanosService {
         &self,
         input: OperationInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<CandidateDiffOutput> {
-        validate_fingerprint(&input.expected_candidate_fingerprint)?;
-        let record = self
-            .mutations
-            .record(&input.operation_id, owner, &input.device)
-            .await?;
-        let client = self.client(&input.device)?;
-        require_operation_policy(&record, &client)?;
-        let current = candidate_fingerprint(&client, cancellation.clone()).await?;
-        require_operation_fingerprint(&input, &record, &current)?;
-        let response = client
-            .post_fields(
-                vec![
-                    ("type", "op".to_owned()),
-                    (
-                        "cmd",
-                        "<show><config><list><change-summary/></list></config></show>".to_owned(),
-                    ),
-                ],
-                cancellation,
-            )
-            .await?;
-        let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
-        Ok(CandidateDiffOutput {
-            operation_id: record.id,
-            device: record.device,
-            action: record.action,
-            xpath: record.xpath,
-            candidate_fingerprint: current,
-            change_summary,
-            truncated,
-        })
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "diff_panos_candidate",
+                "diff",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("diff_panos_candidate", "diff", vec![input.device.clone()]),
+        };
+        audit.meta("operation_id", input.operation_id.clone());
+        let result = async {
+            validate_fingerprint(&input.expected_candidate_fingerprint)?;
+            let record = self
+                .mutations
+                .record(&input.operation_id, owner, &input.device)
+                .await?;
+            let client = self.client(&input.device)?;
+            require_operation_policy(&record, &client)?;
+            let current = candidate_fingerprint(&client, cancellation.clone()).await?;
+            require_operation_fingerprint(&input, &record, &current)?;
+            let response = client
+                .post_fields(
+                    vec![
+                        ("type", "op".to_owned()),
+                        (
+                            "cmd",
+                            "<show><config><list><change-summary/></list></config></show>"
+                                .to_owned(),
+                        ),
+                    ],
+                    cancellation,
+                )
+                .await?;
+            let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
+            Ok(CandidateDiffOutput {
+                operation_id: record.id,
+                device: record.device,
+                action: record.action,
+                xpath: record.xpath,
+                candidate_fingerprint: current,
+                change_summary,
+                truncated,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Validate the exact staged candidate and transition it to commit-eligible.
@@ -1297,88 +1367,86 @@ impl PanosService {
         &self,
         input: OperationInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<ValidationOutput> {
-        let started = Instant::now();
-        validate_fingerprint(&input.expected_candidate_fingerprint)?;
-        let mut record = self
-            .mutations
-            .record(&input.operation_id, owner, &input.device)
-            .await?;
-        if record.state != LifecycleState::Staged {
-            return Err(policy("operation_id", "operation is not in staged state"));
-        }
-        let client = self.client(&input.device)?;
-        require_operation_policy(&record, &client)?;
-        let _guard = self
-            .mutations
-            .device_guard(&client.mutation_lock_key(), &cancellation)
-            .await?;
-        let current = candidate_fingerprint(&client, CancellationToken::new()).await?;
-        require_operation_fingerprint(&input, &record, &current)?;
-        let response = client
-            .post_fields(
-                vec![
-                    ("type", "op".to_owned()),
-                    ("cmd", "<validate><full></full></validate>".to_owned()),
-                ],
-                CancellationToken::new(),
-            )
-            .await?;
-        let job_id = parse_job_id(&response)?;
-        record.job_id = Some(job_id.clone());
-        record.state = LifecycleState::Validating;
-        self.mutations.update(record.clone()).await?;
-        let status = match client
-            .poll_job(&job_id, VALIDATE_DEADLINE, CancellationToken::new())
-            .await
-        {
-            Ok(status) => status,
-            Err(error) => {
-                record.state = LifecycleState::Failed;
-                record.details = Some(error.to_string());
-                self.mutations.update(record.clone()).await?;
-                audit(
-                    AuditEvent {
-                        owner,
-                        device: &record.device,
-                        operation_id: &record.id,
-                        action: "validate",
-                        xpath: &record.xpath,
-                    },
-                    false,
-                    started.elapsed(),
-                    Some(&job_id),
-                );
-                return Err(error);
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "validate_panos_candidate",
+                "validate",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "validate_panos_candidate",
+                "validate",
+                vec![input.device.clone()],
+            ),
+        };
+        audit.meta("operation_id", input.operation_id.clone());
+        let result = async {
+            validate_fingerprint(&input.expected_candidate_fingerprint)?;
+            let mut record = self
+                .mutations
+                .record(&input.operation_id, owner, &input.device)
+                .await?;
+            if record.state != LifecycleState::Staged {
+                return Err(policy("operation_id", "operation is not in staged state"));
             }
-        };
-        record.details = status.details.clone();
-        record.state = if status.succeeded() {
-            LifecycleState::Validated
-        } else {
-            LifecycleState::Failed
-        };
-        self.mutations.update(record.clone()).await?;
-        audit(
-            AuditEvent {
-                owner,
-                device: &record.device,
-                operation_id: &record.id,
-                action: "validate",
-                xpath: &record.xpath,
-            },
-            status.succeeded(),
-            started.elapsed(),
-            Some(&job_id),
-        );
-        Ok(ValidationOutput {
-            operation_id: record.id,
-            job_id,
-            succeeded: status.succeeded(),
-            details: status.details,
-            candidate_fingerprint: current,
-        })
+            let client = self.client(&input.device)?;
+            require_operation_policy(&record, &client)?;
+            let _guard = self
+                .mutations
+                .device_guard(&client.mutation_lock_key(), &cancellation)
+                .await?;
+            let current = candidate_fingerprint(&client, CancellationToken::new()).await?;
+            require_operation_fingerprint(&input, &record, &current)?;
+            let response = client
+                .post_fields(
+                    vec![
+                        ("type", "op".to_owned()),
+                        ("cmd", "<validate><full></full></validate>".to_owned()),
+                    ],
+                    CancellationToken::new(),
+                )
+                .await?;
+            let job_id = parse_job_id(&response)?;
+            record.job_id = Some(job_id.clone());
+            record.state = LifecycleState::Validating;
+            self.mutations.update(record.clone()).await?;
+            let status = match client
+                .poll_job(&job_id, VALIDATE_DEADLINE, CancellationToken::new())
+                .await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    record.state = LifecycleState::Failed;
+                    record.details = Some(error.to_string());
+                    self.mutations.update(record.clone()).await?;
+                    return Err(error);
+                }
+            };
+            record.details = status.details.clone();
+            record.state = if status.succeeded() {
+                LifecycleState::Validated
+            } else {
+                LifecycleState::Failed
+            };
+            self.mutations.update(record.clone()).await?;
+            Ok(ValidationOutput {
+                operation_id: record.id,
+                job_id,
+                succeeded: status.succeeded(),
+                details: status.details,
+                candidate_fingerprint: current,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Start an admin-scoped partial commit and reconcile it in a detached worker.
@@ -1386,8 +1454,24 @@ impl PanosService {
         &self,
         input: OperationInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<CommitOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "commit_panos_candidate",
+                "commit",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "commit_panos_candidate",
+                "commit",
+                vec![input.device.clone()],
+            ),
+        };
+        audit.meta("operation_id", input.operation_id.clone());
+        let result = async {
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
         let mut record = self
             .mutations
@@ -1425,6 +1509,13 @@ impl PanosService {
                 details: Some("commit continues in a detached reconciliation worker; poll operation status".to_owned()),
             }),
         }
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Revert only candidate changes attributed by PAN-OS to the configured admin.
@@ -1432,9 +1523,24 @@ impl PanosService {
         &self,
         input: OperationInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<DiscardOutput> {
-        let started = Instant::now();
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "discard_panos_candidate",
+                "discard",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "discard_panos_candidate",
+                "discard",
+                vec![input.device.clone()],
+            ),
+        };
+        audit.meta("operation_id", input.operation_id.clone());
+        let result = async {
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
         let mut record = self
             .mutations
@@ -1482,18 +1588,6 @@ impl PanosService {
                 record.state = LifecycleState::Indeterminate;
                 record.details = Some(details.clone());
                 self.mutations.update(record.clone()).await?;
-                audit(
-                    AuditEvent {
-                        owner,
-                        device: &record.device,
-                        operation_id: &record.id,
-                        action: "discard",
-                        xpath: &record.xpath,
-                    },
-                    false,
-                    started.elapsed(),
-                    None,
-                );
                 return Err(PanosMcpError::Configuration(details));
             }
             record.config_lock_held = false;
@@ -1501,22 +1595,17 @@ impl PanosService {
         record.state = LifecycleState::Discarded;
         record.details = None;
         self.mutations.update(record.clone()).await?;
-        audit(
-            AuditEvent {
-                owner,
-                device: &record.device,
-                operation_id: &record.id,
-                action: "discard",
-                xpath: &record.xpath,
-            },
-            true,
-            started.elapsed(),
-            None,
-        );
         Ok(DiscardOutput {
             operation_id: record.id,
             candidate_fingerprint: after,
         })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 
     /// Poll safe in-memory state for a detached or completed operation.
@@ -1524,19 +1613,42 @@ impl PanosService {
         &self,
         input: OperationStatusInput,
         owner: &str,
+        ctx: Option<&CallerContext>,
     ) -> Result<OperationStatusOutput> {
-        let record = self
-            .mutations
-            .record(&input.operation_id, owner, &input.device)
-            .await?;
-        Ok(OperationStatusOutput {
-            operation_id: record.id,
-            device: record.device,
-            state: record.state.as_str().to_owned(),
-            job_id: record.job_id,
-            candidate_fingerprint: record.current,
-            details: record.details,
-        })
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_operation",
+                "get-operation",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_operation",
+                "get-operation",
+                vec![input.device.clone()],
+            ),
+        };
+        audit.meta("operation_id", input.operation_id.clone());
+        let result = async {
+            let record = self
+                .mutations
+                .record(&input.operation_id, owner, &input.device)
+                .await?;
+            Ok(OperationStatusOutput {
+                operation_id: record.id,
+                device: record.device,
+                state: record.state.as_str().to_owned(),
+                job_id: record.job_id,
+                candidate_fingerprint: record.current,
+                details: record.details,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
     }
 }
 
@@ -1545,9 +1657,8 @@ async fn commit_worker(
     client: Arc<PanosClient>,
     admin: String,
     mut record: OperationRecord,
-    owner: &str,
+    _owner: &str,
 ) -> Result<CommitOutput> {
-    let started = Instant::now();
     let guard = coordinator
         .device_guard(&client.mutation_lock_key(), &CancellationToken::new())
         .await?;
@@ -1617,20 +1728,6 @@ async fn commit_worker(
         record.details = Some(error.to_string());
     }
     coordinator.update(record.clone()).await?;
-    audit(
-        AuditEvent {
-            owner,
-            device: &record.device,
-            operation_id: &record.id,
-            action: "commit",
-            xpath: &record.xpath,
-        },
-        result
-            .as_ref()
-            .is_ok_and(|output| output.succeeded == Some(true)),
-        started.elapsed(),
-        record.job_id.as_deref(),
-    );
     result
 }
 
@@ -2125,30 +2222,6 @@ fn policy(field: &'static str, reason: &str) -> PanosMcpError {
         field,
         reason: reason.to_owned(),
     }
-}
-
-struct AuditEvent<'a> {
-    owner: &'a str,
-    device: &'a str,
-    operation_id: &'a str,
-    action: &'a str,
-    xpath: &'a str,
-}
-
-fn audit(event: AuditEvent<'_>, succeeded: bool, duration: Duration, job_id: Option<&str>) {
-    let xpath_fingerprint = format!("sha256:{}", digest_hex(event.xpath.as_bytes()));
-    tracing::info!(
-        target: "audit",
-        principal = event.owner,
-        device = event.device,
-        operation_id = event.operation_id,
-        action = event.action,
-        xpath_fingerprint,
-        job_id = job_id.unwrap_or("none"),
-        succeeded,
-        duration_ms = duration.as_millis(),
-        "PAN-OS candidate lifecycle"
-    );
 }
 
 #[cfg(test)]

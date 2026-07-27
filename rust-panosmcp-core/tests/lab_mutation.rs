@@ -80,7 +80,7 @@ async fn guarded_add_commit_delete_commit_round_trip() {
 
 async fn run_commit(service: &PanosService, input: StageConfigInput, owner: &str) {
     let staged = service
-        .stage_config(input, owner, CancellationToken::new())
+        .stage_config(input, owner, None, CancellationToken::new())
         .await
         .expect("stage");
     assert!(
@@ -93,17 +93,17 @@ async fn run_commit(service: &PanosService, input: StageConfigInput, owner: &str
         expected_candidate_fingerprint: staged.candidate_fingerprint,
     };
     let diff = service
-        .diff_candidate(operation.clone(), owner, CancellationToken::new())
+        .diff_candidate(operation.clone(), owner, None, CancellationToken::new())
         .await
         .expect("change summary");
     assert!(!diff.change_summary.is_empty());
     let validation = service
-        .validate_candidate(operation.clone(), owner, CancellationToken::new())
+        .validate_candidate(operation.clone(), owner, None, CancellationToken::new())
         .await
         .expect("validation");
     assert!(validation.succeeded, "PAN-OS validation failed");
     let commit = service
-        .commit_candidate(operation, owner, CancellationToken::new())
+        .commit_candidate(operation, owner, None, CancellationToken::new())
         .await
         .expect("partial commit");
     assert_eq!(commit.succeeded, Some(true), "PAN-OS commit failed");
@@ -115,6 +115,7 @@ async fn fingerprint(service: &PanosService, device: &str) -> String {
             CandidateFingerprintInput {
                 device: device.to_owned(),
             },
+            None,
             CancellationToken::new(),
         )
         .await

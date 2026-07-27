@@ -25,7 +25,7 @@ async fn all_phase_one_reads_succeed_on_explicit_lab_firewall() {
         .expect("lab PAN-OS service");
     assert!(
         service
-            .list_devices()
+            .list_devices(None)
             .devices
             .iter()
             .any(|metadata| metadata.name == device),
