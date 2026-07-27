@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Blocklist guardrails for read-only tools.** `execute_panos_op` and
+  `get_panos_config` now evaluate an optional per-inventory blocklist through
+  the shared `mecmcp-policy` engine, giving PAN-OS the same deny-pattern
+  guardrails Junos has had. Previously any `<show>` command was accepted from a
+  caller holding a valid token.
+
+  **Additive: a deployment with no blocklist configured behaves exactly as
+  before.** That is asserted directly rather than inferred — see
+  `unconfigured_blocklist_leaves_execute_panos_op_unchanged` and its
+  `get_panos_config` counterpart.
+
+  The engine is **fail-open**: a command matching no rule is allowed. That is
+  the correct model for an operator blocklist, but it is the opposite of what
+  the mutation path does, so it is worth stating plainly.
+
+- **Mutations are unchanged and stay fail-closed.** `validate_write_xpath`
+  continues to require an XPath to sit under an operator-configured root.
+  Prefix allowlist and glob blocklist are different authorization models, and
+  moving mutations onto the blocklist would have silently widened what a
+  mutation token can reach.
+
+
 ### Changed
+
+- **Inventory loading moved to the shared `mecmcp-inventory` crate.** The
+  `{"version":1,"devices":[…]}` envelope parses exactly as before — the trait
+  was built around both servers' existing schemas rather than converging them.
+  Two behaviours stay this server's own: an empty `devices` array is still
+  rejected, and `api_key: {"type":"env",…}` still resolves name-only so
+  `token add` works without runtime credentials.
 
 - **CLI, signal handling, graceful shutdown, and the token subcommands now come
   from the shared `mecmcp-runtime` crate.** No user-visible change: every flag

@@ -7,6 +7,7 @@ use crate::{
     observability::AuditScope,
     xml::{DeviceFacts, parse_device_facts, validate_read_only_op_command, validate_read_xpath},
 };
+use mecmcp_policy::{DomainRules, Policy, RuleSource, compile_rules};
 use rust_panosmcp_auth::CallerContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,12 +20,19 @@ const DEFAULT_OUTPUT_LINES: usize = 10_000;
 const MAX_OUTPUT_LINES: usize = 100_000;
 const SYSTEM_INFO_COMMAND: &str = "<show><system><info></info></system></show>";
 
+/// PAN-OS policy action: only Deny is used (fail-open blocklist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Deny,
+}
+
 /// Shared service behind read tools and the guarded candidate lifecycle.
 #[derive(Debug, Clone)]
 pub struct PanosService {
     inventory: Inventory,
     clients: Arc<BTreeMap<String, Arc<PanosClient>>>,
     pub(crate) mutations: Arc<crate::mutation::MutationCoordinator>,
+    policy: Option<Arc<Policy<Action>>>,
 }
 
 impl PanosService {
@@ -55,11 +63,82 @@ impl PanosService {
             let client = Arc::new(PanosClient::new(device)?);
             clients.insert(client.device_name().to_owned(), client);
         }
+
+        // Build policy from per-device blocklist rules (fail-open: no rules = allow all)
+        let policy = Self::build_policy(&inventory)?;
+
         Ok(Self {
             inventory,
             clients: Arc::new(clients),
             mutations,
+            policy: policy.map(Arc::new),
         })
+    }
+
+    fn build_policy(inventory: &Inventory) -> Result<Option<Policy<Action>>> {
+        let mut commands_domain = DomainRules::default();
+        let mut config_domain = DomainRules::default();
+        let pfe_commands_domain = DomainRules::default(); // PAN-OS has no PFE commands
+
+        let mut has_any_rules = false;
+
+        for device in inventory.entries() {
+            if let Some(blocklist) = &device.blocklist {
+                if !blocklist.commands.is_empty() {
+                    has_any_rules = true;
+                    let rules: Vec<(Action, String)> = blocklist
+                        .commands
+                        .iter()
+                        .map(|pattern| (Action::Deny, pattern.clone()))
+                        .collect();
+                    let compiled = compile_rules(
+                        &rules,
+                        &device.metadata.name,
+                        RuleSource::Device,
+                        |scope, pattern, error| {
+                            PanosMcpError::Inventory(format!(
+                                "device '{scope}' blocklist command pattern '{pattern}' is invalid: {error}"
+                            ))
+                        },
+                    )?;
+                    commands_domain
+                        .device_specific
+                        .insert(device.metadata.name.clone(), compiled);
+                }
+
+                if !blocklist.xpath.is_empty() {
+                    has_any_rules = true;
+                    let rules: Vec<(Action, String)> = blocklist
+                        .xpath
+                        .iter()
+                        .map(|pattern| (Action::Deny, pattern.clone()))
+                        .collect();
+                    let compiled = compile_rules(
+                        &rules,
+                        &device.metadata.name,
+                        RuleSource::Device,
+                        |scope, pattern, error| {
+                            PanosMcpError::Inventory(format!(
+                                "device '{scope}' blocklist xpath pattern '{pattern}' is invalid: {error}"
+                            ))
+                        },
+                    )?;
+                    config_domain
+                        .device_specific
+                        .insert(device.metadata.name.clone(), compiled);
+                }
+            }
+        }
+
+        if has_any_rules {
+            Ok(Some(Policy::new(
+                commands_domain,
+                config_domain,
+                pfe_commands_domain,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Return only non-secret inventory metadata in stable name order.
@@ -130,6 +209,26 @@ impl PanosService {
         };
         let result = async {
             validate_read_only_op_command(&input.command)?;
+
+            // Check blocklist policy if configured (fail-open: no policy = allow all)
+            if let Some(policy) = &self.policy {
+                use mecmcp_policy::{Decision, normalize_input};
+                let normalized = normalize_input(&input.command);
+                match policy.check_command(&input.device, &normalized, Action::Deny) {
+                    Decision::Allow => {}
+                    Decision::Deny { rule, source, .. } => {
+                        return Err(PanosMcpError::Policy {
+                            field: "command",
+                            reason: format!(
+                                "blocked by {} blocklist rule '{}'",
+                                source.as_str(),
+                                rule.pattern
+                            ),
+                        });
+                    }
+                }
+            }
+
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
             let response = client.operational(&input.command, cancellation).await?;
@@ -167,6 +266,28 @@ impl PanosService {
         let result = async {
             let xpath = input.xpath.unwrap_or_else(|| "/config".to_owned());
             validate_read_xpath(&xpath)?;
+
+            // Check blocklist policy if configured (fail-open: no policy = allow all)
+            // We use config_rules_for for xpath matching (not check_config which is for multi-line text)
+            if let Some(policy) = &self.policy {
+                use mecmcp_policy::{evaluate, normalize_input};
+                let normalized = normalize_input(&xpath);
+                let rules = policy.config_rules_for(&input.device);
+                match evaluate(&rules, &normalized) {
+                    Some(rule) if rule.action == Action::Deny => {
+                        return Err(PanosMcpError::Policy {
+                            field: "xpath",
+                            reason: format!(
+                                "blocked by {} blocklist rule '{}'",
+                                rule.source.as_str(),
+                                rule.pattern
+                            ),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
             let response = client
