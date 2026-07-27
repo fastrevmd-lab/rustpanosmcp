@@ -24,6 +24,20 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Serializes every test in this binary.
+///
+/// These tests emit audit events and one of them captures them with a
+/// `tracing` subscriber. Audit emission is process-wide, so two tests running
+/// concurrently interleave into the same capture and the assertions on it
+/// become order-dependent — observed failing at `--test-threads=2` and above
+/// while passing at 1. Hold this for the whole test body.
+static AUDIT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the serial lock, ignoring poisoning from an unrelated failed test.
+fn audit_serial() -> std::sync::MutexGuard<'static, ()> {
+    AUDIT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct TestEnvironment;
 
 impl Environment for TestEnvironment {
@@ -209,6 +223,7 @@ fn recovered_service(fixture: &Fixture) -> PanosService {
 
 #[tokio::test]
 async fn change_set_requires_exact_independent_approval_and_applies_as_one_operation() {
+    let _serial = audit_serial();
     // Set up audit capture for the entire test
     use mecmcp_audit::testutil::CapturingWriter;
     let cap = CapturingWriter::default();
@@ -438,6 +453,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
 
 #[tokio::test]
 async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
+    let _serial = audit_serial();
     let fixture = fixture(false, false).await;
     let initial = fixture
         .service
@@ -617,6 +633,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
 
 #[tokio::test]
 async fn failed_commit_remains_recoverable_by_discard() {
+    let _serial = audit_serial();
     let fixture = fixture(true, false).await;
     let initial = fixture
         .service
@@ -692,6 +709,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
 
 #[tokio::test]
 async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
+    let _serial = audit_serial();
     let fixture = fixture(false, true).await;
     let initial = fixture
         .service
@@ -767,6 +785,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
 
 #[tokio::test]
 async fn committed_job_with_lock_release_failure_requires_reconciliation() {
+    let _serial = audit_serial();
     let fixture = fixture(false, true).await;
     let initial = fixture
         .service
