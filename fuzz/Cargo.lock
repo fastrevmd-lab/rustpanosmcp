@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-audit"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -734,7 +734,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-auth"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -752,7 +752,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-inventory"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
 dependencies = [
  "serde",
  "serde_json",
@@ -765,7 +765,7 @@ dependencies = [
 [[package]]
 name = "mecmcp-policy"
 version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.6#1a7626d09407d3c152c2f463611c6119c3273b84"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
 dependencies = [
  "globset",
  "serde",
