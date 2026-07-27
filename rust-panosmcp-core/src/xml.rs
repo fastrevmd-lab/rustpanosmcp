@@ -504,7 +504,6 @@ fn validate_xml_root(
             Ok(Event::Text(text))
                 if depth == 0
                     && text
-                        .as_ref()
                         .iter()
                         .any(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r')) =>
             {

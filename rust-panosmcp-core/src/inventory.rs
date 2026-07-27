@@ -107,6 +107,17 @@ pub struct DeviceConfig {
     pub max_response_bytes: usize,
     /// Explicit write policy. Its absence keeps every mutation tool disabled.
     pub mutation: Option<MutationPolicy>,
+    /// Per-device blocklist rules for read-only operational commands and config reads.
+    pub(crate) blocklist: Option<BlocklistRules>,
+}
+
+/// Per-device blocklist rules for read-only tools.
+#[derive(Debug, Clone)]
+pub(crate) struct BlocklistRules {
+    /// Glob patterns denying operational commands (execute_panos_op).
+    pub(crate) commands: Vec<String>,
+    /// Glob patterns denying XPath config reads (get_panos_config).
+    pub(crate) xpath: Vec<String>,
 }
 
 /// Operator-controlled guardrails for PAN-OS candidate mutations.
@@ -327,6 +338,8 @@ struct RawDevice {
     max_response_bytes: usize,
     #[serde(default)]
     mutation: Option<RawMutationPolicy>,
+    #[serde(default)]
+    blocklist: Option<RawBlocklistRules>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
@@ -338,6 +351,15 @@ struct RawMutationPolicy {
     allow_delete: bool,
     #[serde(default = "default_true")]
     require_config_lock: bool,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct RawBlocklistRules {
+    #[serde(default)]
+    commands: Vec<String>,
+    #[serde(default)]
+    xpath: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
@@ -417,6 +439,10 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
         .mutation
         .map(|policy| load_mutation_policy(&raw.name, policy))
         .transpose()?;
+    let blocklist = raw.blocklist.map(|rules| BlocklistRules {
+        commands: rules.commands,
+        xpath: rules.xpath,
+    });
 
     if !(1..=MAX_DEVICE_CONCURRENCY).contains(&raw.max_concurrency) {
         return Err(PanosMcpError::Inventory(format!(
@@ -473,6 +499,7 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
         max_concurrency: raw.max_concurrency,
         max_response_bytes: raw.max_response_bytes,
         mutation,
+        blocklist,
     })
 }
 
