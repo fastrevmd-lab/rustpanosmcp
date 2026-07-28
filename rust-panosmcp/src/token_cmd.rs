@@ -23,6 +23,14 @@ pub enum TokenCommandError {
     /// Output or signal failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Provenance flags were invalid or mutually contradictory.
+    ///
+    /// Parsing lives in `mecmcp-runtime` so both servers agree on what a
+    /// provider or actor type means; this server cannot route through that
+    /// crate's `run` because its `token add` also carries mutation grants and
+    /// expiry.
+    #[error(transparent)]
+    Provenance(#[from] mecmcp_runtime::token_cmd::TokenCommandError),
 }
 
 /// Execute one token management command.
@@ -37,6 +45,10 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             mutation_actions,
             expires_at_unix,
             expires_in_secs,
+            provider,
+            provider_tier,
+            on_behalf_of,
+            actor_type,
             server_pid,
         } => {
             // `Some` keeps device-name validation strict: this server always knows its
@@ -51,6 +63,12 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             let tools = parse_scope(tools, "tools")?;
             let mutation = parse_mutation_grant(mutation_roots, mutation_actions)?;
             let expires_at = resolve_expiry(expires_at_unix, expires_in_secs)?;
+            let provenance = mecmcp_runtime::token_cmd::parse_provenance(
+                provider,
+                provider_tier,
+                on_behalf_of,
+                actor_type,
+            )?;
             let secret = TokenStoreFile::add_with_options(
                 &tokens_file,
                 &name,
@@ -58,10 +76,10 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
                 tools,
                 expires_at,
                 mutation,
-                None, // provider
-                None, // provider_tier
-                None, // on_behalf_of
-                None, // actor_type
+                provenance.provider,
+                provenance.provider_tier,
+                provenance.on_behalf_of,
+                provenance.actor_type,
                 &known,
             )?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
