@@ -166,6 +166,13 @@ pub enum StateDisposition {
 }
 
 /// Token-store action.
+///
+/// `Add` is much wider than the other variants (280 bytes against 56) because
+/// it carries every mintable attribute. The lint guards against large values
+/// being moved repeatedly; this one is parsed once at startup and destructured
+/// immediately, so boxing would buy an allocation and a layer of indirection to
+/// optimise a single stack move that never repeats.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum TokenAction {
     /// Mint a token, store only its digest, and print the secret once.
@@ -194,6 +201,18 @@ pub enum TokenAction {
         /// Lifetime from token creation, in seconds.
         #[arg(long, conflicts_with = "expires_at_unix")]
         expires_in_secs: Option<u64>,
+        /// Provider name (e.g., "anthropic", "ollama"). Optional.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Provider tier: "public" or "private". Required if provider is set.
+        #[arg(long)]
+        provider_tier: Option<String>,
+        /// The human on whose behalf this credential acts. Optional.
+        #[arg(long)]
+        on_behalf_of: Option<String>,
+        /// Actor type: "human", "agent", or "unknown". Optional.
+        #[arg(long)]
+        actor_type: Option<String>,
         /// Send SIGHUP to this positive process ID after success.
         #[arg(long)]
         server_pid: Option<i32>,
@@ -233,6 +252,57 @@ pub enum TokenAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `token add` must accept the provenance flags and hand them to the token
+    /// store. They were passed as a literal `None` per field, which compiles
+    /// cleanly and silently strips the caller's identity from every token.
+    ///
+    /// The same defect on the Junos side rendered every commit-log entry as
+    /// `(unknown) on-behalf-of=self` (rustjunosmcp#233). Nothing here caught it
+    /// either, so assert on the parse.
+    #[test]
+    fn token_add_carries_the_provenance_flags() {
+        let cli = Cli::parse_from([
+            "rust-panosmcp",
+            "token",
+            "add",
+            "--tokens-file",
+            "/tmp/t.json",
+            "--name",
+            "svc",
+            "--devices",
+            "fw",
+            "--tools",
+            "*",
+            "--provider",
+            "anthropic",
+            "--provider-tier",
+            "private",
+            "--on-behalf-of",
+            "mharman",
+            "--actor-type",
+            "agent",
+        ]);
+
+        let Some(Command::Token {
+            action:
+                TokenAction::Add {
+                    provider,
+                    provider_tier,
+                    on_behalf_of,
+                    actor_type,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected `token add` to parse");
+        };
+
+        assert_eq!(provider.as_deref(), Some("anthropic"));
+        assert_eq!(provider_tier.as_deref(), Some("private"));
+        assert_eq!(on_behalf_of.as_deref(), Some("mharman"));
+        assert_eq!(actor_type.as_deref(), Some("agent"));
+    }
 
     #[test]
     fn secure_serve_defaults() {

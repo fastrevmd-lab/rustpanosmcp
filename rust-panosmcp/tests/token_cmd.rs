@@ -27,6 +27,10 @@ fn revoke_without_inventory_removes_token() {
         mutation_actions: vec![],
         expires_at_unix: None,
         expires_in_secs: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: None,
         server_pid: None,
     };
     token_cmd::run(add_action1, &known_devices).expect("add should succeed");
@@ -40,6 +44,10 @@ fn revoke_without_inventory_removes_token() {
         mutation_actions: vec![],
         expires_at_unix: None,
         expires_in_secs: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: None,
         server_pid: None,
     };
     token_cmd::run(add_action2, &known_devices).expect("add should succeed");
@@ -99,6 +107,10 @@ fn list_without_inventory_succeeds() {
         mutation_actions: vec![],
         expires_at_unix: None,
         expires_in_secs: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: None,
         server_pid: None,
     };
     token_cmd::run(add_action, &known_devices).expect("add should succeed");
@@ -128,6 +140,10 @@ fn rotate_without_inventory_succeeds() {
         mutation_actions: vec![],
         expires_at_unix: None,
         expires_in_secs: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: None,
         server_pid: None,
     };
     token_cmd::run(add_action, &known_devices).expect("add should succeed");
@@ -167,6 +183,10 @@ fn add_validates_device_names() {
         mutation_actions: vec![],
         expires_at_unix: None,
         expires_in_secs: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: None,
         server_pid: None,
     };
 
