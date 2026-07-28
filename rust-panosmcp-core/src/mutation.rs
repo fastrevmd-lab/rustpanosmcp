@@ -1735,8 +1735,22 @@ async fn acquire_config_lock(client: &PanosClient, operation_id: &str) -> Result
     Ok(())
 }
 
+/// True when PAN-OS refused an unlock because nothing was locked.
+///
+/// PAN-OS reports this as a generic `code=-1` with only the message to
+/// distinguish it, so the text is the only signal available. Matched
+/// case-insensitively on the stable part of the phrase; the scope name it
+/// appends ("for scope vsys1") varies per device.
+fn is_already_unlocked(error: &PanosMcpError) -> bool {
+    matches!(
+        error,
+        PanosMcpError::Api { message, .. }
+            if message.to_ascii_lowercase().contains("not currently locked")
+    )
+}
+
 pub(crate) async fn release_config_lock(client: &PanosClient) -> Result<()> {
-    client
+    let outcome = client
         .post_fields(
             vec![
                 ("type", "op".to_owned()),
@@ -1747,8 +1761,30 @@ pub(crate) async fn release_config_lock(client: &PanosClient) -> Result<()> {
             ],
             CancellationToken::new(),
         )
-        .await?;
-    Ok(())
+        .await;
+
+    match outcome {
+        Ok(_) => Ok(()),
+        // PAN-OS releases a vsys-scoped configuration lock as part of committing,
+        // so the explicit release that follows a successful commit finds nothing
+        // to remove. The post-condition being asserted is *no lock is held*, and
+        // that holds — treating it as failure marked every successful commit
+        // `Indeterminate` and, because one unreconciled operation is allowed per
+        // endpoint, left the device blocked for the next change set (#75).
+        //
+        // This deliberately does not swallow other failures: an unreachable
+        // device or a refused permission leaves the lock genuinely held, which is
+        // exactly what `Indeterminate` is for.
+        Err(error) if is_already_unlocked(&error) => {
+            tracing::debug!(
+                target: "audit",
+                device = client.device_name(),
+                "PAN-OS configuration lock was already released"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn release_config_lock_best_effort(client: &PanosClient) {
@@ -1939,5 +1975,46 @@ mod tests {
         .expect("resolve");
         assert_eq!(output.state, "discarded");
         assert!(!read_mutation_state(&path).expect("reload").operations[&id].config_lock_held);
+    }
+}
+
+#[cfg(test)]
+mod release_lock_tests {
+    use super::*;
+
+    fn api_error(message: &str) -> PanosMcpError {
+        PanosMcpError::Api {
+            device: "fw".to_owned(),
+            code: -1,
+            name: "unknown",
+            message: message.to_owned(),
+        }
+    }
+
+    /// The exact message observed from PAN-OS 12.1.5 after a commit released the
+    /// vsys lock on our behalf (#75).
+    #[test]
+    fn already_unlocked_is_recognised() {
+        assert!(is_already_unlocked(&api_error(
+            "Config is not currently locked for scope vsys1"
+        )));
+        assert!(is_already_unlocked(&api_error(
+            "config is NOT CURRENTLY LOCKED for scope shared"
+        )));
+    }
+
+    /// A release that failed for a reason leaving the lock genuinely held must
+    /// still surface. Swallowing these would report a device as unlocked while it
+    /// silently blocks every later change.
+    #[test]
+    fn other_failures_are_not_swallowed() {
+        assert!(!is_already_unlocked(&api_error("Permission denied")));
+        assert!(!is_already_unlocked(&api_error(
+            "Config is locked by another administrator"
+        )));
+        assert!(!is_already_unlocked(&PanosMcpError::HttpStatus {
+            device: "fw".to_owned(),
+            status: 503,
+        }));
     }
 }
