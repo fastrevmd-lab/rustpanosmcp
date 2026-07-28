@@ -52,24 +52,22 @@ impl PanosService {
         };
         let approval_ttl = std::time::Duration::from_secs(crate::mutation::APPROVAL_TTL_SECS);
 
+        // PAN-OS keeps the candidate server-side and identifies it by operation
+        // id, so a staged operation survives a restart intact — unlike Junos,
+        // whose staged handle is a live NETCONF session. Declaring that here lets
+        // the coordinator apply it while loading, so memory and the state file are
+        // written by one owner. The previous approach rewrote the file after
+        // construction and left the two divergent (#72).
         let coordinator = Arc::new(
-            mecmcp_changeset::ChangesetCoordinator::load(
+            mecmcp_changeset::ChangesetCoordinator::load_with_recovery(
                 state_path,
                 limits,
                 approval_ttl,
                 false, // lab_mode
+                mecmcp_changeset::StagedRecovery::Retain,
             )
             .map_err(crate::mutation::coord_error)?,
         );
-
-        // PAN-OS restart recovery: revert Indeterminate operations back to Staged
-        // AFTER the coordinator loads. The shared coordinator converts Staged->Indeterminate
-        // because Junos can't recover staged operations, but PAN-OS maintains the candidate
-        // on the device, so operations with no job_id can legitimately resume.
-        if let Some(path) = state_path {
-            crate::mutation::recover_panos_staged_operations(path, &limits)
-                .map_err(crate::mutation::coord_error)?;
-        }
 
         Self::build(inventory, coordinator)
     }
