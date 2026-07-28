@@ -7,6 +7,7 @@ use crate::{
     tools::PanosService,
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
+use mecmcp_changeset::DeviceTransaction as _;
 use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
 use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
@@ -737,11 +738,19 @@ impl MutationCoordinator {
 
 impl PanosService {
     /// Fingerprint every operator-authorized candidate subtree.
+    ///
+    /// `_cancellation` is accepted and unused. This now reads the fingerprint
+    /// through `DeviceTransaction::fingerprint`, whose signature takes no
+    /// cancellation token, so a long fingerprint read can no longer be
+    /// cancelled mid-flight the way the local helper allowed. The parameter is
+    /// kept so the public signature does not change under callers; removing it
+    /// is a separate decision, and adding cancellation to the shared trait is
+    /// another.
     pub async fn candidate_fingerprint(
         &self,
         input: CandidateFingerprintInput,
         ctx: Option<&CallerContext>,
-        cancellation: CancellationToken,
+        _cancellation: CancellationToken,
     ) -> Result<CandidateFingerprintOutput> {
         let mut audit = match ctx {
             Some(ctx) => AuditScope::from_caller(
@@ -759,7 +768,7 @@ impl PanosService {
         let result = async {
             let client = self.client(&input.device)?;
             require_policy(&client)?;
-            let candidate = candidate_fingerprint(&client, cancellation).await?;
+            let candidate = client.fingerprint().await?;
             Ok(CandidateFingerprintOutput {
                 device: input.device,
                 candidate_fingerprint: candidate,
