@@ -45,7 +45,7 @@ pub enum StageAction {
 }
 
 impl StageAction {
-    const fn api_name(self) -> &'static str {
+    pub(crate) const fn api_name(self) -> &'static str {
         match self {
             Self::Set => "set",
             Self::Delete => "delete",
@@ -1881,7 +1881,7 @@ fn validate_stage_payload(input: &StageConfigInput, allow_delete: bool) -> Resul
     Ok(())
 }
 
-async fn candidate_fingerprint(
+pub(crate) async fn candidate_fingerprint(
     client: &PanosClient,
     cancellation: CancellationToken,
 ) -> Result<String> {
@@ -1980,7 +1980,7 @@ async fn acquire_config_lock(client: &PanosClient, operation_id: &str) -> Result
     Ok(())
 }
 
-async fn release_config_lock(client: &PanosClient) -> Result<()> {
+pub(crate) async fn release_config_lock(client: &PanosClient) -> Result<()> {
     client
         .post_fields(
             vec![
@@ -2002,7 +2002,7 @@ async fn release_config_lock_best_effort(client: &PanosClient) {
     }
 }
 
-async fn revert_admin_candidate(client: &PanosClient, admin: &str) -> Result<()> {
+pub(crate) async fn revert_admin_candidate(client: &PanosClient, admin: &str) -> Result<()> {
     let command = format!(
         "<revert><config><partial><admin><member>{}</member></admin></partial></config></revert>",
         escape(admin)

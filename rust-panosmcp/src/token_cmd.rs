@@ -58,6 +58,10 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
                 tools,
                 expires_at,
                 mutation,
+                None, // provider
+                None, // provider_tier
+                None, // on_behalf_of
+                None, // actor_type
                 &known,
             )?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;

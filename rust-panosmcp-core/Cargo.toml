@@ -9,10 +9,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 fastrand.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 mecmcp-audit.workspace = true
+mecmcp-changeset.workspace = true
 mecmcp-inventory.workspace = true
 mecmcp-policy.workspace = true
 quick-xml.workspace = true
@@ -34,10 +36,11 @@ tempfile = "3"
 
 [dev-dependencies]
 axum = "0.8"
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum-server = { workspace = true }
 mecmcp-audit = { workspace = true, features = ["test-util"] }
 rcgen = "0.14"
 tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true

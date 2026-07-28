@@ -11,9 +11,9 @@ pub use secret::SecretString;
 // Shared core, re-exported so downstream `use rust_panosmcp_auth::…` paths
 // keep working unchanged.
 pub use mecmcp_auth::{
-    CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError, TokenDigest,
-    TokenEntry as SharedTokenEntry, TokenError, TokenSecret, TokenStore as SharedStore,
-    TokenStoreFile as SharedFile, file::KnownNames, write_atomic,
+    ActorType, CallerCtx, FileError as TokenStoreFileError, Grant, ScopeSet, StoreError, Tier,
+    TokenDigest, TokenEntry as SharedTokenEntry, TokenError, TokenSecret,
+    TokenStore as SharedStore, TokenStoreFile as SharedFile, file::KnownNames, write_atomic,
 };
 
 /// PAN-OS token entry: the shared entry specialised to the PAN-OS grant.
