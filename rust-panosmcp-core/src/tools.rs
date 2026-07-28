@@ -51,18 +51,27 @@ impl PanosService {
             max_state_bytes: crate::mutation::MAX_STATE_BYTES,
         };
         let approval_ttl = std::time::Duration::from_secs(crate::mutation::APPROVAL_TTL_SECS);
-        Self::build(
-            inventory,
-            Arc::new(
-                mecmcp_changeset::ChangesetCoordinator::load(
-                    state_path,
-                    limits,
-                    approval_ttl,
-                    false, // lab_mode
-                )
-                .map_err(crate::mutation::coord_error)?,
-            ),
-        )
+
+        let coordinator = Arc::new(
+            mecmcp_changeset::ChangesetCoordinator::load(
+                state_path,
+                limits,
+                approval_ttl,
+                false, // lab_mode
+            )
+            .map_err(crate::mutation::coord_error)?,
+        );
+
+        // PAN-OS restart recovery: revert Indeterminate operations back to Staged
+        // AFTER the coordinator loads. The shared coordinator converts Staged->Indeterminate
+        // because Junos can't recover staged operations, but PAN-OS maintains the candidate
+        // on the device, so operations with no job_id can legitimately resume.
+        if let Some(path) = state_path {
+            crate::mutation::recover_panos_staged_operations(path, &limits)
+                .map_err(crate::mutation::coord_error)?;
+        }
+
+        Self::build(inventory, coordinator)
     }
 
     /// Rebuild clients while retaining in-flight mutation state across atomic reload.

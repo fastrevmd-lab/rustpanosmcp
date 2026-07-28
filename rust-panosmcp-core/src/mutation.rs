@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 pub use mecmcp_changeset::OperationLimits as PublicOperationLimits;
 use mecmcp_changeset::{
     ChangeSetRecord, ChangeSetState, ChangesetCoordinator, CoordinatorError, LifecycleState,
-    OperationRecord, mutation_policy_signature,
+    OperationRecord,
 };
 pub use mecmcp_changeset::{RecoveryDisposition, resolve_persisted_operation};
 
@@ -40,7 +40,25 @@ const VALIDATE_DEADLINE: Duration = Duration::from_secs(300);
 const COMMIT_DEADLINE: Duration = Duration::from_secs(600);
 
 /// Maps `CoordinatorError` from the shared coordinator to this crate's error type.
+///
+/// Preserves the coordinator's error categories: cancellation errors map to
+/// `Cancelled`, persistence failures map to `Configuration`, and policy/state
+/// violations map to `Policy`.
 pub(crate) fn coord_error(error: CoordinatorError) -> PanosMcpError {
+    // Cancellation is signaled by field "device" + message "operation cancelled"
+    if error.field() == "device" && error.message() == "operation cancelled" {
+        return PanosMcpError::Cancelled;
+    }
+
+    // Persistence failures are signaled by field "state"
+    if error.field() == "state" {
+        return PanosMcpError::Configuration(format!(
+            "changeset state persistence failed: {}",
+            error.message()
+        ));
+    }
+
+    // All other coordinator errors are policy/lifecycle refusals
     PanosMcpError::Policy {
         field: error.field(),
         reason: error.message().to_owned(),
@@ -49,15 +67,55 @@ pub(crate) fn coord_error(error: CoordinatorError) -> PanosMcpError {
 
 /// Let `?` carry a coordinator error straight through.
 ///
-/// The coordinator's refusals are policy refusals from this crate's point of
-/// view — a digest that does not match, a change set that is not approved, an
-/// operation that is not in a committable state. Mapping them at every call
-/// site meant twenty near-identical `.map_err(coord_error)?`, which is twenty
-/// chances to map one of them to something else by accident.
+/// Most coordinator refusals are policy refusals (digest mismatch, not approved,
+/// wrong state), but cancellation and persistence failures have their own categories.
+/// The `From` impl delegates to `coord_error` to preserve the distinction.
 impl From<CoordinatorError> for PanosMcpError {
     fn from(error: CoordinatorError) -> Self {
         coord_error(error)
     }
+}
+
+/// PAN-OS restart recovery: revert Indeterminate operations back to Staged.
+///
+/// The shared coordinator's `load` converts `Staged` to `Indeterminate` because
+/// Junos's staged handle is memory-only and cannot survive a restart. PAN-OS is
+/// different: the candidate lives on the device, and a `Staged` operation with
+/// no job_id (meaning it completed staging but never started validation) can
+/// legitimately resume. This function loads the state, identifies and reverts such
+/// operations, then writes the corrected state back before the coordinator loads it.
+///
+/// # Errors
+///
+/// Returns an error if reading or writing the state file fails.
+pub(crate) fn recover_panos_staged_operations(
+    state_path: &std::path::Path,
+    limits: &mecmcp_changeset::OperationLimits,
+) -> std::result::Result<(), CoordinatorError> {
+    use mecmcp_changeset::persistence::{read_state, write_state};
+
+    if !state_path.exists() {
+        return Ok(());
+    }
+
+    let mut state = read_state(state_path, limits.max_state_bytes)?;
+    let mut modified = false;
+
+    for record in state.operations.values_mut() {
+        // Revert Indeterminate -> Staged if the operation cleanly staged without
+        // progressing to a job (no job_id means it never reached validation/commit).
+        if record.state == LifecycleState::Indeterminate && record.job_id.is_none() {
+            record.state = LifecycleState::Staged;
+            record.details = None;
+            modified = true;
+        }
+    }
+
+    if modified {
+        write_state(state_path, &state, limits.max_state_bytes)?;
+    }
+
+    Ok(())
 }
 
 /// Extracts the primary `StageAction` from a JSON value serialized by this crate.
@@ -496,8 +554,10 @@ impl PanosService {
                 PanosMcpError::Configuration(format!("could not compute digest: {error}"))
             })?;
 
-            let policy_sig = local_mutation_policy_signature(policy);
-
+            // Keep policy_signature empty to maintain version 1 file format.
+            // Version 2 triggers if policy_signature is non-empty, and the previous
+            // binary cannot read version 2 files, preventing rollback. Policy drift
+            // is checked on operations, not change-sets, so this is safe.
             let record = ChangeSetRecord {
                 id: id.clone(),
                 owner: owner.to_owned(),
@@ -510,7 +570,7 @@ impl PanosService {
                 approval: None,
                 expires_at_unix: now.saturating_add(APPROVAL_TTL_SECS),
                 operation_id: None,
-                policy_signature: policy_sig,
+                policy_signature: String::new(),
             };
             self.mutations
                 .insert_change_set(record.clone())
@@ -747,13 +807,7 @@ impl PanosService {
             })?;
 
         let action_json = serialize_stage_action(first.action)?;
-        let policy_sig = mutation_policy_signature(format!(
-            "{}:{}:{}:{}",
-            inventory_policy.admin,
-            inventory_policy.allow_delete,
-            inventory_policy.require_config_lock,
-            inventory_policy.allowed_xpath_roots.join(",")
-        ));
+        let policy_sig = local_mutation_policy_signature(&inventory_policy);
 
         let mut record = OperationRecord {
             id: operation_id.clone(),
@@ -971,13 +1025,7 @@ impl PanosService {
         let operation_id = new_operation_id()?;
 
         let action_json = serialize_stage_action(input.action)?;
-        let policy_sig = mutation_policy_signature(format!(
-            "{}:{}:{}:{}",
-            policy.admin,
-            policy.allow_delete,
-            policy.require_config_lock,
-            policy.allowed_xpath_roots.join(",")
-        ));
+        let policy_sig = local_mutation_policy_signature(&policy);
 
         let action_value = serde_json::to_value(&ChangeSetAction {
             action: input.action,
@@ -1526,14 +1574,19 @@ fn require_operation_policy(record: &OperationRecord, client: &PanosClient) -> R
 }
 
 fn local_mutation_policy_signature(policy: &crate::inventory::MutationPolicy) -> String {
-    // Convert the local policy to a string format and use the shared signature function
-    mutation_policy_signature(format!(
-        "{}:{}:{}:{}",
-        policy.admin,
-        policy.allow_delete,
-        policy.require_config_lock,
-        policy.allowed_xpath_roots.join(",")
-    ))
+    // Use the original PAN-OS encoding (raw bytes + length prefixes) to maintain
+    // compatibility with existing persisted operations. Operations created before
+    // the migration used this encoding, and changing it would cause false policy
+    // drift detection on restart.
+    let mut digest = Sha256::new();
+    digest.update(policy.admin.as_bytes());
+    digest.update([u8::from(policy.allow_delete)]);
+    digest.update([u8::from(policy.require_config_lock)]);
+    for root in &policy.allowed_xpath_roots {
+        digest.update((root.len() as u64).to_be_bytes());
+        digest.update(root.as_bytes());
+    }
+    format!("sha256:{}", bytes_hex(&digest.finalize()))
 }
 
 fn validate_change_set_actions(
