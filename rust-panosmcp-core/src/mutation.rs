@@ -7,6 +7,7 @@ use crate::{
     tools::PanosService,
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
+use mecmcp_changeset::DeviceTransaction as _;
 use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
 use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
@@ -45,7 +46,7 @@ pub enum StageAction {
 }
 
 impl StageAction {
-    const fn api_name(self) -> &'static str {
+    pub(crate) const fn api_name(self) -> &'static str {
         match self {
             Self::Set => "set",
             Self::Delete => "delete",
@@ -737,11 +738,19 @@ impl MutationCoordinator {
 
 impl PanosService {
     /// Fingerprint every operator-authorized candidate subtree.
+    ///
+    /// `_cancellation` is accepted and unused. This now reads the fingerprint
+    /// through `DeviceTransaction::fingerprint`, whose signature takes no
+    /// cancellation token, so a long fingerprint read can no longer be
+    /// cancelled mid-flight the way the local helper allowed. The parameter is
+    /// kept so the public signature does not change under callers; removing it
+    /// is a separate decision, and adding cancellation to the shared trait is
+    /// another.
     pub async fn candidate_fingerprint(
         &self,
         input: CandidateFingerprintInput,
         ctx: Option<&CallerContext>,
-        cancellation: CancellationToken,
+        _cancellation: CancellationToken,
     ) -> Result<CandidateFingerprintOutput> {
         let mut audit = match ctx {
             Some(ctx) => AuditScope::from_caller(
@@ -759,7 +768,7 @@ impl PanosService {
         let result = async {
             let client = self.client(&input.device)?;
             require_policy(&client)?;
-            let candidate = candidate_fingerprint(&client, cancellation).await?;
+            let candidate = client.fingerprint().await?;
             Ok(CandidateFingerprintOutput {
                 device: input.device,
                 candidate_fingerprint: candidate,
@@ -1881,7 +1890,7 @@ fn validate_stage_payload(input: &StageConfigInput, allow_delete: bool) -> Resul
     Ok(())
 }
 
-async fn candidate_fingerprint(
+pub(crate) async fn candidate_fingerprint(
     client: &PanosClient,
     cancellation: CancellationToken,
 ) -> Result<String> {
@@ -1980,7 +1989,7 @@ async fn acquire_config_lock(client: &PanosClient, operation_id: &str) -> Result
     Ok(())
 }
 
-async fn release_config_lock(client: &PanosClient) -> Result<()> {
+pub(crate) async fn release_config_lock(client: &PanosClient) -> Result<()> {
     client
         .post_fields(
             vec![
@@ -2002,7 +2011,7 @@ async fn release_config_lock_best_effort(client: &PanosClient) {
     }
 }
 
-async fn revert_admin_candidate(client: &PanosClient, admin: &str) -> Result<()> {
+pub(crate) async fn revert_admin_candidate(client: &PanosClient, admin: &str) -> Result<()> {
     let command = format!(
         "<revert><config><partial><admin><member>{}</member></admin></partial></config></revert>",
         escape(admin)

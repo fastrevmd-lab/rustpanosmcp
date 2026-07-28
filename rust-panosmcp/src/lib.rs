@@ -225,6 +225,12 @@ impl PanosMcpServer {
         None
     }
 
+    // `CallToolResult` is rmcp's type and its size is set by the MCP protocol
+    // shape, not by anything here. A transitive upgrade that came with the
+    // mecmcp 0.3.0 bump pushed it past clippy's 128-byte threshold. Boxing the
+    // Err would ripple through sixteen call sites that return it straight back
+    // to the tool handler, to no benefit on an error path.
+    #[allow(clippy::result_large_err)]
     fn mutation_principal(extensions: &Extensions) -> Result<&str, CallToolResult> {
         if let Some(caller) = Self::caller(extensions) {
             return Ok(&caller.token_name);
@@ -237,6 +243,7 @@ impl PanosMcpServer {
         Ok("local-stdio")
     }
 
+    #[allow(clippy::result_large_err)]
     fn change_set_identity(
         extensions: &Extensions,
     ) -> Result<(&str, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {

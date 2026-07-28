@@ -159,6 +159,10 @@ async fn security_boundary(
             devices: caller.devices.clone(),
             tools: caller.tools.clone(),
             grant: None,
+            provider: caller.provider.clone(),
+            provider_tier: caller.provider_tier,
+            on_behalf_of: caller.on_behalf_of.clone(),
+            actor_type: caller.actor_type,
         };
         if let Err(reason) = run_preflight(&state.preflight, &body_bytes, &caller_ctx) {
             return forbidden(&state.identity.bearer_realm, &reason);
@@ -238,7 +242,7 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
         max_sessions_per_token: options.max_sessions_per_token,
         max_inflight_requests: options.max_inflight_requests,
         max_inflight_requests_per_token: options.max_inflight_requests_per_token,
-        max_inflight_requests_per_router: options.max_inflight_requests_per_target,
+        max_inflight_requests_per_device: options.max_inflight_requests_per_target,
         session_idle_timeout_secs: 300,
         session_max_lifetime_secs: 3600,
     };
@@ -342,6 +346,10 @@ mod tests {
             tools,
             devices,
             grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Unknown,
         }
     }
 
@@ -380,6 +388,10 @@ mod tests {
             created_at: chrono::DateTime::from_timestamp(1, 0).expect("timestamp"),
             expires_at: None,
             grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Unknown,
         }])
         .expect("store");
         assert_eq!(

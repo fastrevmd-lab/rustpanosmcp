@@ -1,6 +1,7 @@
 //! Transport-independent PAN-OS client and tool foundations.
 
 pub mod client;
+pub mod device_transaction;
 pub mod error;
 pub mod inventory;
 pub mod mutation;

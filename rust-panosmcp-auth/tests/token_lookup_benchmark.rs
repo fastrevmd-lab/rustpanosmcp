@@ -1,6 +1,6 @@
 //! Manual Phase 2 lookup benchmark at the supported maximum token count.
 
-use rust_panosmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
+use rust_panosmcp_auth::{ActorType, ScopeSet, TokenDigest, TokenEntry, TokenStore};
 use std::{hint::black_box, time::Instant};
 
 #[test]
@@ -15,6 +15,10 @@ fn benchmark_maximum_token_store_lookup() {
             created_at: chrono::DateTime::from_timestamp(1, 0).expect("timestamp"),
             expires_at: None,
             grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: ActorType::Unknown,
         })
         .collect();
     let store = TokenStore::try_new(entries).expect("maximum supported token store");

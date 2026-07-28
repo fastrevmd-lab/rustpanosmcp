@@ -789,6 +789,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1194,8 +1200,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -1212,8 +1218,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1229,9 +1235,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mecmcp-changeset"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
+dependencies = [
+ "async-trait",
+ "getrandom 0.4.3",
+ "hex",
+ "mecmcp-audit",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "mecmcp-inventory"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "serde",
  "serde_json",
@@ -1243,8 +1268,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-policy"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "globset",
  "serde",
@@ -1253,8 +1278,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-runtime"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "anyhow",
  "clap",
@@ -1267,8 +1292,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-transport"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "axum",
  "dashmap",
@@ -1847,12 +1872,14 @@ dependencies = [
 name = "rust-panosmcp-core"
 version = "0.5.0"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-server",
  "fastrand",
  "futures-util",
  "getrandom 0.4.3",
  "mecmcp-audit",
+ "mecmcp-changeset",
  "mecmcp-inventory",
  "mecmcp-policy",
  "quick-xml",
@@ -1872,6 +1899,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2023,9 +2051,9 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
+checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "chrono",
  "dyn-clone",
@@ -2037,14 +2065,14 @@ dependencies = [
 
 [[package]]
 name = "schemars_derive"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
+checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
 dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2114,13 +2142,13 @@ dependencies = [
 
 [[package]]
 name = "serde_derive_internals"
-version = "0.29.1"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2129,6 +2157,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
