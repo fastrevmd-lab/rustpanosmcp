@@ -76,48 +76,6 @@ impl From<CoordinatorError> for PanosMcpError {
     }
 }
 
-/// PAN-OS restart recovery: revert Indeterminate operations back to Staged.
-///
-/// The shared coordinator's `load` converts `Staged` to `Indeterminate` because
-/// Junos's staged handle is memory-only and cannot survive a restart. PAN-OS is
-/// different: the candidate lives on the device, and a `Staged` operation with
-/// no job_id (meaning it completed staging but never started validation) can
-/// legitimately resume. This function loads the state, identifies and reverts such
-/// operations, then writes the corrected state back before the coordinator loads it.
-///
-/// # Errors
-///
-/// Returns an error if reading or writing the state file fails.
-pub(crate) fn recover_panos_staged_operations(
-    state_path: &std::path::Path,
-    limits: &mecmcp_changeset::OperationLimits,
-) -> std::result::Result<(), CoordinatorError> {
-    use mecmcp_changeset::persistence::{read_state, write_state};
-
-    if !state_path.exists() {
-        return Ok(());
-    }
-
-    let mut state = read_state(state_path, limits.max_state_bytes)?;
-    let mut modified = false;
-
-    for record in state.operations.values_mut() {
-        // Revert Indeterminate -> Staged if the operation cleanly staged without
-        // progressing to a job (no job_id means it never reached validation/commit).
-        if record.state == LifecycleState::Indeterminate && record.job_id.is_none() {
-            record.state = LifecycleState::Staged;
-            record.details = None;
-            modified = true;
-        }
-    }
-
-    if modified {
-        write_state(state_path, &state, limits.max_state_bytes)?;
-    }
-
-    Ok(())
-}
-
 /// Extracts the primary `StageAction` from a JSON value serialized by this crate.
 ///
 /// The shared coordinator stores `action` as `serde_json::Value`. This function
