@@ -36,6 +36,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.91"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -215,6 +226,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "equivalent"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -339,6 +356,18 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hmac"
@@ -583,6 +612,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexmap"
+version = "2.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+dependencies = [
+ "equivalent",
+ "hashbrown",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -715,8 +754,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -733,8 +772,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -750,9 +789,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mecmcp-changeset"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
+dependencies = [
+ "async-trait",
+ "getrandom 0.4.3",
+ "hex",
+ "mecmcp-audit",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "mecmcp-inventory"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "serde",
  "serde_json",
@@ -764,8 +822,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-policy"
-version = "0.1.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=phase4-v0.1.7#b9c22e88903bd50952a27e9695c066fe6b9e53c2"
+version = "0.3.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.0#2de6579c3293dcc4c7eea34f6083e1c4b14361db"
 dependencies = [
  "globset",
  "serde",
@@ -1003,10 +1061,12 @@ dependencies = [
 name = "rust-panosmcp-core"
 version = "0.5.0"
 dependencies = [
+ "async-trait",
  "fastrand",
  "futures-util",
  "getrandom 0.4.3",
  "mecmcp-audit",
+ "mecmcp-changeset",
  "mecmcp-inventory",
  "mecmcp-policy",
  "quick-xml",
@@ -1263,6 +1323,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
