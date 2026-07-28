@@ -31,7 +31,7 @@ enum Action {
 pub struct PanosService {
     inventory: Inventory,
     clients: Arc<BTreeMap<String, Arc<PanosClient>>>,
-    pub(crate) mutations: Arc<crate::mutation::MutationCoordinator>,
+    pub(crate) mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
     policy: Option<Arc<Policy<Action>>>,
 }
 
@@ -43,10 +43,35 @@ impl PanosService {
 
     /// Build clients and optionally restore private mutation/approval state.
     pub fn new_with_state(inventory: Inventory, state_path: Option<&Path>) -> Result<Self> {
-        Self::build(
-            inventory,
-            Arc::new(crate::mutation::MutationCoordinator::load(state_path)?),
-        )
+        let limits = mecmcp_changeset::OperationLimits {
+            max_operations: crate::mutation::MAX_OPERATIONS,
+            max_change_sets: crate::mutation::MAX_CHANGE_SETS,
+            max_actions_per_set: crate::mutation::MAX_CHANGE_SET_ACTIONS,
+            max_change_set_bytes: crate::mutation::MAX_CHANGE_SET_BYTES as u64,
+            max_state_bytes: crate::mutation::MAX_STATE_BYTES,
+        };
+        let approval_ttl = std::time::Duration::from_secs(crate::mutation::APPROVAL_TTL_SECS);
+
+        let coordinator = Arc::new(
+            mecmcp_changeset::ChangesetCoordinator::load(
+                state_path,
+                limits,
+                approval_ttl,
+                false, // lab_mode
+            )
+            .map_err(crate::mutation::coord_error)?,
+        );
+
+        // PAN-OS restart recovery: revert Indeterminate operations back to Staged
+        // AFTER the coordinator loads. The shared coordinator converts Staged->Indeterminate
+        // because Junos can't recover staged operations, but PAN-OS maintains the candidate
+        // on the device, so operations with no job_id can legitimately resume.
+        if let Some(path) = state_path {
+            crate::mutation::recover_panos_staged_operations(path, &limits)
+                .map_err(crate::mutation::coord_error)?;
+        }
+
+        Self::build(inventory, coordinator)
     }
 
     /// Rebuild clients while retaining in-flight mutation state across atomic reload.
@@ -56,7 +81,7 @@ impl PanosService {
 
     fn build(
         inventory: Inventory,
-        mutations: Arc<crate::mutation::MutationCoordinator>,
+        mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
     ) -> Result<Self> {
         let mut clients = BTreeMap::new();
         for device in inventory.entries() {

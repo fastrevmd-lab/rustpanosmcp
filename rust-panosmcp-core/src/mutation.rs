@@ -15,25 +15,169 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
-    fs,
-    io::{Read, Write},
-    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-const MAX_OPERATIONS: usize = 1024;
-const MAX_CHANGE_SETS: usize = 1024;
-const MAX_CHANGE_SET_ACTIONS: usize = 64;
-const MAX_CHANGE_SET_BYTES: usize = 1024 * 1024;
-const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
-const APPROVAL_TTL_SECS: u64 = 15 * 60;
+// Import shared types - no longer aliased since local types are deleted
+pub use mecmcp_changeset::OperationLimits as PublicOperationLimits;
+use mecmcp_changeset::{
+    ChangeSetRecord, ChangeSetState, ChangesetCoordinator, CoordinatorError, LifecycleState,
+    OperationRecord,
+};
+pub use mecmcp_changeset::{RecoveryDisposition, resolve_persisted_operation};
+
+pub(crate) const MAX_OPERATIONS: usize = 1024;
+pub(crate) const MAX_CHANGE_SETS: usize = 1024;
+pub(crate) const MAX_CHANGE_SET_ACTIONS: usize = 64;
+pub(crate) const MAX_CHANGE_SET_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const APPROVAL_TTL_SECS: u64 = 15 * 60;
 const MAX_DIFF_BYTES: usize = 256 * 1024;
 const VALIDATE_DEADLINE: Duration = Duration::from_secs(300);
 const COMMIT_DEADLINE: Duration = Duration::from_secs(600);
+
+/// Maps `CoordinatorError` from the shared coordinator to this crate's error type.
+///
+/// Preserves the coordinator's error categories: cancellation errors map to
+/// `Cancelled`, persistence failures map to `Configuration`, and policy/state
+/// violations map to `Policy`.
+pub(crate) fn coord_error(error: CoordinatorError) -> PanosMcpError {
+    // Cancellation is signaled by field "device" + message "operation cancelled"
+    if error.field() == "device" && error.message() == "operation cancelled" {
+        return PanosMcpError::Cancelled;
+    }
+
+    // Persistence failures are signaled by field "state"
+    if error.field() == "state" {
+        return PanosMcpError::Configuration(format!(
+            "changeset state persistence failed: {}",
+            error.message()
+        ));
+    }
+
+    // All other coordinator errors are policy/lifecycle refusals
+    PanosMcpError::Policy {
+        field: error.field(),
+        reason: error.message().to_owned(),
+    }
+}
+
+/// Let `?` carry a coordinator error straight through.
+///
+/// Most coordinator refusals are policy refusals (digest mismatch, not approved,
+/// wrong state), but cancellation and persistence failures have their own categories.
+/// The `From` impl delegates to `coord_error` to preserve the distinction.
+impl From<CoordinatorError> for PanosMcpError {
+    fn from(error: CoordinatorError) -> Self {
+        coord_error(error)
+    }
+}
+
+/// PAN-OS restart recovery: revert Indeterminate operations back to Staged.
+///
+/// The shared coordinator's `load` converts `Staged` to `Indeterminate` because
+/// Junos's staged handle is memory-only and cannot survive a restart. PAN-OS is
+/// different: the candidate lives on the device, and a `Staged` operation with
+/// no job_id (meaning it completed staging but never started validation) can
+/// legitimately resume. This function loads the state, identifies and reverts such
+/// operations, then writes the corrected state back before the coordinator loads it.
+///
+/// # Errors
+///
+/// Returns an error if reading or writing the state file fails.
+pub(crate) fn recover_panos_staged_operations(
+    state_path: &std::path::Path,
+    limits: &mecmcp_changeset::OperationLimits,
+) -> std::result::Result<(), CoordinatorError> {
+    use mecmcp_changeset::persistence::{read_state, write_state};
+
+    if !state_path.exists() {
+        return Ok(());
+    }
+
+    let mut state = read_state(state_path, limits.max_state_bytes)?;
+    let mut modified = false;
+
+    for record in state.operations.values_mut() {
+        // Revert Indeterminate -> Staged if the operation cleanly staged without
+        // progressing to a job (no job_id means it never reached validation/commit).
+        if record.state == LifecycleState::Indeterminate && record.job_id.is_none() {
+            record.state = LifecycleState::Staged;
+            record.details = None;
+            modified = true;
+        }
+    }
+
+    if modified {
+        write_state(state_path, &state, limits.max_state_bytes)?;
+    }
+
+    Ok(())
+}
+
+/// Extracts the primary `StageAction` from a JSON value serialized by this crate.
+///
+/// The shared coordinator stores `action` as `serde_json::Value`. This function
+/// deserializes it back to the local `StageAction` enum.
+fn extract_stage_action(value: &serde_json::Value) -> Result<StageAction> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        PanosMcpError::Configuration(format!("could not deserialize action: {error}"))
+    })
+}
+
+/// Serializes a `StageAction` to JSON for storage in the shared coordinator.
+fn serialize_stage_action(action: StageAction) -> Result<serde_json::Value> {
+    serde_json::to_value(action).map_err(|error| {
+        PanosMcpError::Configuration(format!("could not serialize action: {error}"))
+    })
+}
+
+/// Extracts the primary XPath target from an operation record.
+///
+/// The `xpath` field is optional in the shared schema (Junos omits it), but PAN-OS
+/// operations always carry it. Returns `None` only if the field is missing.
+fn extract_xpath(record: &OperationRecord) -> Option<String> {
+    record.xpath.clone()
+}
+
+/// Converts a `ChangeSetRecord` to the local `ChangeSetOutput` type.
+///
+/// This is the output projection visible to callers. The record is vendor-neutral
+/// and stores actions as JSON; this extracts and deserializes them to the local
+/// `ChangeSetAction` type.
+fn changeset_record_to_output(record: &ChangeSetRecord) -> Result<ChangeSetOutput> {
+    let actions: Vec<ChangeSetAction> = record
+        .actions
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                PanosMcpError::Configuration(format!(
+                    "could not deserialize change-set action: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ChangeSetOutput {
+        change_set_id: record.id.clone(),
+        device: record.device.clone(),
+        owner: record.owner.clone(),
+        digest: record.digest.clone(),
+        expected_candidate_fingerprint: record.expected_candidate_fingerprint.clone(),
+        actions,
+        state: record.state.as_str().to_owned(),
+        approver: record
+            .approval
+            .as_ref()
+            .and_then(|a| a.approver.clone())
+            .or_else(|| record.approver.clone()),
+        expires_at_unix: record.expires_at_unix,
+        operation_id: record.operation_id.clone(),
+    })
+}
 
 /// Candidate configuration action supported by the guarded stage tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -311,431 +455,6 @@ pub struct OperationStatusInput {
     pub operation_id: String,
 }
 
-/// Operator-confirmed terminal outcome after manual PAN-OS reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryDisposition {
-    /// PAN-OS evidence proves the operation committed.
-    Committed,
-    /// PAN-OS evidence proves the candidate changes were discarded.
-    Discarded,
-}
-
-/// Resolve one persisted indeterminate operation after offline manual reconciliation.
-pub fn resolve_persisted_operation(
-    path: &Path,
-    operation_id: &str,
-    disposition: RecoveryDisposition,
-    confirmation: &str,
-) -> Result<OperationStatusOutput> {
-    if !path.is_absolute() {
-        return Err(PanosMcpError::Configuration(
-            "mutation state path must be absolute".to_owned(),
-        ));
-    }
-    validate_operation_id(operation_id)?;
-    let word = match disposition {
-        RecoveryDisposition::Committed => "COMMITTED",
-        RecoveryDisposition::Discarded => "DISCARDED",
-    };
-    let expected = format!("RESOLVED {operation_id} AS {word}");
-    if confirmation != expected {
-        return Err(policy(
-            "confirmation",
-            "offline resolution requires exact 'RESOLVED <operation-id> AS COMMITTED|DISCARDED' confirmation",
-        ));
-    }
-    let mut state = read_mutation_state(path)?;
-    let record = state
-        .operations
-        .get_mut(operation_id)
-        .ok_or_else(|| policy("operation_id", "unknown persisted operation"))?;
-    if record.state != LifecycleState::Indeterminate {
-        return Err(policy(
-            "operation_id",
-            "only an indeterminate operation can be resolved offline",
-        ));
-    }
-    record.state = match disposition {
-        RecoveryDisposition::Committed => LifecycleState::Committed,
-        RecoveryDisposition::Discarded => LifecycleState::Discarded,
-    };
-    record.config_lock_held = false;
-    record.details = Some(format!(
-        "operator marked {word} after external PAN-OS job/candidate/lock reconciliation"
-    ));
-    let output = OperationStatusOutput {
-        operation_id: record.id.clone(),
-        device: record.device.clone(),
-        state: record.state.as_str().to_owned(),
-        job_id: record.job_id.clone(),
-        candidate_fingerprint: record.current.clone(),
-        details: record.details.clone(),
-    };
-    write_mutation_state(path, &state)?;
-    Ok(output)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum LifecycleState {
-    Staging,
-    Staged,
-    Validating,
-    Validated,
-    Committing,
-    Committed,
-    Discarded,
-    Failed,
-    Indeterminate,
-}
-
-impl LifecycleState {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Staging => "staging",
-            Self::Staged => "staged",
-            Self::Validating => "validating",
-            Self::Validated => "validated",
-            Self::Committing => "committing",
-            Self::Committed => "committed",
-            Self::Discarded => "discarded",
-            Self::Failed => "failed",
-            Self::Indeterminate => "indeterminate",
-        }
-    }
-
-    const fn terminal(self) -> bool {
-        matches!(self, Self::Committed | Self::Discarded)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperationRecord {
-    id: String,
-    owner: String,
-    device: String,
-    endpoint: String,
-    action: StageAction,
-    xpath: String,
-    #[serde(default)]
-    actions: Vec<ChangeSetAction>,
-    #[serde(default)]
-    change_set_id: Option<String>,
-    current: String,
-    state: LifecycleState,
-    job_id: Option<String>,
-    details: Option<String>,
-    config_lock_held: bool,
-    policy_signature: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ChangeSetState {
-    Planned,
-    Approved,
-    Applying,
-    Applied,
-    Expired,
-    Failed,
-}
-
-impl ChangeSetState {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Planned => "planned",
-            Self::Approved => "approved",
-            Self::Applying => "applying",
-            Self::Applied => "applied",
-            Self::Expired => "expired",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChangeSetRecord {
-    id: String,
-    owner: String,
-    device: String,
-    expected_candidate_fingerprint: String,
-    actions: Vec<ChangeSetAction>,
-    digest: String,
-    state: ChangeSetState,
-    approver: Option<String>,
-    expires_at_unix: u64,
-    operation_id: Option<String>,
-}
-
-impl From<ChangeSetRecord> for ChangeSetOutput {
-    fn from(record: ChangeSetRecord) -> Self {
-        Self {
-            change_set_id: record.id,
-            device: record.device,
-            owner: record.owner,
-            digest: record.digest,
-            expected_candidate_fingerprint: record.expected_candidate_fingerprint,
-            actions: record.actions,
-            state: record.state.as_str().to_owned(),
-            approver: record.approver,
-            expires_at_unix: record.expires_at_unix,
-            operation_id: record.operation_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MutationState {
-    #[serde(default)]
-    operations: BTreeMap<String, OperationRecord>,
-    #[serde(default)]
-    change_sets: BTreeMap<String, ChangeSetRecord>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OnDiskMutationState {
-    version: u32,
-    state: MutationState,
-}
-
-/// State shared across service reloads.
-#[derive(Debug)]
-pub(crate) struct MutationCoordinator {
-    state: Mutex<MutationState>,
-    endpoint_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
-    state_path: Option<PathBuf>,
-}
-
-impl Default for MutationCoordinator {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(MutationState::default()),
-            endpoint_locks: Mutex::new(BTreeMap::new()),
-            state_path: None,
-        }
-    }
-}
-
-impl MutationCoordinator {
-    pub(crate) fn load(path: Option<&Path>) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::default());
-        };
-        if !path.is_absolute() {
-            return Err(PanosMcpError::Configuration(
-                "mutation state path must be absolute".to_owned(),
-            ));
-        }
-        let mut state = if path.exists() {
-            read_mutation_state(path)?
-        } else {
-            MutationState::default()
-        };
-        let mut recovered = false;
-        for record in state.operations.values_mut() {
-            if matches!(
-                record.state,
-                LifecycleState::Staging | LifecycleState::Validating | LifecycleState::Committing
-            ) {
-                record.state = LifecycleState::Indeterminate;
-                record.details = Some(
-                    "server restarted during a non-terminal PAN-OS operation; manual reconciliation required"
-                        .to_owned(),
-                );
-                recovered = true;
-            }
-        }
-        for record in state.change_sets.values_mut() {
-            if record.state == ChangeSetState::Applying {
-                record.state = ChangeSetState::Failed;
-                recovered = true;
-            }
-        }
-        if recovered {
-            write_mutation_state(path, &state)?;
-        }
-        Ok(Self {
-            state: Mutex::new(state),
-            endpoint_locks: Mutex::new(BTreeMap::new()),
-            state_path: Some(path.to_path_buf()),
-        })
-    }
-
-    async fn device_guard(
-        &self,
-        endpoint: &str,
-        cancellation: &CancellationToken,
-    ) -> Result<OwnedMutexGuard<()>> {
-        let lock = {
-            let mut locks = self.endpoint_locks.lock().await;
-            locks
-                .entry(endpoint.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        tokio::select! {
-            () = cancellation.cancelled() => Err(PanosMcpError::Cancelled),
-            guard = lock.lock_owned() => Ok(guard),
-        }
-    }
-
-    async fn record(
-        &self,
-        operation_id: &str,
-        owner: &str,
-        device: &str,
-    ) -> Result<OperationRecord> {
-        validate_operation_id(operation_id)?;
-        let state = self.state.lock().await;
-        let record = state
-            .operations
-            .get(operation_id)
-            .ok_or_else(|| policy("operation_id", "unknown operation"))?;
-        if record.owner != owner || record.device != device {
-            return Err(policy(
-                "operation_id",
-                "operation is not owned by this principal and device",
-            ));
-        }
-        Ok(record.clone())
-    }
-
-    async fn insert(&self, record: OperationRecord) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if state.operations.len() >= MAX_OPERATIONS {
-            state
-                .operations
-                .retain(|_, record| !record.state.terminal());
-        }
-        if state.operations.len() >= MAX_OPERATIONS {
-            return Err(policy("operation_id", "operation store is full"));
-        }
-        if state
-            .operations
-            .values()
-            .any(|existing| existing.endpoint == record.endpoint && !existing.state.terminal())
-        {
-            return Err(policy(
-                "operation_id",
-                "the PAN-OS endpoint already has an active or unreconciled operation",
-            ));
-        }
-        let id = record.id.clone();
-        state.operations.insert(id.clone(), record);
-        if let Err(error) = self.persist_locked(&state) {
-            state.operations.remove(&id);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn update(&self, record: OperationRecord) -> Result<()> {
-        let mut state = self.state.lock().await;
-        let id = record.id.clone();
-        let previous = state.operations.insert(id.clone(), record);
-        if let Err(error) = self.persist_locked(&state) {
-            match previous {
-                Some(previous) => {
-                    state.operations.insert(id, previous);
-                }
-                None => {
-                    state.operations.remove(&id);
-                }
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn remove(&self, operation_id: &str) {
-        let mut state = self.state.lock().await;
-        state.operations.remove(operation_id);
-        if let Err(error) = self.persist_locked(&state) {
-            tracing::error!(target: "audit", %error, "mutation state persistence failed");
-        }
-    }
-
-    async fn insert_change_set(&self, record: ChangeSetRecord) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if state.change_sets.len() >= MAX_CHANGE_SETS {
-            state.change_sets.retain(|_, existing| {
-                !matches!(
-                    existing.state,
-                    ChangeSetState::Applied | ChangeSetState::Expired | ChangeSetState::Failed
-                )
-            });
-        }
-        if state.change_sets.len() >= MAX_CHANGE_SETS {
-            return Err(policy("change_set_id", "change-set store is full"));
-        }
-        if state.change_sets.values().any(|existing| {
-            existing.owner == record.owner
-                && existing.device == record.device
-                && matches!(
-                    existing.state,
-                    ChangeSetState::Planned | ChangeSetState::Approved | ChangeSetState::Applying
-                )
-        }) {
-            return Err(policy(
-                "change_set_id",
-                "this principal already has a pending change set on the device",
-            ));
-        }
-        let id = record.id.clone();
-        state.change_sets.insert(id.clone(), record);
-        if let Err(error) = self.persist_locked(&state) {
-            state.change_sets.remove(&id);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn change_set(&self, id: &str, device: &str) -> Result<ChangeSetRecord> {
-        validate_operation_id(id)?;
-        let state = self.state.lock().await;
-        let record = state
-            .change_sets
-            .get(id)
-            .ok_or_else(|| policy("change_set_id", "unknown change set"))?;
-        if record.device != device {
-            return Err(policy(
-                "change_set_id",
-                "change set belongs to another device",
-            ));
-        }
-        Ok(record.clone())
-    }
-
-    async fn update_change_set(&self, record: ChangeSetRecord) -> Result<()> {
-        let mut state = self.state.lock().await;
-        let id = record.id.clone();
-        let previous = state.change_sets.insert(id.clone(), record);
-        if let Err(error) = self.persist_locked(&state) {
-            match previous {
-                Some(previous) => {
-                    state.change_sets.insert(id, previous);
-                }
-                None => {
-                    state.change_sets.remove(&id);
-                }
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn persist_locked(&self, state: &MutationState) -> Result<()> {
-        if let Some(path) = &self.state_path {
-            write_mutation_state(path, state)?;
-        }
-        Ok(())
-    }
-}
-
 impl PanosService {
     /// Fingerprint every operator-authorized candidate subtree.
     ///
@@ -814,31 +533,55 @@ impl PanosService {
             require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
             let now = now_unix()?;
             let id = new_operation_id()?;
-            let digest = change_set_digest(
+
+            // Serialize actions to JSON for the shared coordinator
+            let actions_json: Vec<serde_json::Value> = input
+                .actions
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, serde_json::Error>>()
+                .map_err(|error| {
+                    PanosMcpError::Configuration(format!("could not serialize actions: {error}"))
+                })?;
+
+            let digest = mecmcp_changeset::change_set_digest(
                 owner,
                 &input.device,
                 &input.expected_candidate_fingerprint,
-                &input.actions,
-            )?;
+                &actions_json,
+            )
+            .map_err(|error| {
+                PanosMcpError::Configuration(format!("could not compute digest: {error}"))
+            })?;
+
+            // Keep policy_signature empty to maintain version 1 file format.
+            // Version 2 triggers if policy_signature is non-empty, and the previous
+            // binary cannot read version 2 files, preventing rollback. Policy drift
+            // is checked on operations, not change-sets, so this is safe.
             let record = ChangeSetRecord {
                 id: id.clone(),
                 owner: owner.to_owned(),
                 device: input.device.clone(),
                 expected_candidate_fingerprint: input.expected_candidate_fingerprint,
-                actions: input.actions,
+                actions: actions_json,
                 digest: digest.clone(),
                 state: ChangeSetState::Planned,
                 approver: None,
+                approval: None,
                 expires_at_unix: now.saturating_add(APPROVAL_TTL_SECS),
                 operation_id: None,
+                policy_signature: String::new(),
             };
-            self.mutations.insert_change_set(record.clone()).await?;
+            self.mutations
+                .insert_change_set(record.clone())
+                .await
+                .map_err(coord_error)?;
 
             audit.meta("change_set_id", id);
             audit.meta("digest", digest);
             audit.meta("action_count", record.actions.len() as u64);
 
-            Ok(record.into())
+            changeset_record_to_output(&record)
         }
         .await;
 
@@ -876,46 +619,30 @@ impl PanosService {
         audit.meta("digest", input.expected_digest.clone());
 
         let result = async {
-            validate_digest(&input.expected_digest, "expected_digest")?;
-            let mut record = self
+            // Use shared coordinator's approve_change_set which handles all validation
+            let output = self
                 .mutations
-                .change_set(&input.change_set_id, &input.device)
-                .await?;
-            if record.owner == approver {
-                return Err(policy(
-                    "change_set_id",
-                    "the change-set owner cannot approve their own plan",
-                ));
-            }
-            if record.state != ChangeSetState::Planned {
-                return Err(policy(
-                    "change_set_id",
-                    "change set is not awaiting approval",
-                ));
-            }
-            if now_unix()? >= record.expires_at_unix {
-                record.state = ChangeSetState::Expired;
-                self.mutations.update_change_set(record).await?;
-                return Err(policy(
-                    "change_set_id",
-                    "change-set approval window expired",
-                ));
-            }
-            if record.digest != input.expected_digest {
-                return Err(policy(
-                    "expected_digest",
-                    "digest does not match the exact stored change set",
-                ));
-            }
-            record.state = ChangeSetState::Approved;
-            record.approver = Some(approver.to_owned());
-            self.mutations.update_change_set(record.clone()).await?;
+                .approve_change_set(
+                    input.change_set_id.clone(),
+                    input.device.clone(),
+                    approver.to_owned(),
+                    input.expected_digest,
+                )
+                .await
+                .map_err(coord_error)?;
 
             // Add owner to metadata after successful approval
-            audit.meta("owner", record.owner.clone());
-            audit.meta("action_count", record.actions.len() as u64);
+            audit.meta("owner", output.owner.clone());
+            audit.meta("action_count", output.action_count as u64);
 
-            Ok(record.into())
+            // Fetch the full record to get the actions for our output
+            let full_record = self
+                .mutations
+                .change_set(&output.change_set_id, &output.device)
+                .await
+                .map_err(coord_error)?;
+
+            changeset_record_to_output(&full_record)
         }
         .await;
 
@@ -950,16 +677,20 @@ impl PanosService {
             let mut record = self
                 .mutations
                 .change_set(&input.change_set_id, &input.device)
-                .await?;
+                .await
+                .map_err(coord_error)?;
             if matches!(
                 record.state,
                 ChangeSetState::Planned | ChangeSetState::Approved
             ) && now_unix()? >= record.expires_at_unix
             {
                 record.state = ChangeSetState::Expired;
-                self.mutations.update_change_set(record.clone()).await?;
+                self.mutations
+                    .update_change_set(record.clone())
+                    .await
+                    .map_err(coord_error)?;
             }
-            Ok(record.into())
+            changeset_record_to_output(&record)
         }
         .await;
         match &result {
@@ -1028,7 +759,19 @@ impl PanosService {
         }
         let client = self.client(&input.device)?;
         let inventory_policy = require_policy(&client)?.clone();
-        validate_change_set_actions(&change_set.actions, &inventory_policy, grant)?;
+        // Records hold vendor-opaque JSON now; policy validation still works on
+        // the typed actions, so bring them back before checking.
+        let typed_actions: Vec<ChangeSetAction> = change_set
+            .actions
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<std::result::Result<Vec<_>, serde_json::Error>>()
+            .map_err(|error| {
+                PanosMcpError::Configuration(format!(
+                    "stored change-set action is unreadable: {error}"
+                ))
+            })?;
+        validate_change_set_actions(&typed_actions, &inventory_policy, grant)?;
         let _guard = self
             .mutations
             .device_guard(&client.mutation_lock_key(), &cancellation)
@@ -1054,17 +797,25 @@ impl PanosService {
         }
 
         let operation_id = new_operation_id()?;
-        let first = change_set
+        let first_value = change_set
             .actions
             .first()
             .expect("validated change set is non-empty");
+        let first: ChangeSetAction =
+            serde_json::from_value(first_value.clone()).map_err(|error| {
+                PanosMcpError::Configuration(format!("could not deserialize first action: {error}"))
+            })?;
+
+        let action_json = serialize_stage_action(first.action)?;
+        let policy_sig = local_mutation_policy_signature(&inventory_policy);
+
         let mut record = OperationRecord {
             id: operation_id.clone(),
             owner: owner.to_owned(),
             device: input.device.clone(),
             endpoint: client.mutation_lock_key(),
-            action: first.action,
-            xpath: first.xpath.clone(),
+            action: action_json,
+            xpath: Some(first.xpath.clone()),
             actions: change_set.actions.clone(),
             change_set_id: Some(change_set.id.clone()),
             current: input.expected_candidate_fingerprint.clone(),
@@ -1072,9 +823,14 @@ impl PanosService {
             job_id: None,
             details: None,
             config_lock_held: false,
-            policy_signature: mutation_policy_signature(&inventory_policy),
+            policy_signature: policy_sig,
+            attribution: None,
+            rollback_deadline_unix: None,
         };
-        self.mutations.insert(record.clone()).await?;
+        self.mutations
+            .insert(record.clone())
+            .await
+            .map_err(coord_error)?;
         let mut config_lock_held = false;
         if inventory_policy.require_config_lock {
             if let Err(error) = acquire_config_lock(&client, &operation_id).await {
@@ -1083,7 +839,12 @@ impl PanosService {
             }
             config_lock_held = true;
             record.config_lock_held = true;
-            if let Err(error) = self.mutations.update(record.clone()).await {
+            if let Err(error) = self
+                .mutations
+                .update(record.clone())
+                .await
+                .map_err(coord_error)
+            {
                 release_config_lock_best_effort(&client).await;
                 self.mutations.remove(&operation_id).await;
                 return Err(error);
@@ -1108,7 +869,12 @@ impl PanosService {
         }
         change_set.state = ChangeSetState::Applying;
         change_set.operation_id = Some(operation_id.clone());
-        if let Err(error) = self.mutations.update_change_set(change_set.clone()).await {
+        if let Err(error) = self
+            .mutations
+            .update_change_set(change_set.clone())
+            .await
+            .map_err(coord_error)
+        {
             if config_lock_held {
                 release_config_lock_best_effort(&client).await;
             }
@@ -1118,7 +884,13 @@ impl PanosService {
 
         let mut applied = 0_usize;
         let apply_result: Result<()> = async {
-            for action in &change_set.actions {
+            for action_value in &change_set.actions {
+                let action: ChangeSetAction = serde_json::from_value(action_value.clone())
+                    .map_err(|error| {
+                        PanosMcpError::Configuration(format!(
+                            "could not deserialize action: {error}"
+                        ))
+                    })?;
                 let mut fields = vec![
                     ("type", "config".to_owned()),
                     ("action", action.action.api_name().to_owned()),
@@ -1157,10 +929,16 @@ impl PanosService {
             if let Ok(current) = candidate_fingerprint(&client, CancellationToken::new()).await {
                 record.current = current;
             }
-            self.mutations.update(record.clone()).await?;
+            self.mutations
+                .update(record.clone())
+                .await
+                .map_err(coord_error)?;
             change_set.state = ChangeSetState::Failed;
             change_set.operation_id = Some(operation_id.clone());
-            self.mutations.update_change_set(change_set).await?;
+            self.mutations
+                .update_change_set(change_set)
+                .await
+                .map_err(coord_error)?;
             if config_lock_held {
                 release_config_lock_best_effort(&client).await;
             }
@@ -1181,10 +959,13 @@ impl PanosService {
                 record.details = Some(format!(
                     "all actions were accepted but the resulting fingerprint could not be read: {error}"
                 ));
-                self.mutations.update(record).await?;
+                self.mutations.update(record).await.map_err(coord_error)?;
                 change_set.state = ChangeSetState::Failed;
                 change_set.operation_id = Some(operation_id.clone());
-                self.mutations.update_change_set(change_set).await?;
+                self.mutations
+                    .update_change_set(change_set)
+                    .await
+                    .map_err(coord_error)?;
                 audit.meta("operation_id", operation_id);
                 audit.fail(&error);
                 return Err(error);
@@ -1236,33 +1017,48 @@ impl PanosService {
         let _guard = self
             .mutations
             .device_guard(&client.mutation_lock_key(), &cancellation)
-            .await?;
+            .await
+            .map_err(coord_error)?;
         if cancellation.is_cancelled() {
             return Err(PanosMcpError::Cancelled);
         }
         let operation_id = new_operation_id()?;
+
+        let action_json = serialize_stage_action(input.action)?;
+        let policy_sig = local_mutation_policy_signature(&policy);
+
+        let action_value = serde_json::to_value(&ChangeSetAction {
+            action: input.action,
+            xpath: input.xpath.clone(),
+            element: input.element.clone(),
+            destructive_confirmation: input.destructive_confirmation.clone(),
+        })
+        .map_err(|error| {
+            PanosMcpError::Configuration(format!("could not serialize action: {error}"))
+        })?;
+
         let mut record = OperationRecord {
             id: operation_id.clone(),
             owner: owner.to_owned(),
             device: input.device.clone(),
             endpoint: client.mutation_lock_key(),
-            action: input.action,
-            xpath: input.xpath.clone(),
-            actions: vec![ChangeSetAction {
-                action: input.action,
-                xpath: input.xpath.clone(),
-                element: input.element.clone(),
-                destructive_confirmation: input.destructive_confirmation.clone(),
-            }],
+            action: action_json,
+            xpath: Some(input.xpath.clone()),
+            actions: vec![action_value],
             change_set_id: None,
             current: input.expected_candidate_fingerprint.clone(),
             state: LifecycleState::Staging,
             job_id: None,
             details: None,
             config_lock_held: false,
-            policy_signature: mutation_policy_signature(&policy),
+            policy_signature: policy_sig,
+            attribution: None,
+            rollback_deadline_unix: None,
         };
-        self.mutations.insert(record.clone()).await?;
+        self.mutations
+            .insert(record.clone())
+            .await
+            .map_err(coord_error)?;
         let mut config_lock_held = false;
         if policy.require_config_lock {
             if let Err(error) = acquire_config_lock(&client, &operation_id).await {
@@ -1287,7 +1083,10 @@ impl PanosService {
             let after = candidate_fingerprint(&client, CancellationToken::new()).await?;
             record.current = after.clone();
             record.state = LifecycleState::Staged;
-            self.mutations.update(record.clone()).await?;
+            self.mutations
+                .update(record.clone())
+                .await
+                .map_err(coord_error)?;
             Ok(StageConfigOutput {
                 operation_id: operation_id.clone(),
                 device: input.device.clone(),
@@ -1334,11 +1133,20 @@ impl PanosService {
             let record = self
                 .mutations
                 .record(&input.operation_id, owner, &input.device)
-                .await?;
+                .await
+                .map_err(coord_error)?;
             let client = self.client(&input.device)?;
-            require_operation_policy(&record, &client)?;
+            let policy = require_policy(&client)?;
+            let policy_sig = local_mutation_policy_signature(policy);
+            mecmcp_changeset::require_operation_policy(&record, &policy_sig)
+                .map_err(|e| crate::mutation::policy(e.field(), e.message()))?;
             let current = candidate_fingerprint(&client, cancellation.clone()).await?;
-            require_operation_fingerprint(&input, &record, &current)?;
+            mecmcp_changeset::require_operation_fingerprint(
+                &record,
+                &input.expected_candidate_fingerprint,
+                &current,
+            )
+            .map_err(|e| crate::mutation::policy(e.field(), e.message()))?;
             let response = client
                 .post_fields(
                     vec![
@@ -1353,11 +1161,15 @@ impl PanosService {
                 )
                 .await?;
             let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
+            let action = extract_stage_action(&record.action)?;
+            let xpath = extract_xpath(&record).ok_or_else(|| {
+                PanosMcpError::Configuration("operation record missing xpath".to_owned())
+            })?;
             Ok(CandidateDiffOutput {
                 operation_id: record.id,
                 device: record.device,
-                action: record.action,
-                xpath: record.xpath,
+                action,
+                xpath,
                 candidate_fingerprint: current,
                 change_summary,
                 truncated,
@@ -1662,7 +1474,7 @@ impl PanosService {
 }
 
 async fn commit_worker(
-    coordinator: Arc<MutationCoordinator>,
+    coordinator: Arc<ChangesetCoordinator>,
     client: Arc<PanosClient>,
     admin: String,
     mut record: OperationRecord,
@@ -1751,7 +1563,7 @@ fn require_policy(client: &PanosClient) -> Result<&crate::inventory::MutationPol
 
 fn require_operation_policy(record: &OperationRecord, client: &PanosClient) -> Result<()> {
     let current_policy = require_policy(client)?;
-    if record.policy_signature == mutation_policy_signature(current_policy) {
+    if record.policy_signature == local_mutation_policy_signature(current_policy) {
         Ok(())
     } else {
         Err(policy(
@@ -1761,7 +1573,11 @@ fn require_operation_policy(record: &OperationRecord, client: &PanosClient) -> R
     }
 }
 
-fn mutation_policy_signature(policy: &crate::inventory::MutationPolicy) -> String {
+fn local_mutation_policy_signature(policy: &crate::inventory::MutationPolicy) -> String {
+    // Use the original PAN-OS encoding (raw bytes + length prefixes) to maintain
+    // compatibility with existing persisted operations. Operations created before
+    // the migration used this encoding, and changing it would cause false policy
+    // drift detection on restart.
     let mut digest = Sha256::new();
     digest.update(policy.admin.as_bytes());
     digest.update([u8::from(policy.allow_delete)]);
@@ -1820,19 +1636,6 @@ fn validate_change_set_actions(
         }
     }
     Ok(())
-}
-
-fn change_set_digest(
-    owner: &str,
-    device: &str,
-    fingerprint: &str,
-    actions: &[ChangeSetAction],
-) -> Result<String> {
-    let canonical =
-        serde_json::to_vec(&(owner, device, fingerprint, actions)).map_err(|error| {
-            PanosMcpError::Configuration(format!("could not encode change-set digest: {error}"))
-        })?;
-    Ok(format!("sha256:{}", digest_hex(&canonical)))
 }
 
 fn validate_digest(value: &str, field: &'static str) -> Result<()> {
@@ -1919,21 +1722,6 @@ fn require_fingerprint(expected: &str, actual: &str) -> Result<()> {
         Err(policy(
             "expected_candidate_fingerprint",
             "candidate changed since the caller observed it",
-        ))
-    }
-}
-
-fn validate_operation_id(value: &str) -> Result<()> {
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        Ok(())
-    } else {
-        Err(policy(
-            "operation_id",
-            "value must contain exactly 64 hexadecimal characters",
         ))
     }
 }
@@ -2032,164 +1820,23 @@ fn now_unix() -> Result<u64> {
         .map_err(|_| PanosMcpError::Configuration("system clock is before Unix epoch".to_owned()))
 }
 
-fn read_mutation_state(path: &Path) -> Result<MutationState> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        PanosMcpError::Configuration(format!(
-            "could not inspect mutation state '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(PanosMcpError::Configuration(
-            "mutation state must be a regular non-symlink file".to_owned(),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.mode() & 0o077 != 0 {
-            return Err(PanosMcpError::Configuration(
-                "mutation state must not permit group/other access".to_owned(),
-            ));
-        }
-        let owner = metadata.uid();
-        let effective = rustix::process::geteuid().as_raw();
-        if owner != effective && owner != 0 {
-            return Err(PanosMcpError::Configuration(format!(
-                "mutation state owner uid {owner} is neither effective uid {effective} nor root"
-            )));
-        }
-    }
-    if metadata.len() > MAX_STATE_BYTES {
-        return Err(PanosMcpError::Configuration(format!(
-            "mutation state exceeds {MAX_STATE_BYTES} bytes"
-        )));
-    }
-    let file = fs::File::open(path).map_err(|error| {
-        PanosMcpError::Configuration(format!(
-            "could not open mutation state '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_STATE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            PanosMcpError::Configuration(format!("could not read mutation state: {error}"))
-        })?;
-    let on_disk: OnDiskMutationState = serde_json::from_slice(&bytes).map_err(|error| {
-        PanosMcpError::Configuration(format!("invalid mutation state JSON: {error}"))
-    })?;
-    if on_disk.version != 1 {
-        return Err(PanosMcpError::Configuration(format!(
-            "unsupported mutation state version {}",
-            on_disk.version
-        )));
-    }
-    validate_mutation_state(&on_disk.state)?;
-    Ok(on_disk.state)
-}
-
-fn validate_mutation_state(state: &MutationState) -> Result<()> {
-    if state.operations.len() > MAX_OPERATIONS || state.change_sets.len() > MAX_CHANGE_SETS {
-        return Err(PanosMcpError::Configuration(
-            "mutation state contains too many records".to_owned(),
-        ));
-    }
-    for (id, record) in &state.operations {
-        validate_operation_id(id)?;
-        if id != &record.id || record.owner.is_empty() || record.device.is_empty() {
-            return Err(PanosMcpError::Configuration(
-                "mutation state contains an inconsistent operation record".to_owned(),
-            ));
-        }
-        validate_fingerprint(&record.current)?;
-        if !record.endpoint.starts_with("https://") || record.actions.is_empty() {
-            return Err(PanosMcpError::Configuration(
-                "mutation state operation is missing endpoint/action metadata".to_owned(),
-            ));
-        }
-    }
-    for (id, record) in &state.change_sets {
-        validate_operation_id(id)?;
-        if id != &record.id || record.owner.is_empty() || record.device.is_empty() {
-            return Err(PanosMcpError::Configuration(
-                "mutation state contains an inconsistent change-set record".to_owned(),
-            ));
-        }
-        validate_fingerprint(&record.expected_candidate_fingerprint)?;
-        validate_digest(&record.digest, "digest")?;
-        if record.actions.is_empty() || record.actions.len() > MAX_CHANGE_SET_ACTIONS {
-            return Err(PanosMcpError::Configuration(
-                "mutation state change set has an invalid action count".to_owned(),
-            ));
-        }
-        let expected = change_set_digest(
-            &record.owner,
-            &record.device,
-            &record.expected_candidate_fingerprint,
-            &record.actions,
-        )?;
-        if expected != record.digest {
-            return Err(PanosMcpError::Configuration(
-                "mutation state change-set digest mismatch".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn write_mutation_state(path: &Path, state: &MutationState) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        PanosMcpError::Configuration("mutation state path has no parent".to_owned())
-    })?;
-    let payload = serde_json::to_vec_pretty(&OnDiskMutationState {
-        version: 1,
-        state: MutationState {
-            operations: state.operations.clone(),
-            change_sets: state.change_sets.clone(),
-        },
+#[cfg(test)]
+fn read_mutation_state(
+    path: &std::path::Path,
+) -> Result<mecmcp_changeset::persistence::ChangesetState> {
+    mecmcp_changeset::persistence::read_state(path, MAX_STATE_BYTES).map_err(|error| {
+        PanosMcpError::Configuration(format!("could not read mutation state: {error}"))
     })
-    .map_err(|error| {
-        PanosMcpError::Configuration(format!("could not serialize mutation state: {error}"))
-    })?;
-    if payload.len() as u64 > MAX_STATE_BYTES {
-        return Err(PanosMcpError::Configuration(format!(
-            "serialized mutation state exceeds {MAX_STATE_BYTES} bytes"
-        )));
-    }
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".rust-panosmcp-state-")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(|error| {
-            PanosMcpError::Configuration(format!("could not create mutation state: {error}"))
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|error| {
-                PanosMcpError::Configuration(format!("could not secure mutation state: {error}"))
-            })?;
-    }
-    temporary.write_all(&payload).map_err(|error| {
+}
+
+#[cfg(test)]
+fn write_mutation_state(
+    path: &std::path::Path,
+    state: &mecmcp_changeset::persistence::ChangesetState,
+) -> Result<()> {
+    mecmcp_changeset::persistence::write_state(path, state, MAX_STATE_BYTES).map_err(|error| {
         PanosMcpError::Configuration(format!("could not write mutation state: {error}"))
-    })?;
-    temporary.as_file().sync_all().map_err(|error| {
-        PanosMcpError::Configuration(format!("could not sync mutation state: {error}"))
-    })?;
-    temporary.persist(path).map_err(|error| {
-        PanosMcpError::Configuration(format!("could not replace mutation state: {}", error.error))
-    })?;
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            PanosMcpError::Configuration(format!("could not sync state directory: {error}"))
-        })?;
-    Ok(())
+    })
 }
 
 fn new_operation_id() -> Result<String> {
@@ -2271,14 +1918,20 @@ mod tests {
             owner: "writer".to_owned(),
             device: "fw".to_owned(),
             endpoint: "https://fw.example:443".to_owned(),
-            action: StageAction::Set,
-            xpath: "/config/shared/address".to_owned(),
-            actions: vec![ChangeSetAction {
-                action: StageAction::Set,
-                xpath: "/config/shared/address".to_owned(),
-                element: Some("<entry name=\"x\"/>".to_owned()),
-                destructive_confirmation: None,
-            }],
+            // The record now holds vendor-opaque JSON: the discriminator string
+            // in `action`, the full object in `actions`, the target in `xpath` —
+            // matching what the deployed reader on LXC 608 expects.
+            action: serde_json::Value::String("set".to_owned()),
+            xpath: Some("/config/shared/address".to_owned()),
+            actions: vec![
+                serde_json::to_value(ChangeSetAction {
+                    action: StageAction::Set,
+                    xpath: "/config/shared/address".to_owned(),
+                    element: Some("<entry name=\"x\"/>".to_owned()),
+                    destructive_confirmation: None,
+                })
+                .expect("action serializes"),
+            ],
             change_set_id: None,
             current: format!("sha256:{}", "b".repeat(64)),
             state: LifecycleState::Staging,
@@ -2286,11 +1939,21 @@ mod tests {
             details: None,
             config_lock_held: true,
             policy_signature: "policy".to_owned(),
+            attribution: None,
+            rollback_deadline_unix: None,
         };
-        let mut state = MutationState::default();
+        let mut state = mecmcp_changeset::persistence::ChangesetState::default();
         state.operations.insert(id.clone(), record);
         write_mutation_state(&path, &state).expect("state write");
-        drop(MutationCoordinator::load(Some(&path)).expect("restart recovery"));
+        drop(
+            ChangesetCoordinator::load(
+                Some(&path),
+                mecmcp_changeset::OperationLimits::default(),
+                std::time::Duration::from_secs(900),
+                false,
+            )
+            .expect("restart recovery"),
+        );
         assert_eq!(
             read_mutation_state(&path)
                 .expect("recovered state")
@@ -2299,14 +1962,21 @@ mod tests {
             LifecycleState::Indeterminate
         );
         assert!(
-            resolve_persisted_operation(&path, &id, RecoveryDisposition::Discarded, "not enough",)
-                .is_err()
+            resolve_persisted_operation(
+                &path,
+                &id,
+                RecoveryDisposition::Discarded,
+                "not enough",
+                mecmcp_changeset::OperationLimits::default(),
+            )
+            .is_err()
         );
         let output = resolve_persisted_operation(
             &path,
             &id,
             RecoveryDisposition::Discarded,
             &format!("RESOLVED {id} AS DISCARDED"),
+            mecmcp_changeset::OperationLimits::default(),
         )
         .expect("resolve");
         assert_eq!(output.state, "discarded");

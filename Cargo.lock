@@ -1878,6 +1878,7 @@ dependencies = [
  "fastrand",
  "futures-util",
  "getrandom 0.4.3",
+ "hex",
  "mecmcp-audit",
  "mecmcp-changeset",
  "mecmcp-inventory",

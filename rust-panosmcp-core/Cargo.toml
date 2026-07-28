@@ -37,6 +37,7 @@ tempfile = "3"
 [dev-dependencies]
 axum = "0.8"
 axum-server = { workspace = true }
+hex = "0.4"
 mecmcp-audit = { workspace = true, features = ["test-util"] }
 rcgen = "0.14"
 tempfile = "3"

@@ -56,11 +56,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rust_panosmcp_core::mutation::RecoveryDisposition::Discarded
                     }
                 };
+                // The shared recovery function takes the size cap explicitly, so a
+                // deployment that raised max_state_bytes can still open the file
+                // this repairs.
                 let output = rust_panosmcp_core::mutation::resolve_persisted_operation(
                     &state_file,
                     &operation_id,
                     disposition,
                     &confirmation,
+                    rust_panosmcp_core::mutation::PublicOperationLimits::default(),
                 )?;
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
