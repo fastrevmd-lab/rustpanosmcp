@@ -127,6 +127,11 @@ fn changeset_record_to_output(record: &ChangeSetRecord) -> Result<ChangeSetOutpu
         expected_candidate_fingerprint: record.expected_candidate_fingerprint.clone(),
         actions,
         state: record.state.as_str().to_owned(),
+        approval_waiver: record
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.waived.as_ref())
+            .map(|waiver| waiver.reason.clone()),
         approver: record
             .approval
             .as_ref()
@@ -248,6 +253,14 @@ pub struct ChangeSetOutput {
     pub state: String,
     /// Independent approver, when approved.
     pub approver: Option<String>,
+    /// Why approval was waived, when it was.
+    ///
+    /// `None` on an ordinary change set. `Some("lab-mode")` when a
+    /// single-operator server approved it without a second principal.
+    /// `approver: None` alone cannot carry this — it means both "not yet
+    /// approved" and "approved without review" (mecmcp#94).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_waiver: Option<String>,
     /// Approval deadline.
     pub expires_at_unix: u64,
     /// Lifecycle operation created by apply, when available.
@@ -526,7 +539,11 @@ impl PanosService {
                 state: ChangeSetState::Planned,
                 approver: None,
                 approval: None,
-                expires_at_unix: now.saturating_add(APPROVAL_TTL_SECS),
+                // From the coordinator, not the constant: an operator who sets
+                // --approval-timeout-secs would otherwise get their value applied
+                // to the coordinator's own expiry checks while change sets kept
+                // the compiled-in default, and the two would disagree.
+                expires_at_unix: now.saturating_add(self.mutations.approval_ttl().as_secs()),
                 operation_id: None,
                 policy_signature: String::new(),
             };
@@ -535,9 +552,33 @@ impl PanosService {
                 .await
                 .map_err(coord_error)?;
 
-            audit.meta("change_set_id", id);
-            audit.meta("digest", digest);
+            audit.meta("change_set_id", id.clone());
+            audit.meta("digest", digest.clone());
             audit.meta("action_count", record.actions.len() as u64);
+
+            // Single-operator servers waive approval here rather than exposing a
+            // tool to do it. Starting the service with `--lab-mode` is already the
+            // deliberate decision to run without a second reviewer, so a
+            // per-change-set waive call would be ceremony protecting nobody — and
+            // the digest confirmation it would carry is already enforced by
+            // `apply`, which is what touches the device (mecmcp#94).
+            //
+            // No approver is invented: the record keeps `approver: null` and gains
+            // `approval_waiver`, so a waived change stays distinguishable from one
+            // a second person reviewed.
+            if self.mutations.lab_mode() {
+                let waived = self
+                    .mutations
+                    .waive_approval(id, record.device.clone(), record.owner.clone(), digest)
+                    .await
+                    .map_err(coord_error)?;
+                audit.meta("approval_waiver", "lab-mode");
+                let mut output = changeset_record_to_output(&record)?;
+                output.state = format!("{:?}", waived.state).to_lowercase();
+                output.approver = None;
+                output.approval_waiver = Some("lab-mode".to_owned());
+                return Ok(output);
+            }
 
             changeset_record_to_output(&record)
         }

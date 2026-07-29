@@ -73,11 +73,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     cli_validate::validate(&cli)?;
+
+    // Lab mode removes two-person control, so say so where an operator will
+    // actually see it. Reading it off flags typed weeks ago is not visibility.
+    if cli.lab_mode {
+        tracing::warn!(
+            target: "audit",
+            "lab mode enabled: change sets are approved on creation with no second principal. \
+             Records carry approval_waiver=lab-mode. Do not run this against production devices."
+        );
+    }
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
-    let runtime =
-        RuntimeState::load_with_state(&cli.device_mapping, tokens, cli.state_file.as_deref())?;
+    let runtime = RuntimeState::load_with_state(
+        &cli.device_mapping,
+        tokens,
+        cli.state_file.as_deref(),
+        cli.lab_mode,
+        Some(cli.approval_timeout_secs),
+    )?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
         devices = runtime.snapshot().service.list_devices(None).devices.len(),

@@ -754,8 +754,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.3.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.6#93ab63d7c2fad649112807378f92fcc26cce73c6"
+version = "0.3.7"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.7#85137c509fe1803b87e8636462f0392ce05072ce"
 dependencies = [
  "hmac",
  "mecmcp-auth",
@@ -772,8 +772,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.3.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.6#93ab63d7c2fad649112807378f92fcc26cce73c6"
+version = "0.3.7"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.7#85137c509fe1803b87e8636462f0392ce05072ce"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -790,8 +790,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-changeset"
-version = "0.3.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.6#93ab63d7c2fad649112807378f92fcc26cce73c6"
+version = "0.3.7"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.7#85137c509fe1803b87e8636462f0392ce05072ce"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -809,8 +809,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-inventory"
-version = "0.3.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.6#93ab63d7c2fad649112807378f92fcc26cce73c6"
+version = "0.3.7"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.7#85137c509fe1803b87e8636462f0392ce05072ce"
 dependencies = [
  "serde",
  "serde_json",
@@ -822,8 +822,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-policy"
-version = "0.3.6"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.6#93ab63d7c2fad649112807378f92fcc26cce73c6"
+version = "0.3.7"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=changeset-v0.3.7#85137c509fe1803b87e8636462f0392ce05072ce"
 dependencies = [
  "globset",
  "serde",

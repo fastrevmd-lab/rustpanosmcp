@@ -56,7 +56,7 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
     ) -> Result<Self, RuntimeLoadError> {
-        Self::load_with_state(inventory_path, token_path, None)
+        Self::load_with_state(inventory_path, token_path, None, false, None)
     }
 
     /// Load runtime with an optional persistent private mutation-state file.
@@ -64,10 +64,19 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
         state_path: Option<&Path>,
+        lab_mode: bool,
+        approval_timeout_secs: Option<u64>,
     ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
         let token_path = token_path.map(Path::to_path_buf);
-        let snapshot = load_snapshot(&inventory_path, token_path.as_deref(), None, state_path)?;
+        let snapshot = load_snapshot(
+            &inventory_path,
+            token_path.as_deref(),
+            None,
+            state_path,
+            lab_mode,
+            approval_timeout_secs,
+        )?;
         Ok(Self {
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
             inventory_path: Arc::new(inventory_path),
@@ -107,6 +116,12 @@ impl RuntimeState {
             self.token_path.as_ref().map(|path| path.as_path()),
             Some(&current.service),
             None,
+            // Unused on this path: reload reuses the previous service's
+            // coordinator, so the lab-mode decision made at startup stands. A
+            // SIGHUP must not be able to change whether two-person control
+            // applies.
+            false,
+            None,
         )?;
         self.current.store(Arc::new(replacement));
         Ok(())
@@ -130,11 +145,15 @@ fn load_snapshot(
     token_path: Option<&Path>,
     previous_service: Option<&PanosService>,
     state_path: Option<&Path>,
+    lab_mode: bool,
+    approval_timeout_secs: Option<u64>,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
     let inventory = Inventory::load(inventory_path)?;
     let service = Arc::new(match previous_service {
         Some(previous) => PanosService::reload(inventory, previous)?,
-        None => PanosService::new_with_state(inventory, state_path)?,
+        None => {
+            PanosService::new_with_options(inventory, state_path, lab_mode, approval_timeout_secs)?
+        }
     });
     let tokens = token_path
         .map(|path| TokenStoreFile::load(path).map(|file| file.store()))

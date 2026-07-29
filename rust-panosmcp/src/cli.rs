@@ -38,6 +38,26 @@ pub struct Cli {
     #[arg(long)]
     pub state_file: Option<PathBuf>,
 
+    /// Run without two-person control: change sets are approved on creation.
+    ///
+    /// For single-operator environments — a lab with one engineer — where
+    /// requiring a second principal makes change sets unusable rather than
+    /// safer.
+    ///
+    /// No approver is invented. A waived change set records `approver: null`
+    /// with `approval_waiver: "lab-mode"`, so it stays distinguishable from one
+    /// a second person actually reviewed.
+    ///
+    /// Spelled identically on every mecmcp server (mecmcp#94).
+    #[arg(long = "lab-mode")]
+    pub lab_mode: bool,
+
+    /// Seconds a change-set approval stays valid before it expires.
+    ///
+    /// Spelled identically on every mecmcp server (mecmcp#94).
+    #[arg(long = "approval-timeout-secs", default_value_t = 900)]
+    pub approval_timeout_secs: u64,
+
     /// Absolute PEM certificate path; requires `--tls-key`.
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,

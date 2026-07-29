@@ -192,7 +192,8 @@ async fn fixture(commit_fails: bool, lock_release_fails: bool) -> Fixture {
     let inventory = Inventory::load_with_environment(&inventory_path, &TestEnvironment)
         .expect("mutation inventory");
     let state_path = directory.path().join("mutation-state.json");
-    let service = PanosService::new_with_state(inventory, Some(&state_path)).expect("service");
+    let service =
+        PanosService::new_with_state(inventory, Some(&state_path), false).expect("service");
     Fixture {
         _directory: directory,
         inventory_path,
@@ -214,7 +215,7 @@ fn persisted_operation(fixture: &Fixture, operation_id: &str) -> serde_json::Val
 fn recovered_service(fixture: &Fixture) -> PanosService {
     let inventory = Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
         .expect("recovered inventory");
-    PanosService::new_with_state(inventory, Some(&fixture.state_path))
+    PanosService::new_with_state(inventory, Some(&fixture.state_path), false)
         .expect("recover persistent mutation state")
 }
 
