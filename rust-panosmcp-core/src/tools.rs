@@ -38,11 +38,28 @@ pub struct PanosService {
 impl PanosService {
     /// Build and validate all pooled device clients before serving requests.
     pub fn new(inventory: Inventory) -> Result<Self> {
-        Self::new_with_state(inventory, None)
+        Self::new_with_state(inventory, None, false)
     }
 
     /// Build clients and optionally restore private mutation/approval state.
-    pub fn new_with_state(inventory: Inventory, state_path: Option<&Path>) -> Result<Self> {
+    ///
+    /// `lab_mode` waives two-person control for single-operator environments;
+    /// see the `--lab-mode` flag (mecmcp#94).
+    pub fn new_with_state(
+        inventory: Inventory,
+        state_path: Option<&Path>,
+        lab_mode: bool,
+    ) -> Result<Self> {
+        Self::new_with_options(inventory, state_path, lab_mode, None)
+    }
+
+    /// As [`new_with_state`](Self::new_with_state), with an approval TTL override.
+    pub fn new_with_options(
+        inventory: Inventory,
+        state_path: Option<&Path>,
+        lab_mode: bool,
+        approval_timeout_secs: Option<u64>,
+    ) -> Result<Self> {
         let limits = mecmcp_changeset::OperationLimits {
             max_operations: crate::mutation::MAX_OPERATIONS,
             max_change_sets: crate::mutation::MAX_CHANGE_SETS,
@@ -50,7 +67,9 @@ impl PanosService {
             max_change_set_bytes: crate::mutation::MAX_CHANGE_SET_BYTES as u64,
             max_state_bytes: crate::mutation::MAX_STATE_BYTES,
         };
-        let approval_ttl = std::time::Duration::from_secs(crate::mutation::APPROVAL_TTL_SECS);
+        let approval_ttl = std::time::Duration::from_secs(
+            approval_timeout_secs.unwrap_or(crate::mutation::APPROVAL_TTL_SECS),
+        );
 
         // PAN-OS keeps the candidate server-side and identifies it by operation
         // id, so a staged operation survives a restart intact — unlike Junos,
@@ -63,7 +82,7 @@ impl PanosService {
                 state_path,
                 limits,
                 approval_ttl,
-                false, // lab_mode
+                lab_mode,
                 mecmcp_changeset::StagedRecovery::Retain,
             )
             .map_err(crate::mutation::coord_error)?,

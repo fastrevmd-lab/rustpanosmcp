@@ -91,7 +91,7 @@ async fn restart_recovery_preserves_clean_staged_operations() {
     // Load the service, which triggers restart recovery
     let inventory =
         Inventory::load_with_environment(&inventory_path, &TestEnvironment).expect("inventory");
-    let _service = PanosService::new_with_state(inventory, Some(&state_path))
+    let _service = PanosService::new_with_state(inventory, Some(&state_path), false)
         .expect("service load should succeed");
 
     // Read the state back
@@ -162,7 +162,8 @@ async fn changeset_creation_maintains_version_1_compatibility() {
 
     let inventory =
         Inventory::load_with_environment(&inventory_path, &TestEnvironment).expect("inventory");
-    let _service = PanosService::new_with_state(inventory, Some(&state_path)).expect("service");
+    let _service =
+        PanosService::new_with_state(inventory, Some(&state_path), false).expect("service");
 
     // Read back the state file
     let state_content = fs::read_to_string(&state_path).expect("read state");
@@ -264,7 +265,8 @@ async fn policy_signature_encoding_remains_stable() {
 
     let inventory =
         Inventory::load_with_environment(&inventory_path, &TestEnvironment).expect("inventory");
-    let _service = PanosService::new_with_state(inventory, Some(&state_path)).expect("service");
+    let _service =
+        PanosService::new_with_state(inventory, Some(&state_path), false).expect("service");
 
     // Read back the state
     let recovered: serde_json::Value =
