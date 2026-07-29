@@ -331,10 +331,17 @@ pub fn validate_config_element(element: &str) -> Result<()> {
 /// Enforce that a mutation XPath is inside one explicit operator-controlled root.
 pub fn validate_write_xpath(xpath: &str, allowed_roots: &[String]) -> Result<()> {
     validate_read_xpath(xpath)?;
+    // Canonicalise quote style on both sides before comparing. The same helper
+    // backs the token grant check, so the two layers cannot disagree about
+    // whether `[@name='x']` and `[@name="x"]` are the same path — which is
+    // exactly what made LXC 608 unable to perform any mutation at all
+    // (rustpanosmcp#82).
+    let candidate = rust_panosmcp_auth::canonicalize_xpath_quotes(xpath);
     if allowed_roots.iter().any(|root| {
-        xpath == root
-            || xpath
-                .strip_prefix(root)
+        let root = rust_panosmcp_auth::canonicalize_xpath_quotes(root);
+        candidate == root
+            || candidate
+                .strip_prefix(&root)
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }) {
         return Ok(());

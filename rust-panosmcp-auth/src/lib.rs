@@ -5,7 +5,7 @@ mod grant;
 pub mod secret;
 
 pub use bearer::{BearerHeaderError, parse_bearer_header};
-pub use grant::{MutationAction, MutationGrant};
+pub use grant::{MutationAction, MutationGrant, canonicalize_xpath_quotes};
 pub use secret::SecretString;
 
 // Shared core, re-exported so downstream `use rust_panosmcp_auth::…` paths
