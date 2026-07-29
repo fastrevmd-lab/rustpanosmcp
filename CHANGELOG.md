@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-29
+
+### Fixed
+
+- **XPath mutation roots are compared by meaning, not by quote style.**
+  `[@name='x']` and `[@name="x"]` are the same XPath, but both mutation checks
+  compared strings — and the two sources that feed them, `devices.json` and a
+  token's mutation grant, are written by different people at different times.
+
+  Where they disagreed, **every write was refused and no input could satisfy
+  both**: single quotes passed the device policy and failed the token grant,
+  double quotes did the reverse. A server in that state starts cleanly, serves
+  reads, and cannot perform a single mutation. Found on a deployed server whose
+  write path had never worked.
+
+  Both checks now canonicalise through one shared helper, so they cannot drift
+  apart again. A value containing an apostrophe is left untouched rather than
+  mangled — XPath 1.0 has no escape for it — and anything that is not a
+  complete, well-formed predicate passes through unchanged, so normalisation can
+  never widen a root.
+
 ## [0.7.0] - 2026-07-29
 
 ### Added
