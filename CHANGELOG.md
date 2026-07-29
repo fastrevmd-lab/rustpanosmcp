@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-29
+
+### Fixed
+
+- **A successful commit no longer ends up in the manual-recovery queue.**
+  PAN-OS releases the vsys configuration lock as part of committing, so the
+  explicit release that followed failed with `Config is not currently locked`
+  and the operation was marked `Indeterminate`. Because one unreconciled
+  operation is allowed per device, **every** successful commit then blocked the
+  next change set until someone resolved the record by hand. An already-released
+  lock is now treated as success; a release that fails for any other reason
+  still fails loudly, because that leaves the lock genuinely held.
+
+- **Restart recovery no longer strands an operation.** The state file was
+  repaired after the coordinator had already loaded it, so the API reported
+  `indeterminate` while the file said `staged`, and the offline `state resolve`
+  tool refused to act on either. The operation could be neither used nor
+  resolved, with its candidate and lock still held on the device. The decision
+  is now made while state is read, so memory and file always agree.
+
+- **A staged operation whose candidate changed outside this server can be
+  cleared.** Previously `discard` refused (the fingerprint guard, correctly) and
+  `state resolve` refused (not `indeterminate`), leaving no exit and blocking
+  every later change on that device. `state resolve` now accepts any
+  non-terminal operation; already-settled records are still refused.
+
+### Added
+
+- **`token add` accepts provenance flags** — `--provider`, `--provider-tier`,
+  `--on-behalf-of`, `--actor-type`. These were silently discarded, so tokens
+  carried no principal identity into the audit trail.
+
+### Changed
+
+- Change-set and single-operation lifecycles now run on the shared
+  `mecmcp-changeset` coordinator rather than a local implementation. No
+  user-visible change to the tool surface or the state file.
+
+All of the above was verified against the live PAN-OS 12.1.5 lab firewall,
+including a full plan → approve → apply → validate → commit cycle ending in a
+terminal `committed` record with no lock held.
+
 ## [0.5.0] - 2026-07-26
 
 ### Added
