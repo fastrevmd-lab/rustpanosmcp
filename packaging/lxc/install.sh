@@ -12,6 +12,7 @@ SERVICE_USER="${PANOSMCP_SERVICE_USER:-rust-panosmcp}"
 SERVICE_GROUP="${PANOSMCP_SERVICE_GROUP:-rust-panosmcp}"
 SKIP_USER_SETUP="${PANOSMCP_INSTALL_SKIP_USER:-0}"
 SKIP_SYSTEMD_RELOAD="${PANOSMCP_INSTALL_SKIP_SYSTEMD_RELOAD:-0}"
+SKIP_RUNTIME_DEPS="${PANOSMCP_INSTALL_SKIP_RUNTIME_DEPS:-0}"
 FORCE_UNIT="${PANOSMCP_FORCE_UNIT:-0}"
 
 fail() {
@@ -146,6 +147,32 @@ fi
 if [[ "$INSTALL_ROOT" == "/" && "$SKIP_SYSTEMD_RELOAD" != "1" && "$SKIP_UNIT_INSTALL" != "1" ]]; then
     command -v systemctl >/dev/null 2>&1 || fail "systemctl is required for a live install"
     systemctl daemon-reload
+fi
+
+# Runtime dependencies.
+#
+# Only `curl` and CA certificates: this server talks HTTPS to PAN-OS and spawns
+# no processes, so it needs none of the ssh/scp/tar set that the Junos server
+# does. `curl` is for the README's verification step, and the Debian 13
+# standard template does not ship it (mecmcp#33).
+#
+# For LXC only. The container image is distroless and must not gain an HTTP
+# client — that is the pivot tool distroless exists to deny an attacker after
+# an RCE. Verify the image from the host instead, against the published port.
+if [[ "$INSTALL_ROOT" == "/" && "$SKIP_RUNTIME_DEPS" != "1" ]]; then
+    if ! command -v curl >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            echo ">> Installing runtime dependencies: curl ca-certificates"
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                curl ca-certificates
+        else
+            # Not fatal: the server itself runs fine without curl. Only the
+            # documented verification step needs it.
+            echo ">> WARNING: curl is missing and no apt-get to install it." >&2
+            echo ">> WARNING: the README's endpoint check will not work until it is." >&2
+        fi
+    fi
 fi
 
 echo ">> rust-panosmcp package installed."
