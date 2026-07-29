@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-29
+
+### Added
+
+- **`--lab-mode` for single-operator environments.** Change sets are approved on
+  creation, so one engineer can plan and apply without a second principal.
+  Previously lab mode was hardcoded off with no flag to enable it, so change
+  sets were unusable in a one-person lab.
+
+  No approver is invented. A waived change set reports `approver: null`
+  alongside `approval_waiver: "lab-mode"`. The server warns at startup that
+  two-person control is relaxed.
+
+- **`--approval-timeout-secs`** — how long a change-set approval stays valid.
+  Previously a compiled-in 15 minutes with no way to change it.
+
+### Changed
+
+- **The change-set CLI now matches every other mecmcp server** — `--lab-mode`,
+  `--state-file`, `--approval-timeout-secs`, spelled and behaving identically.
+  An operator who learns one server no longer has to relearn the next.
+
+### Fixed
+
+- **The approval TTL had two sources.** The coordinator used one value while
+  `create_change_set` computed expiry from a separate constant, so setting the
+  new flag would have applied it to the coordinator's expiry checks while change
+  sets silently kept the compiled-in default. Both now read the coordinator.
+
 ## [0.6.0] - 2026-07-29
 
 ### Fixed
