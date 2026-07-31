@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-31
+
+### Changed
+
+- Adopt mecmcp 0.3.8 (tag `v0.3.8`), which carries the whole of mecmcp#90.
+- `tokens.json` and `devices.json` are now read through mecmcp's shared hardened
+  loader. Both must be a regular file, mode 0600, owned by the service user.
+  Inventory previously had **no** permission check at all — a `devices.json`
+  left group- or world-readable used to load and now will not. Verified before
+  release that 608's deployed files already comply.
+- `OperationLimits` and `ChangeSetRecord` gained fields upstream. This server
+  takes the shared defaults for the new limits and leaves `targets`/`preview`
+  unset, which keeps the state file at version 1 — the same reasoning that
+  already governs `policy_signature`, so a rollback to 0.7.1 can still read it.
+
+### Notes
+
+- On-disk state is unchanged in both directions. 608's live 26 KB
+  `mutation-state.json` loads under 0.3.8 and round-trips back to version 1.
+- Change-set digests are byte-identical: mecmcp keeps the single-target digest
+  encoding untouched, so the ten applied change sets on 608 remain valid.
+
 ## [0.7.1] - 2026-07-29
 
 ### Fixed

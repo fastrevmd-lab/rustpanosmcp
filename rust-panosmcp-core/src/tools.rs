@@ -66,6 +66,11 @@ impl PanosService {
             max_actions_per_set: crate::mutation::MAX_CHANGE_SET_ACTIONS,
             max_change_set_bytes: crate::mutation::MAX_CHANGE_SET_BYTES as u64,
             max_state_bytes: crate::mutation::MAX_STATE_BYTES,
+            // mecmcp 0.3.8 added these. Taking the shared defaults rather than
+            // inventing PAN-OS constants: this server creates no multi-target
+            // change set and stores no preview, so neither limit is reachable
+            // from here. Give them product values if that changes.
+            ..mecmcp_changeset::OperationLimits::default()
         };
         let approval_ttl = std::time::Duration::from_secs(
             approval_timeout_secs.unwrap_or(crate::mutation::APPROVAL_TTL_SECS),
