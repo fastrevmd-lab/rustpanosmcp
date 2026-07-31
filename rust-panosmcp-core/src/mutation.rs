@@ -546,6 +546,14 @@ impl PanosService {
                 expires_at_unix: now.saturating_add(self.mutations.approval_ttl().as_secs()),
                 operation_id: None,
                 policy_signature: String::new(),
+                // Same rule as policy_signature above: both of these gate the
+                // file to version 2, which the previous binary cannot read.
+                // PAN-OS applies to one device per change set, so the
+                // single-target shape is the correct one here, not a
+                // compatibility compromise — `record.targets()` still answers
+                // with [device].
+                targets: Vec::new(),
+                preview: None,
             };
             self.mutations
                 .insert_change_set(record.clone())
