@@ -23,14 +23,15 @@ pub enum TokenCommandError {
     /// Output or signal failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// Provenance flags were invalid or mutually contradictory.
+    /// A shared token-command path failed.
     ///
-    /// Parsing lives in `mecmcp-runtime` so both servers agree on what a
-    /// provider or actor type means; this server cannot route through that
-    /// crate's `run` because its `token add` also carries mutation grants and
-    /// expiry.
+    /// Two things route through `mecmcp-runtime`: provenance parsing, so both
+    /// servers agree on what a provider or actor type means, and the whole of
+    /// `set-scopes`, so there is one opinion about what counts as a widening.
+    /// `token add` stays local because it also carries mutation grants and
+    /// expiry, which the shared `add` does not model.
     #[error(transparent)]
-    Provenance(#[from] mecmcp_runtime::token_cmd::TokenCommandError),
+    Shared(#[from] mecmcp_runtime::token_cmd::TokenCommandError),
 }
 
 /// Execute one token management command.
@@ -160,6 +161,35 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
             let secret = TokenStoreFile::rotate(&tokens_file, &name, &known)?;
             writeln!(std::io::stdout().lock(), "{}", secret.expose_secret())?;
             signal_reload(server_pid)?;
+        }
+        TokenAction::SetScopes {
+            tokens_file,
+            name,
+            devices,
+            tools,
+            mutation_roots,
+            mutation_actions,
+            yes,
+            server_pid,
+        } => {
+            // Straight through to the shared implementation, which owns the
+            // before/after print, the widening confirmation and the audit
+            // record. Reimplementing any of that here would give this server a
+            // second opinion about what counts as an escalation.
+            let grant = parse_mutation_grant(mutation_roots, mutation_actions)?;
+            mecmcp_runtime::token_cmd::run_with_grant::<MutationGrant>(
+                mecmcp_runtime::cli::TokenAction::SetScopes {
+                    tokens_file,
+                    name,
+                    devices,
+                    tools,
+                    yes,
+                    server_pid,
+                },
+                known_devices,
+                rust_panosmcp_auth::KNOWN_TOOLS,
+                grant,
+            )?;
         }
     }
     Ok(())
