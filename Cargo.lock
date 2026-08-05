@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-auth"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "chrono",
  "mecmcp-auth",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "rust-panosmcp-core"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "axum",
