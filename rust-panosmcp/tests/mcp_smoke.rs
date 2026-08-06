@@ -44,7 +44,15 @@ async fn client_discovers_exactly_the_registered_tools() {
     });
     let client = ().serve(client_transport).await.expect("client initialization");
     let info = client.peer_info().expect("server info");
-    assert_eq!(info.server_info.name, "rust-panosmcp");
+    // rmcp 3 made `server_info` optional: a 2026-07-28 server may answer
+    // `server/discover` without an Implementation block. This server always
+    // sends one, so its absence is a regression worth failing on rather than
+    // skipping past.
+    let server_info = info
+        .server_info
+        .as_ref()
+        .expect("server must advertise an Implementation block");
+    assert_eq!(server_info.name, "rust-panosmcp");
 
     let tools = client.list_tools(None).await.expect("tool list");
     let names: Vec<_> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();

@@ -15,7 +15,7 @@ use mecmcp_transport::{
     preflight::run_preflight,
 };
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpService, session::local::LocalSessionManager,
 };
 use rust_panosmcp_auth::{CallerContext, MUTATION_TOOLS, parse_bearer_header};
 use serde_json::{Value, json};
@@ -226,10 +226,6 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
     let identity =
         TransportIdentity::new("panosmcp", "panos", "rust-panosmcp", ["device", "devices"]);
 
-    let mut config = StreamableHttpServerConfig::default();
-    config = config.with_allowed_origins(origins(&options));
-    config.allowed_hosts.extend(options.allowed_hosts);
-
     // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
     // Burst = rate to allow the full per-minute quota within the first second.
     let limits = LimitsConfig {
@@ -246,6 +242,17 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
         session_idle_timeout_secs: 300,
         session_max_lifetime_secs: 3600,
     };
+
+    // Built from `streamable_http_server_config` rather than
+    // `StreamableHttpServerConfig::default()`. rmcp 3 added its own
+    // `max_request_body_bytes`, defaulting to 4 MiB and enforced *inside* rmcp
+    // after `apply_body_limit` has already accepted the request. On `default()`
+    // every request between 4 MiB and `--request-body-limit` would 413 from a
+    // limit that appears nowhere in this server's config — and staged PAN-OS
+    // candidate configs are exactly the payload that gets large.
+    let mut config = mecmcp_transport::streamable_http_server_config(&limits);
+    config = config.with_allowed_origins(origins(&options));
+    config.allowed_hosts.extend(options.allowed_hosts);
 
     let session_mgr = LimitedSessionManager::new(LocalSessionManager::default(), &limits);
     let conc = ConcurrencyState::new(
