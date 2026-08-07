@@ -267,6 +267,46 @@ pub enum TokenAction {
         #[arg(long)]
         server_pid: Option<i32>,
     },
+    /// Replace a token's scopes or mutation grant, keeping its secret.
+    ///
+    /// The secret is what a registered MCP client holds, so changing a scope
+    /// used to mean either `rotate` — which reissues the secret and breaks every
+    /// client — or hand-editing `tokens.json`. That hand edit is how 608's
+    /// `claude-writer` gained its second mutation root: outside any supported
+    /// path, with no confirmation and no audit record.
+    ///
+    /// Omitting a field leaves it unchanged. A widening needs `--yes`.
+    SetScopes {
+        /// Absolute token-store path.
+        #[arg(long)]
+        tokens_file: PathBuf,
+        /// Token audit name.
+        #[arg(long)]
+        name: String,
+        /// Comma-separated exact device names or `*`. Omit to leave unchanged.
+        #[arg(long, value_delimiter = ',')]
+        devices: Option<Vec<String>>,
+        /// Comma-separated exact MCP tool names or `*`. Omit to leave unchanged.
+        #[arg(long, value_delimiter = ',')]
+        tools: Option<Vec<String>>,
+        /// Token-specific writable XPath root. Repeat for multiple roots.
+        ///
+        /// The grant is replaced wholesale, not merged: naming one root drops
+        /// any others. Merging would make it impossible to *remove* a root
+        /// through this command, and a mutation grant is the one scope where
+        /// "I meant to replace it" must not silently mean "I added to it".
+        #[arg(long = "mutation-root", requires = "mutation_actions")]
+        mutation_roots: Vec<String>,
+        /// Comma-separated token-specific actions (`set`, `delete`).
+        #[arg(long, value_delimiter = ',', requires = "mutation_roots")]
+        mutation_actions: Vec<String>,
+        /// Apply a widening without the interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Send SIGHUP to this positive process ID after success.
+        #[arg(long)]
+        server_pid: Option<i32>,
+    },
 }
 
 #[cfg(test)]

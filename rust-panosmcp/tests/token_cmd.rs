@@ -201,3 +201,190 @@ fn add_validates_device_names() {
         "error should mention the invalid device name: {err}"
     );
 }
+
+/// `token set-scopes` — the supported path for the change that used to mean
+/// hand-editing `tokens.json` (see 608's `claude-writer`, which gained a second
+/// mutation root that way: no confirmation, no audit record, no way to reproduce).
+mod set_scopes {
+    use super::{TempDir, token_cmd};
+    use rust_panosmcp::cli::TokenAction;
+    use rust_panosmcp_auth::TokenStoreFile;
+    use std::path::Path;
+
+    const ADDRESS_ROOT: &str = "/config/devices/entry[@name=\"localhost.localdomain\"]/vsys/entry[@name=\"vsys1\"]/address";
+    const ETHERNET_ROOT: &str =
+        "/config/devices/entry[@name=\"localhost.localdomain\"]/network/interface/ethernet";
+
+    fn add_writer(tokens_file: &Path, known: &[String]) {
+        token_cmd::run(
+            TokenAction::Add {
+                tokens_file: tokens_file.to_path_buf(),
+                name: "writer".to_owned(),
+                devices: vec!["fw-test".to_owned()],
+                tools: vec!["create_panos_change_set".to_owned()],
+                mutation_roots: vec![ADDRESS_ROOT.to_owned()],
+                mutation_actions: vec!["set".to_owned(), "delete".to_owned()],
+                expires_at_unix: None,
+                expires_in_secs: None,
+                provider: None,
+                provider_tier: None,
+                on_behalf_of: None,
+                actor_type: None,
+                server_pid: None,
+            },
+            known,
+        )
+        .expect("add should succeed");
+    }
+
+    fn grant_roots(tokens_file: &Path) -> Vec<String> {
+        let file = TokenStoreFile::load(tokens_file).unwrap();
+        let store = file.store();
+        store
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "writer")
+            .unwrap()
+            .grant
+            .as_ref()
+            .unwrap()
+            .allowed_xpath_roots
+            .clone()
+    }
+
+    fn digest_of(tokens_file: &Path) -> mecmcp_auth::TokenDigest {
+        let file = TokenStoreFile::load(tokens_file).unwrap();
+        let store = file.store();
+        store
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "writer")
+            .unwrap()
+            .digest
+            .clone()
+    }
+
+    fn set_scopes(
+        tokens_file: &Path,
+        roots: Vec<String>,
+        yes: bool,
+    ) -> Result<(), token_cmd::TokenCommandError> {
+        token_cmd::run(
+            TokenAction::SetScopes {
+                tokens_file: tokens_file.to_path_buf(),
+                name: "writer".to_owned(),
+                devices: None,
+                tools: None,
+                mutation_roots: roots,
+                mutation_actions: vec!["set".to_owned(), "delete".to_owned()],
+                yes,
+                server_pid: None,
+            },
+            &["fw-test".to_owned()],
+        )
+    }
+
+    /// 608's actual change, through the supported path: address-only becomes
+    /// address plus ethernet, and the secret every registered MCP client holds
+    /// keeps working.
+    #[test]
+    fn a_mutation_root_can_be_added_without_reissuing_the_secret() {
+        let temp = TempDir::new().unwrap();
+        let tokens_file = temp.path().join("tokens.json");
+        let known = vec!["fw-test".to_owned()];
+        add_writer(&tokens_file, &known);
+        let digest_before = digest_of(&tokens_file);
+
+        set_scopes(
+            &tokens_file,
+            vec![ADDRESS_ROOT.to_owned(), ETHERNET_ROOT.to_owned()],
+            true,
+        )
+        .expect("widening with --yes must succeed");
+
+        assert_eq!(
+            grant_roots(&tokens_file),
+            vec![ADDRESS_ROOT.to_owned(), ETHERNET_ROOT.to_owned()]
+        );
+        assert_eq!(
+            digest_of(&tokens_file),
+            digest_before,
+            "the secret must survive — that is the whole reason this is not `rotate`"
+        );
+    }
+
+    /// A grant replacement is an authority change, so it is confirmed. Before
+    /// mecmcp#205 the check could not see a grant at all and let this through
+    /// silently, auditing it as `widening=false`.
+    #[test]
+    fn replacing_the_grant_without_yes_is_refused() {
+        let temp = TempDir::new().unwrap();
+        let tokens_file = temp.path().join("tokens.json");
+        let known = vec!["fw-test".to_owned()];
+        add_writer(&tokens_file, &known);
+
+        let error = set_scopes(
+            &tokens_file,
+            vec![ADDRESS_ROOT.to_owned(), ETHERNET_ROOT.to_owned()],
+            false,
+        )
+        .expect_err("a grant replacement must ask for --yes");
+        assert!(error.to_string().contains("--yes"), "got {error}");
+
+        assert_eq!(
+            grant_roots(&tokens_file),
+            vec![ADDRESS_ROOT.to_owned()],
+            "a refused confirmation must not have written the new grant"
+        );
+    }
+
+    /// The grant is replaced, not merged. Merging would make removing a root
+    /// impossible through this command, and on a mutation grant "replace" must
+    /// never quietly mean "add".
+    #[test]
+    fn the_grant_is_replaced_wholesale() {
+        let temp = TempDir::new().unwrap();
+        let tokens_file = temp.path().join("tokens.json");
+        let known = vec!["fw-test".to_owned()];
+        add_writer(&tokens_file, &known);
+
+        set_scopes(&tokens_file, vec![ETHERNET_ROOT.to_owned()], true).unwrap();
+
+        assert_eq!(
+            grant_roots(&tokens_file),
+            vec![ETHERNET_ROOT.to_owned()],
+            "the address root must be gone, not retained"
+        );
+    }
+
+    /// Omitting the grant flags leaves the stored grant alone, so a device or
+    /// tool scope can be changed without restating the mutation roots.
+    #[test]
+    fn omitting_the_grant_flags_leaves_it_unchanged() {
+        let temp = TempDir::new().unwrap();
+        let tokens_file = temp.path().join("tokens.json");
+        let known = vec!["fw-test".to_owned()];
+        add_writer(&tokens_file, &known);
+
+        token_cmd::run(
+            TokenAction::SetScopes {
+                tokens_file: tokens_file.clone(),
+                name: "writer".to_owned(),
+                devices: Some(vec!["fw-test".to_owned()]),
+                tools: None,
+                mutation_roots: vec![],
+                mutation_actions: vec![],
+                yes: false,
+                server_pid: None,
+            },
+            &known,
+        )
+        .expect("a no-op device narrowing needs no confirmation");
+
+        assert_eq!(
+            grant_roots(&tokens_file),
+            vec![ADDRESS_ROOT.to_owned()],
+            "the grant must survive a scope-only change"
+        );
+    }
+}
