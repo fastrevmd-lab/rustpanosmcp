@@ -212,18 +212,58 @@ impl PanosMcpServer {
         })
     }
 
-    fn caller(extensions: &Extensions) -> Option<&CallerContext> {
+    /// Detect whether this request came over HTTP (vs local stdio).
+    ///
+    /// HTTP requests carry `http::request::Parts` in rmcp's Extensions.
+    /// stdio requests do not. This distinction is precise and stable.
+    fn is_http(extensions: &Extensions) -> bool {
+        extensions.get::<http::request::Parts>().is_some()
+    }
+
+    fn caller(extensions: &Extensions) -> Option<CallerContext> {
+        // mecmcp-transport's bearer boundary inserts CallerCtx<NoGrant> into the
+        // http::request::Parts extensions. rmcp's Extensions carries Parts, so we
+        // must extract two levels deep: extensions → Parts → Parts.extensions → CallerCtx.
+        // Reading only the outer map returns None, which would fail open.
         extensions
             .get::<http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<CallerContext>())
+            .and_then(|parts| {
+                parts
+                    .extensions
+                    .get::<mecmcp_auth::CallerCtx<mecmcp_auth::NoGrant>>()
+            })
+            .map(|ctx| rust_panosmcp_auth::CallerContext {
+                token_name: ctx.token_name.clone(),
+                devices: ctx.devices.clone(),
+                tools: ctx.tools.clone(),
+                grant: None,
+                provider: ctx.provider.clone(),
+                provider_tier: ctx.provider_tier,
+                on_behalf_of: ctx.on_behalf_of.clone(),
+                actor_type: ctx.actor_type,
+            })
     }
 
     fn authorize(
-        caller: Option<&CallerContext>,
+        extensions: &Extensions,
         tool: &'static str,
         device: Option<&str>,
     ) -> Option<CallToolResult> {
-        let caller = caller?;
+        let caller = Self::caller(extensions);
+
+        // Fail closed: HTTP requests without a caller are denied.
+        // stdio (no Parts) with no caller is allowed — stdio is unauthenticated by design.
+        if caller.is_none() && Self::is_http(extensions) {
+            return Some(CallToolResult::error(vec![ContentBlock::text(
+                "authenticated HTTP transport requires a valid bearer token",
+            )]));
+        }
+
+        let Some(caller) = caller else {
+            // stdio with no caller → allow (unauthenticated by design)
+            return None;
+        };
+
         if !caller
             .tools
             .allows_tool(tool, rust_panosmcp_auth::MUTATION_TOOLS)
@@ -250,25 +290,26 @@ impl PanosMcpServer {
     // Err would ripple through sixteen call sites that return it straight back
     // to the tool handler, to no benefit on an error path.
     #[allow(clippy::result_large_err)]
-    fn mutation_principal(extensions: &Extensions) -> Result<&str, CallToolResult> {
+    fn mutation_principal(extensions: &Extensions) -> Result<String, CallToolResult> {
         if let Some(caller) = Self::caller(extensions) {
-            return Ok(&caller.token_name);
+            return Ok(caller.token_name.clone());
         }
-        if extensions.get::<http::request::Parts>().is_some() {
+        // Fail closed: HTTP without caller is denied.
+        if Self::is_http(extensions) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
                 "candidate mutation requires authenticated HTTP or local stdio",
             )]));
         }
-        Ok("local-stdio")
+        Ok("local-stdio".to_owned())
     }
 
     #[allow(clippy::result_large_err)]
     fn change_set_identity(
         extensions: &Extensions,
-    ) -> Result<(&str, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
+    ) -> Result<(String, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
         let principal = Self::mutation_principal(extensions)?;
         let caller = Self::caller(extensions);
-        if caller.is_some_and(|caller| caller.grant.is_none()) {
+        if caller.as_ref().is_some_and(|caller| caller.grant.is_none()) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
                 "v0.2 change-set writes require a token-specific mutation grant",
             )]));
@@ -295,11 +336,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "create_panos_change_set",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "create_panos_change_set", Some(&input.device))
+        {
             return Ok(denial);
         }
         let (principal, grant) = match Self::change_set_identity(&extensions) {
@@ -310,7 +349,13 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .create_change_set(input, caller, principal, grant.as_ref(), cancellation)
+                .create_change_set(
+                    input,
+                    caller.as_ref(),
+                    &principal,
+                    grant.as_ref(),
+                    cancellation,
+                )
                 .await,
         )
     }
@@ -325,11 +370,9 @@ impl PanosMcpServer {
         Parameters(input): Parameters<ApproveChangeSetInput>,
         extensions: Extensions,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "approve_panos_change_set",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "approve_panos_change_set", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -338,7 +381,11 @@ impl PanosMcpServer {
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
-        Self::to_call_result(service.approve_change_set(input, caller, principal).await)
+        Self::to_call_result(
+            service
+                .approve_change_set(input, caller.as_ref(), &principal)
+                .await,
+        )
     }
 
     /// Inspect the exact persistent plan, approval, expiry, and apply state.
@@ -351,11 +398,9 @@ impl PanosMcpServer {
         Parameters(input): Parameters<ChangeSetStatusInput>,
         extensions: Extensions,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "get_panos_change_set",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_change_set", Some(&input.device))
+        {
             return Ok(denial);
         }
         if let Err(denial) = Self::mutation_principal(&extensions) {
@@ -363,7 +408,7 @@ impl PanosMcpServer {
         }
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
-        Self::to_call_result(service.change_set_status(input, caller).await)
+        Self::to_call_result(service.change_set_status(input, caller.as_ref()).await)
     }
 
     /// Apply one independently approved plan as a normal staged operation.
@@ -377,11 +422,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "apply_panos_change_set",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "apply_panos_change_set", Some(&input.device))
+        {
             return Ok(denial);
         }
         let (principal, grant) = match Self::change_set_identity(&extensions) {
@@ -392,7 +435,13 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .apply_change_set(input, caller, principal, grant.as_ref(), cancellation)
+                .apply_change_set(
+                    input,
+                    caller.as_ref(),
+                    &principal,
+                    grant.as_ref(),
+                    cancellation,
+                )
                 .await,
         )
     }
@@ -409,7 +458,7 @@ impl PanosMcpServer {
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
         if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
+            &extensions,
             "get_candidate_fingerprint",
             Some(&input.device),
         ) {
@@ -419,7 +468,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .candidate_fingerprint(input, caller, cancellation)
+                .candidate_fingerprint(input, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -435,11 +484,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "stage_panos_config",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "stage_panos_config", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -450,7 +497,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .stage_config(input, principal, caller, cancellation)
+                .stage_config(input, &principal, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -466,11 +513,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "diff_panos_candidate",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "diff_panos_candidate", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -481,7 +526,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .diff_candidate(input, principal, caller, cancellation)
+                .diff_candidate(input, &principal, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -497,11 +542,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "validate_panos_candidate",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "validate_panos_candidate", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -512,7 +555,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .validate_candidate(input, principal, caller, cancellation)
+                .validate_candidate(input, &principal, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -528,11 +571,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "commit_panos_candidate",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "commit_panos_candidate", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -543,7 +584,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .commit_candidate(input, principal, caller, cancellation)
+                .commit_candidate(input, &principal, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -559,11 +600,9 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "discard_panos_candidate",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "discard_panos_candidate", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -574,7 +613,7 @@ impl PanosMcpServer {
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .discard_candidate(input, principal, caller, cancellation)
+                .discard_candidate(input, &principal, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -589,11 +628,9 @@ impl PanosMcpServer {
         Parameters(input): Parameters<OperationStatusInput>,
         extensions: Extensions,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "get_panos_operation",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_operation", Some(&input.device))
+        {
             return Ok(denial);
         }
         let principal = match Self::mutation_principal(&extensions) {
@@ -602,7 +639,11 @@ impl PanosMcpServer {
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
-        Self::to_call_result(service.operation_status(input, principal, caller).await)
+        Self::to_call_result(
+            service
+                .operation_status(input, &principal, caller.as_ref())
+                .await,
+        )
     }
 
     /// List devices visible to the authenticated caller.
@@ -615,11 +656,17 @@ impl PanosMcpServer {
         Parameters(_input): Parameters<EmptyInput>,
         extensions: Extensions,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        let caller = Self::caller(&extensions);
-        if let Some(denial) = Self::authorize(caller, "list_devices", None) {
+        if let Some(denial) = Self::authorize(&extensions, "list_devices", None) {
             return Ok(denial);
         }
-        let mut output = self.runtime.snapshot().service.list_devices(caller);
+        let caller = Self::caller(&extensions);
+        let mut output = self
+            .runtime
+            .snapshot()
+            .service
+            .list_devices(caller.as_ref());
+        // Fail closed: HTTP without caller was already denied by authorize.
+        // Only stdio (no Parts, no caller) reaches here and should see all devices.
         if let Some(caller) = caller {
             output
                 .devices
@@ -639,18 +686,16 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "gather_device_facts",
-            Some(&input.device),
-        ) {
+        if let Some(denial) =
+            Self::authorize(&extensions, "gather_device_facts", Some(&input.device))
+        {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .gather_device_facts(input, caller, cancellation)
+                .gather_device_facts(input, caller.as_ref(), cancellation)
                 .await,
         )
     }
@@ -666,16 +711,17 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "execute_panos_op",
-            Some(&input.device),
-        ) {
+        if let Some(denial) = Self::authorize(&extensions, "execute_panos_op", Some(&input.device))
+        {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
-        Self::to_call_result(service.execute_panos_op(input, caller, cancellation).await)
+        Self::to_call_result(
+            service
+                .execute_panos_op(input, caller.as_ref(), cancellation)
+                .await,
+        )
     }
 
     /// Read running or candidate configuration under `/config`.
@@ -689,16 +735,17 @@ impl PanosMcpServer {
         extensions: Extensions,
         cancellation: CancellationToken,
     ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
-        if let Some(denial) = Self::authorize(
-            Self::caller(&extensions),
-            "get_panos_config",
-            Some(&input.device),
-        ) {
+        if let Some(denial) = Self::authorize(&extensions, "get_panos_config", Some(&input.device))
+        {
             return Ok(denial);
         }
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
-        Self::to_call_result(service.get_panos_config(input, caller, cancellation).await)
+        Self::to_call_result(
+            service
+                .get_panos_config(input, caller.as_ref(), cancellation)
+                .await,
+        )
     }
 }
 
@@ -722,15 +769,52 @@ mod tests {
 
     #[test]
     fn mutation_principal_refuses_unauthenticated_http_but_allows_stdio() {
+        // Local stdio: no Parts, no caller → defaults to "local-stdio"
         let local = Extensions::default();
         assert_eq!(
             PanosMcpServer::mutation_principal(&local).expect("local stdio"),
             "local-stdio"
         );
 
+        // HTTP with Parts but no CallerCtx → denied (fail closed)
         let (parts, _) = http::Request::new(()).into_parts();
         let mut remote = Extensions::default();
         remote.insert(parts);
-        assert!(PanosMcpServer::mutation_principal(&remote).is_err());
+        assert!(
+            PanosMcpServer::mutation_principal(&remote).is_err(),
+            "HTTP without caller must be denied"
+        );
+    }
+
+    #[test]
+    fn authorize_denies_http_without_caller_but_allows_stdio() {
+        // stdio: no Parts → no caller is legitimate → allow
+        let stdio = Extensions::default();
+        assert!(
+            PanosMcpServer::authorize(&stdio, "list_devices", None).is_none(),
+            "stdio without caller must be allowed"
+        );
+
+        // HTTP: Parts present, no CallerCtx → deny
+        let (parts, _) = http::Request::new(()).into_parts();
+        let mut http = Extensions::default();
+        http.insert(parts);
+        let denial = PanosMcpServer::authorize(&http, "list_devices", None);
+        assert!(
+            denial.is_some(),
+            "HTTP without caller must be denied (fail closed)"
+        );
+        // Verify it's the right error message
+        if let Some(result) = denial {
+            let text = result
+                .content
+                .first()
+                .and_then(|c| c.as_text())
+                .map(|t| &t.text);
+            assert!(
+                text.is_some_and(|msg| msg.contains("authenticated HTTP transport")),
+                "error must mention HTTP authentication requirement"
+            );
+        }
     }
 }

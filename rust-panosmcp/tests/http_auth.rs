@@ -21,6 +21,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"phase2-test","version":"1"}}}"#;
@@ -102,7 +103,9 @@ async fn status(
     options: HttpOptions,
     request: Request<Body>,
 ) -> StatusCode {
-    build_router(runtime.clone(), options, false)
+    build_router(runtime.clone(), options, false, CancellationToken::new())
+        .expect("router")
+        .0
         .oneshot(request)
         .await
         .expect("infallible router")
@@ -124,7 +127,14 @@ async fn missing_malformed_and_invalid_tokens_are_rfc6750_unauthorized() {
         );
     }
 
-    let response = build_router(fixture.runtime.clone(), options(), false)
+    let (router, _shutdown) = build_router(
+        fixture.runtime.clone(),
+        options(),
+        false,
+        CancellationToken::new(),
+    )
+    .expect("router");
+    let response = router
         .oneshot(post(INITIALIZE, None))
         .await
         .expect("router");
@@ -236,7 +246,8 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
         .insert(header::HOST, "evil.example".parse().expect("header"));
     assert_eq!(
         status(&fixture.runtime, options(), bad_host).await,
-        StatusCode::FORBIDDEN
+        StatusCode::MISDIRECTED_REQUEST,
+        "unlisted Host must be rejected with 421 MISDIRECTED_REQUEST per mecmcp-transport 0.7.0"
     );
 
     let mut bad_origin = post(INITIALIZE, Some(&bearer));
@@ -263,7 +274,13 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
 
     let mut rate_limited = options();
     rate_limited.token_rate_per_minute = 1;
-    let router = build_router(fixture.runtime.clone(), rate_limited, false);
+    let (router, _shutdown) = build_router(
+        fixture.runtime.clone(),
+        rate_limited,
+        false,
+        CancellationToken::new(),
+    )
+    .expect("router");
     assert_eq!(
         router
             .clone()

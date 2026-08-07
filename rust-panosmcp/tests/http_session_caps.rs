@@ -11,6 +11,7 @@ use rust_panosmcp::{
 use rust_panosmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use std::fs;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"session-cap-test","version":"1"}}}"#;
@@ -162,7 +163,8 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
         max_sessions_per_token: 16,
     };
 
-    let app = build_router(fixture.runtime, options, false);
+    let (app, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
     let auth = format!("Bearer {}", fixture.secret);
 
     // First initialize should succeed
@@ -227,7 +229,8 @@ async fn token_session_cap_isolated_by_token() {
         max_sessions_per_token: 1,
     };
 
-    let app = build_router(fixture.runtime, options, false);
+    let (app, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
     let alice_auth = format!("Bearer {}", fixture.secret);
     let bob_auth = format!("Bearer {}", bob_secret);
 
@@ -291,7 +294,8 @@ async fn metrics_endpoint_enabled_and_contains_panosmcp_series() {
         max_sessions_per_token: 16,
     };
 
-    let app = build_router(fixture.runtime, options, true);
+    let (app, _shutdown) =
+        build_router(fixture.runtime, options, true, CancellationToken::new()).expect("router");
 
     let response = app
         .clone()
@@ -337,7 +341,8 @@ async fn metrics_endpoint_disabled_when_flag_is_false() {
         max_sessions_per_token: 16,
     };
 
-    let app = build_router(fixture.runtime, options, false);
+    let (app, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
 
     let response = app
         .clone()

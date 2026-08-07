@@ -1,25 +1,17 @@
-//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport.
+//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.7.0.
 
 use crate::{PanosMcpServer, RuntimeState};
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    extract::Request,
-    http::{HeaderMap, StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-};
+use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant, ScopeSet};
 use mecmcp_transport::{
-    ConcurrencyState, LimitedSessionManager, LimitsConfig, OptionalPreflight, PrometheusRuntime,
-    ScopePreflight, TransportIdentity, apply_body_limit, apply_rate_limit, concurrency_middleware,
-    preflight::run_preflight,
+    BearerAuthenticator, BearerBoundary, BearerResponseProfile, CallerScopes, HostOriginPolicy,
+    HttpServeError, HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
+    ScopePreflight, TransportIdentity, build_streamable_http_router, loopback_origins,
+    serve_router,
 };
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpService, session::local::LocalSessionManager,
-};
-use rust_panosmcp_auth::{CallerContext, MUTATION_TOOLS, parse_bearer_header};
-use serde_json::{Value, json};
+use rust_panosmcp_auth::MUTATION_TOOLS;
+use serde_json::Value;
 use std::{net::SocketAddr, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 /// Validated transport settings.
 #[derive(Debug, Clone)]
@@ -50,29 +42,15 @@ pub struct HttpOptions {
     pub max_sessions_per_token: usize,
 }
 
-/// Listener setup or runtime failure.
-#[derive(Debug, thiserror::Error)]
-pub enum HttpTransportError {
-    /// Binding the TCP listener failed.
-    #[error("failed to bind {address}: {error}")]
-    Bind {
-        /// Requested address.
-        address: SocketAddr,
-        /// Underlying socket error.
-        #[source]
-        error: std::io::Error,
-    },
-    /// HTTP server exited with an error.
-    #[error("Streamable HTTP server failed: {0}")]
-    Serve(#[from] std::io::Error),
-}
-
 /// PAN-OS scope preflight implementation.
 struct PanosPreflight;
 
 impl ScopePreflight for PanosPreflight {
-    fn check(&self, body: &[u8], caller: &mecmcp_auth::CallerCtx) -> Result<(), String> {
-        if request_exceeds_scope(body, caller) {
+    fn check(&self, body: &[u8], caller: CallerScopes<'_>) -> Result<(), String> {
+        // Convert mecmcp_auth::CallerScopes to the local check function
+        let devices = caller.devices.clone();
+        let tools = caller.tools.clone();
+        if request_exceeds_scope(body, &tools, &devices) {
             Err("insufficient_scope".to_owned())
         } else {
             Ok(())
@@ -80,7 +58,7 @@ impl ScopePreflight for PanosPreflight {
     }
 }
 
-fn request_exceeds_scope(bytes: &[u8], caller: &mecmcp_auth::CallerCtx) -> bool {
+fn request_exceeds_scope(bytes: &[u8], tools: &ScopeSet, devices: &ScopeSet) -> bool {
     if bytes.is_empty() {
         return false;
     }
@@ -90,12 +68,12 @@ fn request_exceeds_scope(bytes: &[u8], caller: &mecmcp_auth::CallerCtx) -> bool 
     match value {
         Value::Array(values) => values
             .iter()
-            .any(|value| tool_call_exceeds_scope(value, caller)),
-        value => tool_call_exceeds_scope(&value, caller),
+            .any(|value| tool_call_exceeds_scope(value, tools, devices)),
+        value => tool_call_exceeds_scope(&value, tools, devices),
     }
 }
 
-fn tool_call_exceeds_scope(value: &Value, caller: &mecmcp_auth::CallerCtx) -> bool {
+fn tool_call_exceeds_scope(value: &Value, tools: &ScopeSet, devices: &ScopeSet) -> bool {
     if value.get("method").and_then(Value::as_str) != Some("tools/call") {
         return false;
     }
@@ -105,124 +83,23 @@ fn tool_call_exceeds_scope(value: &Value, caller: &mecmcp_auth::CallerCtx) -> bo
     let Some(tool) = params.get("name").and_then(Value::as_str) else {
         return false;
     };
-    if !caller.tools.allows_tool(tool, MUTATION_TOOLS) {
+    if !tools.allows_tool(tool, MUTATION_TOOLS) {
         return true;
     }
     params
         .get("arguments")
         .and_then(|arguments| arguments.get("device"))
         .and_then(Value::as_str)
-        .is_some_and(|device| !caller.devices.allows(device))
+        .is_some_and(|device| !devices.allows(device))
 }
 
-#[derive(Clone)]
-struct SecurityState {
+/// Build the complete shared HTTP router with PAN-OS-owned identity and scope fields.
+pub fn build_router(
     runtime: RuntimeState,
-    identity: TransportIdentity,
-    preflight: OptionalPreflight,
-    body_limit: usize,
-}
-
-async fn security_boundary(
-    axum::extract::State(state): axum::extract::State<SecurityState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    // Bearer authentication
-    let snapshot = state.runtime.snapshot();
-    let caller = if let Some(store) = &snapshot.tokens {
-        let Some(candidate) = bearer_candidate(request.headers()) else {
-            return unauthorized(&state.identity.bearer_realm);
-        };
-        let Some(entry) = store.authenticate(candidate) else {
-            return unauthorized(&state.identity.bearer_realm);
-        };
-        Some(CallerContext::from(entry))
-    } else {
-        None
-    };
-    drop(snapshot);
-
-    // Buffer and limit body size
-    let (mut parts, body) = request.into_parts();
-    let body_bytes = match to_bytes(body, state.body_limit).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return payload_too_large();
-        }
-    };
-
-    // Scope preflight check if caller is present
-    if let Some(caller) = &caller {
-        let caller_ctx = mecmcp_auth::CallerCtx {
-            token_name: caller.token_name.clone(),
-            devices: caller.devices.clone(),
-            tools: caller.tools.clone(),
-            grant: None,
-            provider: caller.provider.clone(),
-            provider_tier: caller.provider_tier,
-            on_behalf_of: caller.on_behalf_of.clone(),
-            actor_type: caller.actor_type,
-        };
-        if let Err(reason) = run_preflight(&state.preflight, &body_bytes, &caller_ctx) {
-            return forbidden(&state.identity.bearer_realm, &reason);
-        }
-        // Insert CallerCtx into extensions for apply_rate_limit
-        parts.extensions.insert(caller_ctx);
-    }
-
-    // Insert local caller context into extensions for downstream handlers
-    if let Some(caller) = caller {
-        parts.extensions.insert(caller);
-    }
-    let request = Request::from_parts(parts, Body::from(body_bytes));
-
-    next.run(request).await
-}
-
-fn bearer_candidate(headers: &HeaderMap) -> Option<&str> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    parse_bearer_header(value.to_str().ok()?).ok()
-}
-
-fn unauthorized(realm: &str) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(
-            header::WWW_AUTHENTICATE,
-            format!("Bearer realm=\"{realm}\", error=\"invalid_token\""),
-        )],
-        axum::Json(json!({"error": "invalid_token"})),
-    )
-        .into_response()
-}
-
-fn forbidden(realm: &str, reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [(
-            header::WWW_AUTHENTICATE,
-            format!("Bearer realm=\"{realm}\", error=\"{reason}\""),
-        )],
-        axum::Json(json!({"error": reason})),
-    )
-        .into_response()
-}
-
-fn payload_too_large() -> Response {
-    (
-        StatusCode::PAYLOAD_TOO_LARGE,
-        axum::Json(json!({"error": "request_too_large"})),
-    )
-        .into_response()
-}
-
-/// Build the fully protected `/mcp` router. Exposed for integration tests.
-pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics: bool) -> Router {
+    options: HttpOptions,
+    enable_metrics: bool,
+    shutdown: CancellationToken,
+) -> Result<(axum::Router, HttpShutdown), HttpTransportBuildError> {
     let identity =
         TransportIdentity::new("panosmcp", "panos", "rust-panosmcp", ["device", "devices"]);
 
@@ -243,73 +120,51 @@ pub fn build_router(runtime: RuntimeState, options: HttpOptions, enable_metrics:
         session_max_lifetime_secs: 3600,
     };
 
-    // Built from `streamable_http_server_config` rather than
-    // `StreamableHttpServerConfig::default()`. rmcp 3 added its own
-    // `max_request_body_bytes`, defaulting to 4 MiB and enforced *inside* rmcp
-    // after `apply_body_limit` has already accepted the request. On `default()`
-    // every request between 4 MiB and `--request-body-limit` would 413 from a
-    // limit that appears nowhere in this server's config — and staged PAN-OS
-    // candidate configs are exactly the payload that gets large.
-    let mut config = mecmcp_transport::streamable_http_server_config(&limits);
-    config = config.with_allowed_origins(origins(&options));
-    config.allowed_hosts.extend(options.allowed_hosts);
+    // Build complete Origin list including loopback
+    let all_origins = loopback_origins(options.port, options.tls, options.allowed_origins.clone());
 
-    let session_mgr = LimitedSessionManager::new(LocalSessionManager::default(), &limits);
-    let conc = ConcurrencyState::new(
-        &limits,
-        identity.target_keys.clone(),
-        Some(session_mgr.tracker()),
-    );
+    let mut config = HttpTransportConfig::<NoGrant>::new(
+        identity.clone(),
+        limits.clone(),
+        HostOriginPolicy::enforced(options.allowed_hosts.clone(), all_origins),
+        shutdown,
+    )
+    .with_metrics(enable_metrics);
 
-    let service = StreamableHttpService::new(
-        {
-            let runtime = runtime.clone();
-            move || Ok::<_, std::io::Error>(PanosMcpServer::from_runtime(runtime.clone()))
-        },
-        session_mgr,
-        config,
-    );
+    // Add bearer boundary if tokens are present
+    let snapshot = runtime.snapshot();
+    if snapshot.tokens.is_some() {
+        let auth_runtime = runtime.clone();
+        let authenticator = BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
+            let snapshot = auth_runtime.snapshot();
+            let store = snapshot.tokens.as_ref()?;
+            let entry = store.authenticate(candidate)?;
+            // mecmcp-transport inserts CallerCtx<NoGrant> into extensions.
+            // Manually construct from TokenEntry<MutationGrant> with grant: None.
+            Some(CallerCtx::<NoGrant> {
+                token_name: entry.name.clone(),
+                devices: entry.devices.clone(),
+                tools: entry.tools.clone(),
+                grant: None,
+                provider: entry.provider.clone(),
+                provider_tier: entry.provider_tier,
+                on_behalf_of: entry.on_behalf_of.clone(),
+                actor_type: entry.actor_type,
+            })
+        });
+        let boundary =
+            BearerBoundary::new(authenticator, BearerResponseProfile::detailed("panosmcp"))
+                .with_preflight(PanosPreflight);
+        config = config.with_bearer(boundary);
+    }
+    drop(snapshot);
 
-    let security = SecurityState {
-        runtime,
-        identity: identity.clone(),
-        preflight: Some(Arc::new(PanosPreflight)),
-        body_limit: options.request_body_limit,
+    let service_factory = move || {
+        let server = PanosMcpServer::from_runtime(runtime.clone());
+        Ok::<_, std::io::Error>(server)
     };
 
-    // Layer order (innermost to outermost in request flow):
-    // 1. Concurrency middleware (enforces session/inflight caps)
-    // 2. Rate limiting (enforces per-IP/token RPS)
-    // 3. Auth + scope preflight (validates bearer token and scope)
-    // 4. Body limit (rejects oversized bodies before buffering)
-    let rmcp_router = Router::new().nest_service("/mcp", service);
-
-    let mut app = rmcp_router.layer(middleware::from_fn_with_state(conc, concurrency_middleware));
-    app = apply_rate_limit(app, &limits);
-    app = app.layer(middleware::from_fn_with_state(security, security_boundary));
-    app = apply_body_limit(app, &limits);
-
-    if enable_metrics {
-        let metrics_runtime =
-            PrometheusRuntime::install(&identity.metric_prefix, &identity.server_label)
-                .expect("Prometheus metrics initialization");
-        app = app.merge(metrics_runtime.router());
-    }
-
-    app
-}
-
-fn origins(options: &HttpOptions) -> Vec<String> {
-    let scheme = if options.tls { "https" } else { "http" };
-    let mut origins = vec![
-        format!("{scheme}://localhost:{}", options.port),
-        format!("{scheme}://127.0.0.1:{}", options.port),
-        format!("{scheme}://[::1]:{}", options.port),
-    ];
-    origins.extend(options.allowed_origins.iter().cloned());
-    origins.sort();
-    origins.dedup();
-    origins
+    build_streamable_http_router(service_factory, config)
 }
 
 /// Serve until shutdown or listener failure.
@@ -319,27 +174,51 @@ pub async fn serve(
     options: HttpOptions,
     enable_metrics: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
-) -> Result<(), HttpTransportError> {
-    let app = build_router(runtime, options, enable_metrics);
-    if let Some(config) = tls {
-        tracing::info!(%address, "Streamable HTTP listening with TLS");
-        let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
-        axum_server::bind_rustls(address, config)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await?;
-        return Ok(());
+) -> Result<(), HttpServeError> {
+    let shutdown = CancellationToken::new();
+
+    // Install signal handlers
+    let signal_shutdown = shutdown.clone();
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|e| HttpServeError::Serve { address, error: e })?;
+        let mut sigint = signal(SignalKind::interrupt())
+            .map_err(|e| HttpServeError::Serve { address, error: e })?;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    tracing::info!("SIGTERM received");
+                }
+                _ = sigint.recv() => {
+                    tracing::info!("SIGINT received");
+                }
+            }
+            signal_shutdown.cancel();
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Ctrl+C received");
+            signal_shutdown.cancel();
+        });
     }
 
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .map_err(|error| HttpTransportError::Bind { address, error })?;
-    tracing::info!(%address, "Streamable HTTP listening");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-    Ok(())
+    let (router, shutdown_token) = build_router(runtime, options, enable_metrics, shutdown)
+        .map_err(|error| HttpServeError::Serve {
+            address,
+            error: std::io::Error::other(error.to_string()),
+        })?;
+
+    // Graceful shutdown timeout: 10 seconds for in-flight requests/SSE streams.
+    // LXC 608's systemd unit has TimeoutStopSec=30s, so this drain completes well
+    // before systemd's SIGKILL. While any SSE stream is open (e.g., an MCP session),
+    // shutdown takes the full timeout rather than ending immediately.
+    let shutdown_timeout = std::time::Duration::from_secs(10);
+    serve_router(router, address, tls, shutdown_token, shutdown_timeout).await
 }
 
 #[cfg(test)]
@@ -347,41 +226,32 @@ mod tests {
     use super::*;
     use mecmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
 
-    fn caller(tools: ScopeSet, devices: ScopeSet) -> mecmcp_auth::CallerCtx {
-        mecmcp_auth::CallerCtx {
-            token_name: "test".to_owned(),
-            tools,
-            devices,
-            grant: None,
-            provider: None,
-            provider_tier: None,
-            on_behalf_of: None,
-            actor_type: mecmcp_auth::ActorType::Unknown,
-        }
-    }
-
     #[test]
     fn scope_preflight_checks_exact_tool_and_device() {
-        let limited = caller(
-            ScopeSet::Allowlist(vec!["get_panos_config".to_owned()]),
-            ScopeSet::Allowlist(vec!["fw-a".to_owned()]),
-        );
+        let tools_limited = ScopeSet::Allowlist(vec!["get_panos_config".to_owned()]);
+        let devices_limited = ScopeSet::Allowlist(vec!["fw-a".to_owned()]);
+
         assert!(!request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-a"}}}"#,
-            &limited,
+            &tools_limited,
+            &devices_limited,
         ));
         assert!(request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute_panos_op","arguments":{"device":"fw-a"}}}"#,
-            &limited,
+            &tools_limited,
+            &devices_limited,
         ));
-        let wildcard = caller(ScopeSet::Wildcard, ScopeSet::Wildcard);
+        let wildcard_tools = ScopeSet::Wildcard;
+        let wildcard_devices = ScopeSet::Wildcard;
         assert!(request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"stage_panos_config","arguments":{"device":"fw-a"}}}"#,
-            &wildcard,
+            &wildcard_tools,
+            &wildcard_devices,
         ));
         assert!(request_exceeds_scope(
             br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-b"}}}"#,
-            &limited,
+            &tools_limited,
+            &devices_limited,
         ));
     }
 
