@@ -1,0 +1,221 @@
+//! Host and Origin validation integration tests for mecmcp-transport 0.7.0.
+
+use axum::{
+    body::Body,
+    http::{Request, StatusCode, header},
+};
+use rust_panosmcp::{
+    RuntimeState,
+    http_transport::{HttpOptions, build_router},
+};
+use std::fs;
+use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
+
+struct Fixture {
+    _directory: TempDir,
+    runtime: RuntimeState,
+}
+
+fn fixture() -> Fixture {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let key_path = directory.path().join("panos-api-key");
+    fs::write(&key_path, "not-a-live-key").expect("API key fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("key permissions");
+    }
+    let inventory_path = directory.path().join("devices.json");
+    fs::write(
+        &inventory_path,
+        format!(
+            r#"{{"version":1,"devices":[{{"name":"lab-fw","endpoint":"https://fw.example.test","api_key":{{"type":"file","path":"{}"}}}}]}}"#,
+            key_path.display()
+        ),
+    )
+    .expect("inventory fixture");
+
+    let runtime = RuntimeState::load(&inventory_path, None).expect("runtime");
+    Fixture {
+        _directory: directory,
+        runtime,
+    }
+}
+
+fn options_with_hosts_and_origins(hosts: Vec<String>, origins: Vec<String>) -> HttpOptions {
+    HttpOptions {
+        port: 30031,
+        tls: false,
+        allowed_hosts: hosts,
+        allowed_origins: origins,
+        ip_rate_per_minute: 1_000,
+        token_rate_per_minute: 1_000,
+        request_body_limit: 1024 * 1024,
+        max_inflight_requests: 64,
+        max_inflight_requests_per_token: 16,
+        max_inflight_requests_per_target: 4,
+        max_sessions: 128,
+        max_sessions_per_token: 16,
+    }
+}
+
+#[tokio::test]
+async fn portless_host_allowlist_entry_matches_request_with_port() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // A portless Host entry "mcp.example.test" should match a request
+    // whose Host header carries the bound port "mcp.example.test:30031"
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "mcp.example.test:30031")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    // Should not be 421 MISDIRECTED_REQUEST
+    // assert_eq, not assert_ne: "not 421" also holds when the request was
+    // rejected somewhere else entirely. 406 is rmcp's answer to a probe with
+    // no `Accept: text/event-stream`, so it is positive evidence the request
+    // reached rmcp instead of being turned away by the guard.
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_ACCEPTABLE,
+        "portless Host allowlist entry must match requests with explicit port"
+    );
+}
+
+#[tokio::test]
+async fn loopback_still_allowed_after_adding_custom_host() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // Loopback should still be in the allowlist after adding a custom host
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "localhost:30031")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_ACCEPTABLE,
+        "loopback must remain in allowlist after adding custom hosts"
+    );
+}
+
+#[tokio::test]
+async fn unlisted_host_rejected_with_421() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // A Host not in the allowlist must be rejected with 421 MISDIRECTED_REQUEST
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "attacker.example.test:30031")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::MISDIRECTED_REQUEST,
+        "unlisted Host must be rejected with 421"
+    );
+}
+
+#[tokio::test]
+async fn allowed_origin_passes_validation() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(
+        vec!["mcp.example.test".to_owned()],
+        vec!["https://client.example.test".to_owned()],
+    );
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // An allowed Origin should pass validation
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "mcp.example.test:30031")
+        .header(header::ORIGIN, "https://client.example.test")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_ACCEPTABLE,
+        "allowed Origin must pass validation"
+    );
+}
+
+#[tokio::test]
+async fn disallowed_origin_rejected_with_403() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(
+        vec!["mcp.example.test".to_owned()],
+        vec!["https://client.example.test".to_owned()],
+    );
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // A disallowed Origin should be rejected with 403
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "mcp.example.test:30031")
+        .header(header::ORIGIN, "https://attacker.example.test")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "disallowed Origin must be rejected with 403"
+    );
+}
+
+#[tokio::test]
+async fn loopback_origin_with_correct_port_allowed() {
+    let fixture = fixture();
+    let options = options_with_hosts_and_origins(Vec::new(), Vec::new());
+    let (router, _shutdown) =
+        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    // Loopback origins with the bound port should be allowed
+    let request = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "localhost:30031")
+        .header(header::ORIGIN, "http://localhost:30031")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#))
+        .expect("request");
+
+    let response = router.oneshot(request).await.expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_ACCEPTABLE,
+        "loopback Origin with bound port must be allowed"
+    );
+}
