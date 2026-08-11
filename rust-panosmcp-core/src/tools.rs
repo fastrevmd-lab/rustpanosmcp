@@ -33,6 +33,7 @@ pub struct PanosService {
     clients: Arc<BTreeMap<String, Arc<PanosClient>>>,
     pub(crate) mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
     policy: Option<Arc<Policy<Action>>>,
+    pub(crate) allow_plane_owned_writes: bool,
 }
 
 impl PanosService {
@@ -50,7 +51,7 @@ impl PanosService {
         state_path: Option<&Path>,
         lab_mode: bool,
     ) -> Result<Self> {
-        Self::new_with_options(inventory, state_path, lab_mode, None)
+        Self::new_with_options(inventory, state_path, lab_mode, None, false)
     }
 
     /// As [`new_with_state`](Self::new_with_state), with an approval TTL override.
@@ -59,6 +60,7 @@ impl PanosService {
         state_path: Option<&Path>,
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
+        allow_plane_owned_writes: bool,
     ) -> Result<Self> {
         let limits = mecmcp_changeset::OperationLimits {
             max_operations: crate::mutation::MAX_OPERATIONS,
@@ -93,17 +95,22 @@ impl PanosService {
             .map_err(crate::mutation::coord_error)?,
         );
 
-        Self::build(inventory, coordinator)
+        Self::build(inventory, coordinator, allow_plane_owned_writes)
     }
 
     /// Rebuild clients while retaining in-flight mutation state across atomic reload.
     pub fn reload(inventory: Inventory, previous: &Self) -> Result<Self> {
-        Self::build(inventory, previous.mutations.clone())
+        Self::build(
+            inventory,
+            previous.mutations.clone(),
+            previous.allow_plane_owned_writes,
+        )
     }
 
     fn build(
         inventory: Inventory,
         mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
+        allow_plane_owned_writes: bool,
     ) -> Result<Self> {
         let mut clients = BTreeMap::new();
         for device in inventory.entries() {
@@ -119,6 +126,7 @@ impl PanosService {
             clients: Arc::new(clients),
             mutations,
             policy: policy.map(Arc::new),
+            allow_plane_owned_writes,
         })
     }
 

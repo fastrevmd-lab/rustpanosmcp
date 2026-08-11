@@ -1318,13 +1318,23 @@ impl PanosService {
         // Refuse commits on plane-managed firewalls where changes would be overwritten
         let authority = client.config_authority();
         if !authority.is_local() {
-            return Err(policy(
-                "device",
-                &format!(
-                    "commits to {} devices are refused; local changes would be overwritten at next push",
+            if self.allow_plane_owned_writes {
+                tracing::warn!(
+                    device = %input.device,
+                    config_authority = authority.as_str(),
+                    "proceeding with commit on {} device; changes may be overwritten at next push. \
+                     This is allowed only because --allow-plane-owned-writes is set.",
                     authority.as_str()
-                ),
-            ));
+                );
+            } else {
+                return Err(policy(
+                    "device",
+                    &format!(
+                        "commits to {} devices are refused; local changes would be overwritten at next push",
+                        authority.as_str()
+                    ),
+                ));
+            }
         }
         let policy = require_policy(&client)?.clone();
         require_operation_policy(&record, &client)?;

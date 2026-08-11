@@ -56,7 +56,7 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
     ) -> Result<Self, RuntimeLoadError> {
-        Self::load_with_state(inventory_path, token_path, None, false, None)
+        Self::load_with_state(inventory_path, token_path, None, false, None, false)
     }
 
     /// Load runtime with an optional persistent private mutation-state file.
@@ -66,6 +66,7 @@ impl RuntimeState {
         state_path: Option<&Path>,
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
+        allow_plane_owned_writes: bool,
     ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
         let token_path = token_path.map(Path::to_path_buf);
@@ -76,6 +77,7 @@ impl RuntimeState {
             state_path,
             lab_mode,
             approval_timeout_secs,
+            allow_plane_owned_writes,
         )?;
         Ok(Self {
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
@@ -122,6 +124,9 @@ impl RuntimeState {
             // applies.
             false,
             None,
+            // Same for allow_plane_owned_writes: reloading reuses the previous
+            // service's value so a SIGHUP cannot change the break-glass posture.
+            false,
         )?;
         self.current.store(Arc::new(replacement));
         Ok(())
@@ -147,13 +152,18 @@ fn load_snapshot(
     state_path: Option<&Path>,
     lab_mode: bool,
     approval_timeout_secs: Option<u64>,
+    allow_plane_owned_writes: bool,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
     let inventory = Inventory::load(inventory_path)?;
     let service = Arc::new(match previous_service {
         Some(previous) => PanosService::reload(inventory, previous)?,
-        None => {
-            PanosService::new_with_options(inventory, state_path, lab_mode, approval_timeout_secs)?
-        }
+        None => PanosService::new_with_options(
+            inventory,
+            state_path,
+            lab_mode,
+            approval_timeout_secs,
+            allow_plane_owned_writes,
+        )?,
     });
     let tokens = token_path
         .map(|path| TokenStoreFile::load(path).map(|file| file.store()))
