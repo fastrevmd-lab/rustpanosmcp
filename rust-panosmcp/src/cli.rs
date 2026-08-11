@@ -58,6 +58,24 @@ pub struct Cli {
     #[arg(long = "approval-timeout-secs", default_value_t = 900)]
     pub approval_timeout_secs: u64,
 
+    /// Allow destructive operations on devices owned by a management plane.
+    ///
+    /// By default, this server refuses `commit_panos_candidate` on devices whose
+    /// `config_authority` is not `local` or `unknown`, because writes to
+    /// plane-owned devices are overwritten at the next push from the owning
+    /// management plane (Panorama, Strata Cloud Manager).
+    ///
+    /// Set this flag to permit those operations with a warning instead of refusal.
+    /// The warning and config_authority are recorded in audit events.
+    ///
+    /// **Break-glass only**: enabling this defeats the durability check that #102
+    /// was created to provide. Leave it off unless you have a specific need to push
+    /// config to plane-owned devices (e.g., emergency local override).
+    ///
+    /// Defaults to false (refuse). Spelled identically on every mecmcp server.
+    #[arg(long = "allow-plane-owned-writes")]
+    pub allow_plane_owned_writes: bool,
+
     /// Absolute PEM certificate path; requires `--tls-key`.
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,

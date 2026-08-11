@@ -83,6 +83,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              Records carry approval_waiver=lab-mode. Do not run this against production devices."
         );
     }
+    // Emit the plane-owned device protection posture on the normal log target,
+    // not "audit": the audit stream carries one record per tool call with a fixed
+    // schema (request_id, caller, tool, action, result), and a startup banner has
+    // none of those fields. An audit-target banner pollutes the stream with
+    // something no consumer can interpret as an action record.
+    if cli.allow_plane_owned_writes {
+        tracing::warn!(
+            "allow-plane-owned-writes enabled: commit_panos_candidate on devices owned by \
+             management planes (Panorama, Strata Cloud Manager) will proceed with a warning \
+             instead of refusal. Changes to plane-owned devices may be overwritten at the \
+             next push. This flag is for break-glass scenarios only."
+        );
+    } else {
+        tracing::info!(
+            "plane-owned device protection active: commit_panos_candidate refuses operations \
+             on devices whose config_authority is not local or unknown"
+        );
+    }
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
@@ -92,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.state_file.as_deref(),
         cli.lab_mode,
         Some(cli.approval_timeout_secs),
+        cli.allow_plane_owned_writes,
     )?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),

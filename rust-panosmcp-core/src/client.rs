@@ -72,6 +72,12 @@ impl PanosClient {
         self.config.mutation.as_ref()
     }
 
+    /// Who owns the authoritative configuration for this firewall.
+    #[must_use]
+    pub fn config_authority(&self) -> crate::inventory::PanosMcpConfigAuthority {
+        self.config.config_authority
+    }
+
     /// Canonical management endpoint used to serialize aliases of one appliance.
     #[must_use]
     pub(crate) fn mutation_lock_key(&self) -> String {

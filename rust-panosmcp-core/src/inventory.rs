@@ -3,7 +3,7 @@
 use crate::{PanosMcpError, Result};
 use mecmcp_inventory::InventoryError as MecmcpInventoryError;
 use rust_panosmcp_auth::SecretString;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
@@ -26,6 +26,48 @@ const MAX_DEVICE_NAME_BYTES: usize = 64;
 const MAX_DEVICES: usize = 256;
 const MAX_TAGS_PER_DEVICE: usize = 32;
 const MAX_WRITE_ROOTS_PER_DEVICE: usize = 32;
+
+/// Who owns the authoritative configuration for this firewall.
+///
+/// A Panorama- or Strata Cloud Manager-managed firewall accepts local commits
+/// that get overwritten at the management plane's next push. This enum records
+/// ownership so the audit trail stops claiming durability it cannot support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanosMcpConfigAuthority {
+    /// The firewall is standalone and we control its configuration.
+    Local,
+    /// Configuration is owned by Panorama.
+    Panorama,
+    /// Configuration is owned by Strata Cloud Manager.
+    StrataCloudManager,
+    /// Ownership is not declared in the inventory.
+    ///
+    /// Treated as local for behavior, but recorded distinctly so the audit
+    /// trail can tell "nobody said" from "we own it".
+    #[default]
+    Unknown,
+}
+
+impl PanosMcpConfigAuthority {
+    /// Returns true only when the server owns the device's configuration.
+    ///
+    /// Used to refuse destructive operations on plane-managed firewalls.
+    /// `Unknown` is treated as local for behavior but recorded separately.
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Local | Self::Unknown)
+    }
+
+    /// String representation for audit records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Panorama => "panorama",
+            Self::StrataCloudManager => "strata-cloud-manager",
+            Self::Unknown => "unknown",
+        }
+    }
+}
 
 /// Source used to resolve environment-backed secrets.
 pub trait Environment: Send + Sync {
@@ -109,6 +151,8 @@ pub struct DeviceConfig {
     pub mutation: Option<MutationPolicy>,
     /// Per-device blocklist rules for read-only operational commands and config reads.
     pub(crate) blocklist: Option<BlocklistRules>,
+    /// Who owns the authoritative configuration for this firewall.
+    pub config_authority: PanosMcpConfigAuthority,
 }
 
 /// Per-device blocklist rules for read-only tools.
@@ -340,6 +384,8 @@ struct RawDevice {
     mutation: Option<RawMutationPolicy>,
     #[serde(default)]
     blocklist: Option<RawBlocklistRules>,
+    #[serde(default)]
+    config_authority: PanosMcpConfigAuthority,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
@@ -500,6 +546,7 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
         max_response_bytes: raw.max_response_bytes,
         mutation,
         blocklist,
+        config_authority: raw.config_authority,
     })
 }
 
@@ -1102,6 +1149,95 @@ mod tests {
                 .api_key
                 .expose_secret(),
             "file-backed-api-key"
+        );
+    }
+
+    #[test]
+    fn config_authority_field_is_optional_for_backward_compatibility() {
+        // This test verifies that existing devices.json files (LXC 601 and 608)
+        // load unchanged when the config_authority field is absent.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+
+        // A minimal device entry without config_authority field
+        let path = write_inventory(
+            directory.path(),
+            r#"{
+                "version": 1,
+                "devices": [{
+                    "name": "fw",
+                    "endpoint": "https://fw.test",
+                    "api_key": {"type": "env", "name": "PANOS_TEST_KEY"}
+                }]
+            }"#,
+        );
+
+        // This must NOT fail - config_authority is optional
+        let inventory = Inventory::load_with_environment(&path, &environment)
+            .expect("inventory without config_authority must load");
+
+        let device = inventory.device("fw").expect("device");
+        assert_eq!(device.metadata.name, "fw");
+        // When absent, defaults to Unknown
+        assert_eq!(device.config_authority, PanosMcpConfigAuthority::Unknown);
+    }
+
+    #[test]
+    fn config_authority_accepts_valid_values() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let environment = TestEnvironment::default().with("PANOS_TEST_KEY", "test-api-key-value");
+
+        // Test all valid config_authority values
+        for (value, expected) in [
+            ("local", PanosMcpConfigAuthority::Local),
+            ("panorama", PanosMcpConfigAuthority::Panorama),
+            (
+                "strata-cloud-manager",
+                PanosMcpConfigAuthority::StrataCloudManager,
+            ),
+            ("unknown", PanosMcpConfigAuthority::Unknown),
+        ] {
+            let path = write_inventory(
+                directory.path(),
+                &format!(
+                    r#"{{
+                        "version": 1,
+                        "devices": [{{
+                            "name": "fw",
+                            "endpoint": "https://fw.test",
+                            "api_key": {{"type": "env", "name": "PANOS_TEST_KEY"}},
+                            "config_authority": "{value}"
+                        }}]
+                    }}"#
+                ),
+            );
+
+            let inventory = Inventory::load_with_environment(&path, &environment)
+                .expect("inventory with config_authority must load");
+
+            let device = inventory.device("fw").expect("device");
+            assert_eq!(
+                device.config_authority, expected,
+                "config_authority={value} should parse to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_authority_is_local_distinguishes_ownership() {
+        // Local and Unknown are treated as local for behavior, but recorded distinctly
+        assert!(PanosMcpConfigAuthority::Local.is_local());
+        assert!(PanosMcpConfigAuthority::Unknown.is_local());
+        assert!(!PanosMcpConfigAuthority::Panorama.is_local());
+        assert!(!PanosMcpConfigAuthority::StrataCloudManager.is_local());
+
+        // Each has a distinct audit representation
+        assert_eq!(PanosMcpConfigAuthority::Local.as_str(), "local");
+        assert_eq!(PanosMcpConfigAuthority::Unknown.as_str(), "unknown");
+        assert_eq!(PanosMcpConfigAuthority::Panorama.as_str(), "panorama");
+        assert_eq!(
+            PanosMcpConfigAuthority::StrataCloudManager.as_str(),
+            "strata-cloud-manager"
         );
     }
 }
