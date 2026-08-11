@@ -1,15 +1,14 @@
-//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.7.0.
+//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.8.0.
 
 use crate::{PanosMcpServer, RuntimeState};
-use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant, ScopeSet};
+use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant};
 use mecmcp_transport::{
-    BearerAuthenticator, BearerBoundary, BearerResponseProfile, CallerScopes, HostOriginPolicy,
-    HttpServeError, HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
-    ScopePreflight, TransportIdentity, build_streamable_http_router, loopback_origins,
-    serve_router,
+    BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy, HttpServeError,
+    HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
+    MalformedArgumentsPolicy, TargetField, ToolScopePreflight, TransportIdentity,
+    build_streamable_http_router, loopback_origins, serve_router,
 };
 use rust_panosmcp_auth::MUTATION_TOOLS;
-use serde_json::Value;
 use std::{net::SocketAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -40,57 +39,6 @@ pub struct HttpOptions {
     pub max_sessions: usize,
     /// Maximum concurrent MCP sessions per bearer token.
     pub max_sessions_per_token: usize,
-}
-
-/// PAN-OS scope preflight implementation.
-struct PanosPreflight;
-
-impl ScopePreflight for PanosPreflight {
-    fn check(&self, body: &[u8], caller: CallerScopes<'_>) -> Result<(), String> {
-        // Convert mecmcp_auth::CallerScopes to the local check function
-        let devices = caller.devices.clone();
-        let tools = caller.tools.clone();
-        if request_exceeds_scope(body, &tools, &devices) {
-            Err("insufficient_scope".to_owned())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-fn request_exceeds_scope(bytes: &[u8], tools: &ScopeSet, devices: &ScopeSet) -> bool {
-    if bytes.is_empty() {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        return false;
-    };
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .any(|value| tool_call_exceeds_scope(value, tools, devices)),
-        value => tool_call_exceeds_scope(&value, tools, devices),
-    }
-}
-
-fn tool_call_exceeds_scope(value: &Value, tools: &ScopeSet, devices: &ScopeSet) -> bool {
-    if value.get("method").and_then(Value::as_str) != Some("tools/call") {
-        return false;
-    }
-    let Some(params) = value.get("params") else {
-        return false;
-    };
-    let Some(tool) = params.get("name").and_then(Value::as_str) else {
-        return false;
-    };
-    if !tools.allows_tool(tool, MUTATION_TOOLS) {
-        return true;
-    }
-    params
-        .get("arguments")
-        .and_then(|arguments| arguments.get("device"))
-        .and_then(Value::as_str)
-        .is_some_and(|device| !devices.allows(device))
 }
 
 /// Build the complete shared HTTP router with PAN-OS-owned identity and scope fields.
@@ -152,9 +100,14 @@ pub fn build_router(
                 actor_type: entry.actor_type,
             })
         });
+        let preflight = ToolScopePreflight::new(
+            MUTATION_TOOLS,
+            [TargetField::scalar("device")],
+            MalformedArgumentsPolicy::Deny,
+        );
         let boundary =
             BearerBoundary::new(authenticator, BearerResponseProfile::detailed("panosmcp"))
-                .with_preflight(PanosPreflight);
+                .with_preflight(preflight);
         config = config.with_bearer(boundary);
     }
     drop(snapshot);
@@ -223,37 +176,7 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use mecmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
-
-    #[test]
-    fn scope_preflight_checks_exact_tool_and_device() {
-        let tools_limited = ScopeSet::Allowlist(vec!["get_panos_config".to_owned()]);
-        let devices_limited = ScopeSet::Allowlist(vec!["fw-a".to_owned()]);
-
-        assert!(!request_exceeds_scope(
-            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-a"}}}"#,
-            &tools_limited,
-            &devices_limited,
-        ));
-        assert!(request_exceeds_scope(
-            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute_panos_op","arguments":{"device":"fw-a"}}}"#,
-            &tools_limited,
-            &devices_limited,
-        ));
-        let wildcard_tools = ScopeSet::Wildcard;
-        let wildcard_devices = ScopeSet::Wildcard;
-        assert!(request_exceeds_scope(
-            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"stage_panos_config","arguments":{"device":"fw-a"}}}"#,
-            &wildcard_tools,
-            &wildcard_devices,
-        ));
-        assert!(request_exceeds_scope(
-            br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_panos_config","arguments":{"device":"fw-b"}}}"#,
-            &tools_limited,
-            &devices_limited,
-        ));
-    }
 
     #[test]
     fn token_store_fixture_authenticates_without_exposing_digest() {
