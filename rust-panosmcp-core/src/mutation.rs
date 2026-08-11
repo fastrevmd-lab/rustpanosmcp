@@ -833,6 +833,7 @@ impl PanosService {
             policy_signature: policy_sig,
             attribution: None,
             rollback_deadline_unix: None,
+            config_authority: Some(client.config_authority().as_str().to_owned()),
         };
         self.mutations
             .insert(record.clone())
@@ -1061,6 +1062,7 @@ impl PanosService {
             policy_signature: policy_sig,
             attribution: None,
             rollback_deadline_unix: None,
+            config_authority: Some(client.config_authority().as_str().to_owned()),
         };
         self.mutations
             .insert(record.clone())
@@ -1312,6 +1314,18 @@ impl PanosService {
             ));
         }
         let client = self.client(&input.device)?;
+
+        // Refuse commits on plane-managed firewalls where changes would be overwritten
+        let authority = client.config_authority();
+        if !authority.is_local() {
+            return Err(policy(
+                "device",
+                &format!(
+                    "commits to {} devices are refused; local changes would be overwritten at next push",
+                    authority.as_str()
+                ),
+            ));
+        }
         let policy = require_policy(&client)?.clone();
         require_operation_policy(&record, &client)?;
         let current = candidate_fingerprint(&client, CancellationToken::new()).await?;
@@ -1984,6 +1998,7 @@ mod tests {
             policy_signature: "policy".to_owned(),
             attribution: None,
             rollback_deadline_unix: None,
+            config_authority: Some("local".to_owned()),
         };
         let mut state = mecmcp_changeset::persistence::ChangesetState::default();
         state.operations.insert(id.clone(), record);

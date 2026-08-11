@@ -10,8 +10,12 @@ candidate configuration changes.
 
 The server will accept MCP requests over local stdio or bearer-protected
 Streamable HTTP and translate authorized tool calls into PAN-OS management API
-requests. The protected systems are standalone firewalls in v0.1. Panorama,
-multi-vsys, SSH automation, file transfer, upgrades, and OAuth authorization
+requests. The server supports both standalone firewalls and firewalls managed
+by Panorama or Strata Cloud Manager. When a firewall is managed by a
+centralized plane, the server refuses destructive operations (commits) because
+local changes would be overwritten at the next push, and records the ownership
+in audit events so the trail does not imply durability it cannot provide.
+Multi-vsys, SSH automation, file transfer, upgrades, and OAuth authorization
 servers are outside the first release scope.
 
 ## Assets

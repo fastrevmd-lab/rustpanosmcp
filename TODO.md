@@ -31,6 +31,7 @@ should-haves from the public-readiness review, none blocking.
 
 - [ ] Multi-vsys and HA support — paused until a licensed multi-vsys lab
       resource and second HA peer are available.
-- [ ] Panorama — deferred.
+- [ ] Panorama and Strata Cloud Manager API integration — ownership tracking
+      is implemented (v0.9.0); full read/write Panorama API support deferred.
 - [ ] Consider crates.io publication once the tool surface stabilizes
       (workspace crates would need publishable metadata).
