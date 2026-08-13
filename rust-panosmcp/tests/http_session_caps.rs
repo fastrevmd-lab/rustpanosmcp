@@ -1,9 +1,6 @@
 //! Session cap and metrics endpoint integration tests.
 
-use axum::{
-    body::Body,
-    http::{Request, StatusCode, header},
-};
+use axum::http::{StatusCode, header};
 use rust_panosmcp::{
     RuntimeState,
     http_transport::{HttpOptions, build_router},
@@ -12,7 +9,6 @@ use rust_panosmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use std::fs;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt as _;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"session-cap-test","version":"1"}}}"#;
 
@@ -122,19 +118,6 @@ fn make_private(path: &std::path::Path) {
 
 #[cfg(not(unix))]
 fn make_private(_path: &std::path::Path) {}
-
-fn post(body: impl Into<Body>, authorization: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri("/mcp")
-        .header(header::HOST, "localhost")
-        .header(header::ORIGIN, "http://localhost:30031")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream")
-        .header(header::AUTHORIZATION, authorization)
-        .body(body.into())
-        .expect("request")
-}
 
 #[tokio::test]
 async fn global_session_cap_returns_stable_503_and_releases_on_close() {

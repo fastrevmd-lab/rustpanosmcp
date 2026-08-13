@@ -22,7 +22,6 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt as _;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"phase2-test","version":"1"}}}"#;
 
