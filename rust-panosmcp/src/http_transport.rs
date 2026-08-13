@@ -1,12 +1,12 @@
-//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.8.0.
+//! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.9.0.
 
 use crate::{PanosMcpServer, RuntimeState};
 use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy, HttpServeError,
-    HttpShutdown, HttpTransportBuildError, HttpTransportConfig, LimitsConfig,
-    MalformedArgumentsPolicy, TargetField, ToolScopePreflight, TransportIdentity,
-    build_streamable_http_router, loopback_origins, serve_router,
+    HttpTransportBuildError, HttpTransportConfig, LimitsConfig, MalformedArgumentsPolicy,
+    ServePlan, TargetField, ToolScopePreflight, TransportIdentity, build_streamable_http_router,
+    loopback_origins, serve_router,
 };
 use rust_panosmcp_auth::MUTATION_TOOLS;
 use std::{net::SocketAddr, sync::Arc};
@@ -47,7 +47,7 @@ pub fn build_router(
     options: HttpOptions,
     enable_metrics: bool,
     shutdown: CancellationToken,
-) -> Result<(axum::Router, HttpShutdown), HttpTransportBuildError> {
+) -> Result<ServePlan, HttpTransportBuildError> {
     let identity =
         TransportIdentity::new("panosmcp", "panos", "rust-panosmcp", ["device", "devices"]);
 
@@ -70,18 +70,11 @@ pub fn build_router(
 
     // Build complete Origin list including loopback
     let all_origins = loopback_origins(options.port, options.tls, options.allowed_origins.clone());
+    let host_origin = HostOriginPolicy::enforced(options.allowed_hosts.clone(), all_origins);
 
-    let mut config = HttpTransportConfig::<NoGrant>::new(
-        identity.clone(),
-        limits.clone(),
-        HostOriginPolicy::enforced(options.allowed_hosts.clone(), all_origins),
-        shutdown,
-    )
-    .with_metrics(enable_metrics);
-
-    // Add bearer boundary if tokens are present
+    // Determine whether authentication is required based on token presence
     let snapshot = runtime.snapshot();
-    if snapshot.tokens.is_some() {
+    let config = if snapshot.tokens.is_some() {
         let auth_runtime = runtime.clone();
         let authenticator = BearerAuthenticator::new(BearerSyntax::Strict, move |candidate| {
             let snapshot = auth_runtime.snapshot();
@@ -98,6 +91,8 @@ pub fn build_router(
                 provider_tier: entry.provider_tier,
                 on_behalf_of: entry.on_behalf_of.clone(),
                 actor_type: entry.actor_type,
+                client_name: None,
+                request_id: uuid::Uuid::new_v4(),
             })
         });
         let preflight = ToolScopePreflight::new(
@@ -108,8 +103,24 @@ pub fn build_router(
         let boundary =
             BearerBoundary::new(authenticator, BearerResponseProfile::detailed("panosmcp"))
                 .with_preflight(preflight);
-        config = config.with_bearer(boundary);
+        HttpTransportConfig::authenticated(
+            identity.clone(),
+            limits.clone(),
+            host_origin,
+            shutdown,
+            boundary,
+        )
+    } else {
+        use mecmcp_transport::NoAuthAcknowledgement;
+        HttpTransportConfig::unauthenticated(
+            identity.clone(),
+            limits.clone(),
+            host_origin,
+            shutdown,
+            NoAuthAcknowledgement::operator_allowed_no_auth(),
+        )
     }
+    .with_metrics(enable_metrics);
     drop(snapshot);
 
     let service_factory = move || {
@@ -160,18 +171,19 @@ pub async fn serve(
         });
     }
 
-    let (router, shutdown_token) = build_router(runtime, options, enable_metrics, shutdown)
-        .map_err(|error| HttpServeError::Serve {
+    let plan = build_router(runtime, options, enable_metrics, shutdown).map_err(|error| {
+        HttpServeError::Serve {
             address,
             error: std::io::Error::other(error.to_string()),
-        })?;
+        }
+    })?;
 
     // Graceful shutdown timeout: 10 seconds for in-flight requests/SSE streams.
     // LXC 608's systemd unit has TimeoutStopSec=30s, so this drain completes well
     // before systemd's SIGKILL. While any SSE stream is open (e.g., an MCP session),
     // shutdown takes the full timeout rather than ending immediately.
     let shutdown_timeout = std::time::Duration::from_secs(10);
-    serve_router(router, address, tls, shutdown_token, shutdown_timeout).await
+    serve_router(plan, address, tls, shutdown_timeout).await
 }
 
 #[cfg(test)]

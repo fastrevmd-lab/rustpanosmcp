@@ -65,8 +65,10 @@ fn options_with_hosts_and_origins(hosts: Vec<String>, origins: Vec<String>) -> H
 async fn portless_host_allowlist_entry_matches_request_with_port() {
     let fixture = fixture();
     let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // A portless Host entry "mcp.example.test" should match a request
     // whose Host header carries the bound port "mcp.example.test:30031"
@@ -95,8 +97,10 @@ async fn portless_host_allowlist_entry_matches_request_with_port() {
 async fn loopback_still_allowed_after_adding_custom_host() {
     let fixture = fixture();
     let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // Loopback should still be in the allowlist after adding a custom host
     let request = Request::builder()
@@ -119,8 +123,10 @@ async fn loopback_still_allowed_after_adding_custom_host() {
 async fn unlisted_host_rejected_with_421() {
     let fixture = fixture();
     let options = options_with_hosts_and_origins(vec!["mcp.example.test".to_owned()], Vec::new());
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // A Host not in the allowlist must be rejected with 421 MISDIRECTED_REQUEST
     let request = Request::builder()
@@ -146,8 +152,10 @@ async fn allowed_origin_passes_validation() {
         vec!["mcp.example.test".to_owned()],
         vec!["https://client.example.test".to_owned()],
     );
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // An allowed Origin should pass validation
     let request = Request::builder()
@@ -174,8 +182,10 @@ async fn disallowed_origin_rejected_with_403() {
         vec!["mcp.example.test".to_owned()],
         vec!["https://client.example.test".to_owned()],
     );
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // A disallowed Origin should be rejected with 403
     let request = Request::builder()
@@ -199,8 +209,10 @@ async fn disallowed_origin_rejected_with_403() {
 async fn loopback_origin_with_correct_port_allowed() {
     let fixture = fixture();
     let options = options_with_hosts_and_origins(Vec::new(), Vec::new());
-    let (router, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     // Loopback origins with the bound port should be allowed
     let request = Request::builder()

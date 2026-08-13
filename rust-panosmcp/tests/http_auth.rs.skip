@@ -103,9 +103,10 @@ async fn status(
     options: HttpOptions,
     request: Request<Body>,
 ) -> StatusCode {
-    build_router(runtime.clone(), options, false, CancellationToken::new())
-        .expect("router")
-        .0
+    let plan =
+        build_router(runtime.clone(), options, false, CancellationToken::new()).expect("router");
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    router
         .oneshot(request)
         .await
         .expect("infallible router")
@@ -127,13 +128,14 @@ async fn missing_malformed_and_invalid_tokens_are_rfc6750_unauthorized() {
         );
     }
 
-    let (router, _shutdown) = build_router(
+    let plan = build_router(
         fixture.runtime.clone(),
         options(),
         false,
         CancellationToken::new(),
     )
     .expect("router");
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
     let response = router
         .oneshot(post(INITIALIZE, None))
         .await
@@ -274,13 +276,14 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
 
     let mut rate_limited = options();
     rate_limited.token_rate_per_minute = 1;
-    let (router, _shutdown) = build_router(
+    let plan = build_router(
         fixture.runtime.clone(),
         rate_limited,
         false,
         CancellationToken::new(),
     )
     .expect("router");
+    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
     assert_eq!(
         router
             .clone()

@@ -102,8 +102,9 @@ async fn per_token_rate_limit_enforces_429() {
         max_sessions_per_token: 16,
     };
 
-    let (app, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
     let auth = format!("Bearer {}", fixture.secret);
 
     // First request should succeed

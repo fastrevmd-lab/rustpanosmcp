@@ -163,8 +163,9 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
         max_sessions_per_token: 16,
     };
 
-    let (app, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
     let auth = format!("Bearer {}", fixture.secret);
 
     // First initialize should succeed
@@ -229,8 +230,9 @@ async fn token_session_cap_isolated_by_token() {
         max_sessions_per_token: 1,
     };
 
-    let (app, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
     let alice_auth = format!("Bearer {}", fixture.secret);
     let bob_auth = format!("Bearer {}", bob_secret);
 
@@ -294,8 +296,9 @@ async fn metrics_endpoint_enabled_and_contains_panosmcp_series() {
         max_sessions_per_token: 16,
     };
 
-    let (app, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, true, CancellationToken::new()).expect("router");
+    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     let response = app
         .clone()
@@ -341,8 +344,9 @@ async fn metrics_endpoint_disabled_when_flag_is_false() {
         max_sessions_per_token: 16,
     };
 
-    let (app, _shutdown) =
+    let plan =
         build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
 
     let response = app
         .clone()

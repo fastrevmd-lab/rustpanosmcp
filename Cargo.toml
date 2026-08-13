@@ -25,13 +25,13 @@ fastrand = "2"
 futures-util = "0.3"
 getrandom = "0.4"
 http = "1"
-mecmcp-audit = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-auth = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-changeset = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-inventory = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-policy = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-runtime = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
-mecmcp-transport = { version = "0.8.6", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.8.6" }
+mecmcp-audit = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-auth = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-changeset = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-inventory = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-policy = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-runtime = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
+mecmcp-transport = { version = "0.9.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.9.0" }
 quick-xml = "0.41"
 reqwest = { version = "0.13", default-features = false, features = ["form", "rustls-no-provider", "stream"] }
 rmcp = { version = "3", default-features = false }
@@ -49,6 +49,7 @@ tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]
