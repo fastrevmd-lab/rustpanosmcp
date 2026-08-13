@@ -1,9 +1,6 @@
 //! Per-token rate limiting integration tests.
 
-use axum::{
-    body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
-};
+use axum::http::{StatusCode, header};
 use rust_panosmcp::{
     RuntimeState,
     http_transport::{HttpOptions, build_router},
@@ -12,7 +9,6 @@ use rust_panosmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use std::fs;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt as _;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rate-limit-test","version":"1"}}}"#;
 
@@ -71,19 +67,6 @@ fn make_private(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn make_private(_path: &std::path::Path) {}
 
-fn post(body: impl Into<Body>, authorization: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri("/mcp")
-        .header(header::HOST, "localhost")
-        .header(header::ORIGIN, "http://localhost:30031")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream")
-        .header(header::AUTHORIZATION, authorization)
-        .body(body.into())
-        .expect("request")
-}
-
 #[tokio::test]
 async fn per_token_rate_limit_enforces_429() {
     let fixture = fixture();
@@ -102,30 +85,46 @@ async fn per_token_rate_limit_enforces_429() {
         max_sessions_per_token: 16,
     };
 
-    let (app, _shutdown) =
-        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
     let auth = format!("Bearer {}", fixture.secret);
+    let client = reqwest::Client::new();
 
     // First request should succeed
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Second request should succeed (burst allows 2)
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Third request should be rate limited (429)
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(
@@ -138,9 +137,7 @@ async fn per_token_rate_limit_enforces_429() {
         "429 response must include Retry-After header"
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let body = response.bytes().await.expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         json.get("error").and_then(|v| v.as_str()),
@@ -152,4 +149,7 @@ async fn per_token_rate_limit_enforces_429() {
         Some("token_rate"),
         "429 response must indicate token_rate limit"
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
