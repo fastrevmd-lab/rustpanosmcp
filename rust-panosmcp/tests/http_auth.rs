@@ -103,14 +103,34 @@ async fn status(
     options: HttpOptions,
     request: Request<Body>,
 ) -> StatusCode {
-    let plan =
-        build_router(runtime.clone(), options, false, CancellationToken::new()).expect("router");
-    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
-    router
-        .oneshot(request)
+    let shutdown = CancellationToken::new();
+    let plan = build_router(runtime.clone(), options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    // Convert Request<Body> to a real HTTP request
+    let uri = format!("http://{}{}", served.address, request.uri().path());
+    let client = reqwest::Client::new();
+    let mut req = client.request(request.method().clone(), &uri);
+
+    // Copy headers
+    for (name, value) in request.headers() {
+        req = req.header(name, value);
+    }
+
+    // Copy body
+    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
-        .expect("infallible router")
-        .status()
+        .expect("body");
+    if !body_bytes.is_empty() {
+        req = req.body(body_bytes);
+    }
+
+    let response = req.send().await.expect("request");
+    let status = response.status();
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
+    status
 }
 
 #[tokio::test]
@@ -128,19 +148,25 @@ async fn missing_malformed_and_invalid_tokens_are_rfc6750_unauthorized() {
         );
     }
 
-    let plan = build_router(
-        fixture.runtime.clone(),
-        options(),
-        false,
-        CancellationToken::new(),
-    )
-    .expect("router");
-    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
-    let response = router
-        .oneshot(post(INITIALIZE, None))
+    let shutdown = CancellationToken::new();
+    let plan =
+        build_router(fixture.runtime.clone(), options(), false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
+    let response = reqwest::Client::new()
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(INITIALIZE)
+        .send()
         .await
-        .expect("router");
+        .expect("request");
+
     assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
 
 #[tokio::test]
@@ -276,29 +302,46 @@ async fn host_origin_body_and_rate_guards_reject_requests() {
 
     let mut rate_limited = options();
     rate_limited.token_rate_per_minute = 1;
+    let shutdown = CancellationToken::new();
     let plan = build_router(
         fixture.runtime.clone(),
         rate_limited,
         false,
-        CancellationToken::new(),
+        shutdown.clone(),
     )
     .expect("router");
-    let router = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(post(INITIALIZE, Some(&bearer)))
-            .await
-            .expect("router")
-            .status(),
-        StatusCode::OK
-    );
-    let response = router
-        .oneshot(post(INITIALIZE, Some(&bearer)))
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
+    let client = reqwest::Client::new();
+
+    // First request should succeed
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &bearer)
+        .body(INITIALIZE)
+        .send()
         .await
-        .expect("router");
+        .expect("request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Second request should be rate limited
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &bearer)
+        .body(INITIALIZE)
+        .send()
+        .await
+        .expect("request");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().contains_key(header::RETRY_AFTER));
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
 
 fn make_private(path: &Path) {

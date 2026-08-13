@@ -1,7 +1,7 @@
 //! Per-token rate limiting integration tests.
 
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     http::{Request, StatusCode, header},
 };
 use rust_panosmcp::{
@@ -102,31 +102,46 @@ async fn per_token_rate_limit_enforces_429() {
         max_sessions_per_token: 16,
     };
 
-    let plan =
-        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
-    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
     let auth = format!("Bearer {}", fixture.secret);
+    let client = reqwest::Client::new();
 
     // First request should succeed
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Second request should succeed (burst allows 2)
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Third request should be rate limited (429)
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(
@@ -139,9 +154,7 @@ async fn per_token_rate_limit_enforces_429() {
         "429 response must include Retry-After header"
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let body = response.bytes().await.expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         json.get("error").and_then(|v| v.as_str()),
@@ -153,4 +166,7 @@ async fn per_token_rate_limit_enforces_429() {
         Some("token_rate"),
         "429 response must indicate token_rate limit"
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }

@@ -1,7 +1,7 @@
 //! Session cap and metrics endpoint integration tests.
 
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     http::{Request, StatusCode, header},
 };
 use rust_panosmcp::{
@@ -136,15 +136,6 @@ fn post(body: impl Into<Body>, authorization: &str) -> Request<Body> {
         .expect("request")
 }
 
-fn get(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(uri)
-        .header(header::HOST, "localhost")
-        .body(Body::empty())
-        .expect("request")
-}
-
 #[tokio::test]
 async fn global_session_cap_returns_stable_503_and_releases_on_close() {
     let fixture = fixture();
@@ -163,23 +154,34 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
         max_sessions_per_token: 16,
     };
 
-    let plan =
-        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
-    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
     let auth = format!("Bearer {}", fixture.secret);
+    let client = reqwest::Client::new();
 
     // First initialize should succeed
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Second initialize should be rejected with 503
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(
@@ -196,9 +198,7 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
         "503 must include Retry-After: 1"
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let body = response.bytes().await.expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         json.get("error").and_then(|v| v.as_str()),
@@ -210,6 +210,9 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
         Some("session_cap"),
         "503 must indicate session_cap limit"
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
 
 #[tokio::test]
@@ -230,24 +233,35 @@ async fn token_session_cap_isolated_by_token() {
         max_sessions_per_token: 1,
     };
 
-    let plan =
-        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
-    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
+
+    let uri = format!("http://{}/mcp", served.address);
     let alice_auth = format!("Bearer {}", fixture.secret);
     let bob_auth = format!("Bearer {}", bob_secret);
+    let client = reqwest::Client::new();
 
     // Alice opens one session
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &alice_auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &alice_auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
     // Alice's second session should be rejected
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &alice_auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &alice_auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(
@@ -255,9 +269,7 @@ async fn token_session_cap_isolated_by_token() {
         StatusCode::SERVICE_UNAVAILABLE,
         "alice's second session must be rejected when max_sessions_per_token=1"
     );
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let body = response.bytes().await.expect("body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         json.get("limit").and_then(|v| v.as_str()),
@@ -266,9 +278,13 @@ async fn token_session_cap_isolated_by_token() {
     );
 
     // Bob should still be able to open a session (per-token isolation)
-    let response = app
-        .clone()
-        .oneshot(post(INITIALIZE, &bob_auth))
+    let response = client
+        .post(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, &bob_auth)
+        .body(INITIALIZE)
+        .send()
         .await
         .expect("response");
     assert_eq!(
@@ -276,6 +292,9 @@ async fn token_session_cap_isolated_by_token() {
         StatusCode::OK,
         "bob must not be affected by alice's per-token session cap"
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
 
 #[tokio::test]
@@ -296,24 +315,21 @@ async fn metrics_endpoint_enabled_and_contains_panosmcp_series() {
         max_sessions_per_token: 16,
     };
 
-    let plan =
-        build_router(fixture.runtime, options, true, CancellationToken::new()).expect("router");
-    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, true, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
 
-    let response = app
-        .clone()
-        .oneshot(get("/metrics"))
-        .await
-        .expect("response");
+    let uri = format!("http://{}/metrics", served.address);
+    let client = reqwest::Client::new();
+
+    let response = client.get(&uri).send().await.expect("response");
     assert_eq!(
         response.status(),
         StatusCode::OK,
         "/metrics must return 200 when enable_metrics=true"
     );
 
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let body = response.bytes().await.expect("body");
     let text = String::from_utf8_lossy(&body);
 
     assert!(
@@ -324,6 +340,9 @@ async fn metrics_endpoint_enabled_and_contains_panosmcp_series() {
         !text.contains("junosmcp_"),
         "/metrics must NOT contain junosmcp_ series; body: {text}"
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
 
 #[tokio::test]
@@ -344,15 +363,14 @@ async fn metrics_endpoint_disabled_when_flag_is_false() {
         max_sessions_per_token: 16,
     };
 
-    let plan =
-        build_router(fixture.runtime, options, false, CancellationToken::new()).expect("router");
-    let app = rust_panosmcp::http_transport::router_from_plan_test_only(plan);
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+    let served = mecmcp_transport::test_harness::serve_on_loopback(plan).await;
 
-    let response = app
-        .clone()
-        .oneshot(get("/metrics"))
-        .await
-        .expect("response");
+    let uri = format!("http://{}/metrics", served.address);
+    let client = reqwest::Client::new();
+
+    let response = client.get(&uri).send().await.expect("response");
     // When metrics are disabled, the route doesn't exist. The request goes through
     // auth middleware which rejects it with 401 (no bearer token on the GET request).
     // This is correct: the endpoint is not available, and auth runs before routing.
@@ -364,4 +382,7 @@ async fn metrics_endpoint_disabled_when_flag_is_false() {
         "/metrics must not be accessible when enable_metrics=false; got {}",
         response.status()
     );
+
+    shutdown.cancel();
+    served.serving.await.expect("server").expect("serve");
 }
