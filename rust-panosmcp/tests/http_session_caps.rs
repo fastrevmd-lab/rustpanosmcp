@@ -125,6 +125,7 @@ async fn global_session_cap_returns_stable_503_and_releases_on_close() {
     let options = HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 0,
@@ -204,6 +205,7 @@ async fn token_session_cap_isolated_by_token() {
     let options = HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 0,
@@ -286,6 +288,7 @@ async fn metrics_endpoint_enabled_and_contains_panosmcp_series() {
     let options = HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 0,
@@ -334,6 +337,7 @@ async fn metrics_endpoint_disabled_when_flag_is_false() {
     let options = HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 0,

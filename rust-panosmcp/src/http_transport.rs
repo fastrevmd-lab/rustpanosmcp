@@ -19,6 +19,13 @@ pub struct HttpOptions {
     pub port: u16,
     /// Whether the listener itself uses TLS.
     pub tls: bool,
+    /// Operator accepted a plaintext off-loopback listener (`--allow-insecure-bind`).
+    ///
+    /// Must be carried through to the transport. Parsing the flag and never
+    /// converting it is the defect class mecmcp#273 exists to close — a flag
+    /// that is present but ignored. It took LXC 950 down on the sibling Junos
+    /// server, where exactly this wiring was missing.
+    pub allow_insecure_bind: bool,
     /// Additional exact Host authorities.
     pub allowed_hosts: Vec<String>,
     /// Additional exact browser origins.
@@ -121,6 +128,13 @@ pub fn build_router(
         )
     }
     .with_metrics(enable_metrics);
+
+    let config = if options.allow_insecure_bind {
+        use mecmcp_transport::InsecureBindAcknowledgement;
+        config.with_insecure_bind(InsecureBindAcknowledgement::operator_allowed_insecure_bind())
+    } else {
+        config
+    };
     drop(snapshot);
 
     let service_factory = move || {

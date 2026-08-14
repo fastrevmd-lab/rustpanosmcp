@@ -44,6 +44,7 @@ fn options_with_hosts_and_origins(hosts: Vec<String>, origins: Vec<String>) -> H
     HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: hosts,
         allowed_origins: origins,
         ip_rate_per_minute: 1_000,

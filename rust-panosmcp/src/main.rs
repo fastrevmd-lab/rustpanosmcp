@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let options = HttpOptions {
                 port: cli.port,
                 tls: listener_tls.is_some(),
+                allow_insecure_bind: cli.allow_insecure_bind,
                 allowed_hosts: cli.allowed_host,
                 allowed_origins: cli.allowed_origin,
                 ip_rate_per_minute: cli.ip_rate_per_minute,
