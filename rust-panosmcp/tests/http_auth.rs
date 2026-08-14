@@ -70,6 +70,7 @@ fn options() -> HttpOptions {
     HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 1_000,
@@ -450,4 +451,60 @@ async fn rmcp_client_observes_handler_level_device_scope_over_http() {
     assert_eq!(value["devices"], serde_json::json!([]));
     client.cancel().await.expect("client shutdown");
     server.abort();
+}
+
+/// `--allow-insecure-bind` must reach the transport, not just this repo's own
+/// CLI validator.
+///
+/// Regression test for the wiring gap that took the sibling Junos server's
+/// production host (LXC 950) down during its 0.20.0 upgrade: the flag was
+/// parsed, shown in `--help`, checked by the repo's local `cli_validate`, and
+/// never converted into an `InsecureBindAcknowledgement` for the transport.
+/// mecmcp 0.9.x refuses a plaintext off-loopback listener without it, so the
+/// server crash-looped on a flag the operator had supplied.
+///
+/// Latent here — every panos deployment runs TLS, which satisfies the same
+/// branch by another route — so only a test keeps it fixed.
+///
+/// Three things make this prove something, each learned the hard way:
+///   * an AUTHENTICATED fixture, because with no token store
+///     `UnauthenticatedOffLoopback` fires first and the insecure-bind check is
+///     never reached — a version of this test without it passed with the fix
+///     reverted;
+///   * a NON-loopback address, because loopback is exempt from every check;
+///   * an assertion on `InsecureBindNotAcknowledged` specifically, not on
+///     `Refused` generally.
+///
+/// Verified by sabotage in both directions.
+#[tokio::test]
+async fn insecure_bind_acknowledgement_reaches_the_transport() {
+    let fixture = fixture(ScopeSet::Wildcard, ScopeSet::Wildcard);
+    let mut options = options();
+    options.allow_insecure_bind = true;
+    options.tls = false;
+
+    let shutdown = CancellationToken::new();
+    let plan = build_router(fixture.runtime, options, false, shutdown.clone()).expect("router");
+
+    // 192.0.2.1 is TEST-NET-1: non-loopback and unbindable here. Refused means
+    // the acknowledgement never arrived; a bind failure means it did.
+    let error = mecmcp_transport::serve_router(
+        plan,
+        "192.0.2.1:30031".parse().expect("address"),
+        None,
+        std::time::Duration::from_millis(50),
+    )
+    .await
+    .expect_err("TEST-NET-1 cannot be bound");
+
+    assert!(
+        !matches!(
+            error,
+            mecmcp_transport::HttpServeError::Refused(
+                mecmcp_transport::ListenerRefusal::InsecureBindNotAcknowledged { .. }
+            )
+        ),
+        "refused for want of an insecure-bind acknowledgement despite \
+         allow_insecure_bind = true, so the flag never reached the transport: {error:?}"
+    );
 }

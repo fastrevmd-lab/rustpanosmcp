@@ -73,6 +73,7 @@ async fn per_token_rate_limit_enforces_429() {
     let options = HttpOptions {
         port: 30031,
         tls: false,
+        allow_insecure_bind: false,
         allowed_hosts: Vec::new(),
         allowed_origins: Vec::new(),
         ip_rate_per_minute: 0,
