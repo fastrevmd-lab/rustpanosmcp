@@ -99,6 +99,8 @@ pub fn build_router(
                 on_behalf_of: entry.on_behalf_of.clone(),
                 actor_type: entry.actor_type,
                 client_name: None,
+                model_id: None,
+                session_id: None,
                 request_id: uuid::Uuid::new_v4(),
             })
         });
