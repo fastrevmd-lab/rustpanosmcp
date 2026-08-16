@@ -360,6 +360,61 @@ State subcommands:
   resolve  Mark an indeterminate operation terminal after manual PAN-OS reconciliation
 ```
 
+### `--lab-mode`
+
+`--lab-mode` waives the second principal, for a single-operator lab where two-person control is theatre rather than a control. **It is off by default and should stay off anywhere the estate matters.**
+
+What it does and does not change:
+
+- The waiver is applied automatically when the change set is created. There is no waive tool, and the flow stays create → apply, identical to production.
+- Planning, the plan digest, drift detection, and apply-time revalidation all still run. Lab mode removes the second reviewer, not the change record.
+- **No approver is ever fabricated.** A waived change set records `approver: null` alongside `approval_waiver: "lab-mode"`, and carries a waiver digest over `(change_set_id, plan_digest, owner, approved_at)`. It is cryptographically distinguishable from a genuine two-person approval and cannot be relabelled afterwards — which matters if anyone later has to prove which changes had real separation of duties.
+- The server warns loudly at startup whenever it is enabled.
+
+If you want solo write-testing without waiving the control, mint two tokens with different names and use one to create and the other to approve: the principal is the token name, and self-approval is refused. That gives one person the complete lifecycle with the control intact, and is the better choice wherever the ceremony has any value.
+
+#### Enabling it
+
+Add the flag to the service unit. On a package install, use a drop-in rather than editing the shipped unit, so an upgrade does not silently drop it:
+
+```console
+sudo systemctl edit rust-panosmcp
+```
+
+Replacing `ExecStart` means restating it in full, so **copy the shipped command and append the flag** rather than writing a shorter one. Dropping other arguments would silently change the state file location or transport settings as a side effect of enabling lab mode:
+
+```ini
+[Service]
+# Clear the shipped ExecStart before replacing it; systemd appends otherwise.
+ExecStart=
+ExecStart=/usr/local/bin/rust-panosmcp \
+    --device-mapping /etc/rust-panosmcp/devices.json \
+    --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 30031 \
+    --tokens-file /var/lib/rust-panosmcp/tokens.json \
+    --state-file /var/lib/rust-panosmcp/mutation-state.json \
+    --lab-mode
+```
+
+Check it against `packaging/systemd/rust-panosmcp.service` before applying it — the shipped arguments are the authority, and this snippet is a copy that can age.
+
+```console
+sudo systemctl daemon-reload && sudo systemctl restart rust-panosmcp
+```
+
+Confirm it took effect. The startup warning uses `lab mode` in the prose and `approval_waiver=lab-mode` in the outcome description:
+
+```console
+sudo journalctl -u rust-panosmcp --since='5 minutes ago' | grep -i lab
+```
+
+Expected output:
+
+```text
+Aug 15 12:34:56 host rust-panosmcp[1234]: lab mode enabled: change sets are approved on creation with no second principal. Records carry approval_waiver=lab-mode. Do not run this against production devices.
+```
+
 ## Validate
 
 ```bash
