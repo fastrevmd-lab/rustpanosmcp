@@ -882,8 +882,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "base64",
  "chrono",
@@ -912,8 +912,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -931,8 +931,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-changeset"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -951,8 +951,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-inventory"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "mecmcp-secret",
  "serde",
@@ -965,8 +965,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-policy"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "globset",
  "serde",
@@ -975,8 +975,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-secret"
-version = "0.11.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.11.0#9a11c95d5be6195fbd37d2d792f9e89397aa32ba"
+version = "0.12.0"
+source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.12.0#fca59a218e324283bc879fc5e4ea0e1a745b9d33"
 dependencies = [
  "rustix",
  "thiserror",
