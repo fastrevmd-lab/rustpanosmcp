@@ -7,6 +7,7 @@ use crate::{
     tools::PanosService,
     xml::{parse_job_id, validate_config_element, validate_write_xpath},
 };
+use mecmcp_audit::Attribution;
 use mecmcp_changeset::DeviceTransaction as _;
 use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
@@ -1343,12 +1344,45 @@ impl PanosService {
         record.state = LifecycleState::Committing;
         self.mutations.update(record.clone()).await?;
 
+        // Carry attribution onto the firewall's own commit log.
+        //
+        // The description used to name nobody, so PAN-OS's commit history could
+        // not say who made a change or who approved it. Built here rather than
+        // in the worker because only this scope still holds the caller context.
+        let mut attribution = match ctx {
+            Some(ctx) => Attribution::from_caller(ctx),
+            None => Attribution::stdio(),
+        };
+
+        // Two-person evidence, when this operation came from a change set.
+        // `approval.approver` is the field documented as present only for a
+        // genuine two-person approval and absent when waived — exactly the
+        // distinction a commit log has to keep. A lookup failure is not fatal:
+        // the change set is a label on the commit, and losing the label is not
+        // worth refusing a commit whose candidate is already staged and
+        // validated.
+        if let Some(change_set_id) = record.change_set_id.clone() {
+            let approver = self
+                .mutations
+                .change_set(&change_set_id, &input.device)
+                .await
+                .ok()
+                .and_then(|change_set| {
+                    change_set
+                        .approval
+                        .as_ref()
+                        .and_then(|approval| approval.approver.clone())
+                });
+            attribution.with_change_set(&change_set_id, approver.as_deref());
+        }
+
         let coordinator = self.mutations.clone();
         let owner = owner.to_owned();
         let operation_id = record.id.clone();
         let (sender, receiver) = oneshot::channel();
         tokio::spawn(async move {
-            let result = commit_worker(coordinator, client, policy.admin, record, &owner).await;
+            let result =
+                commit_worker(coordinator, client, policy.admin, record, &owner, attribution).await;
             let _ = sender.send(result);
         });
         tokio::select! {
@@ -1504,21 +1538,109 @@ impl PanosService {
     }
 }
 
+/// How much of a change-set id reaches the device's commit description.
+///
+/// Enough to correlate a commit with the server's change-set store — 16 hex
+/// characters is 64 bits, against a store holding tens of records — without
+/// spending a third of a bounded description field on an identifier.
+const CHANGE_SET_ID_DESCRIPTION_PREFIX: usize = 16;
+
+/// How much of a principal's name reaches the device's commit description.
+///
+/// PAN-OS accepts 512 characters of commit description. This one carries up to
+/// three token names — the principal, the on-behalf-of, and the approver — each
+/// of which may be 128 characters (`mecmcp_auth::MAX_TOKEN_NAME`), so together
+/// they can exceed the field on their own. Truncating is strictly better than
+/// the alternative: an over-long description fails the commit after the
+/// candidate is already staged.
+const MAX_NAME_IN_DESCRIPTION: usize = 64;
+
+/// Bound one name for inclusion in a commit description, marking any truncation.
+fn bounded_name(name: &str) -> String {
+    if name.len() > MAX_NAME_IN_DESCRIPTION {
+        let kept: String = name.chars().take(MAX_NAME_IN_DESCRIPTION).collect();
+        format!("{kept}...")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Build the PAN-OS commit description for an operation.
+///
+/// Before this, the description was `rust-panosmcp <operation-id>` and nothing
+/// else: the firewall's own commit history could not say who made a change, let
+/// alone who approved it. The evidence existed only in this server's audit log
+/// and change-set store, on a host the firewall's operator may not have — and
+/// the commit log is the durable half, since an audit log can be re-derived
+/// while a commit description cannot be corrected retroactively.
+///
+/// The operation id stays first so anything already matching on the existing
+/// shape keeps working; the attribution is appended.
+///
+/// `approved-by` and `change-set` are omitted rather than emitted empty.
+/// `commit_panos_candidate` can be called on a candidate that never went
+/// through a change set, and `approved-by=` with nothing after it reads, to
+/// anyone scanning a commit log, like an approval that happened.
+fn commit_description(record: &OperationRecord, attribution: &Attribution) -> String {
+    let principal = bounded_name(&attribution.principal.to_string());
+    let on_behalf_of = attribution
+        .on_behalf_of
+        .as_deref()
+        .map(bounded_name)
+        .unwrap_or_else(|| "self".to_owned());
+
+    let approval_info = attribution
+        .approver
+        .as_deref()
+        .map(|approver| format!(" approved-by={}", bounded_name(approver)))
+        .unwrap_or_default();
+
+    let change_set_info = attribution
+        .change_set_id
+        .as_deref()
+        .map(|id| {
+            let prefix: String = id.chars().take(CHANGE_SET_ID_DESCRIPTION_PREFIX).collect();
+            format!(" change-set={prefix}")
+        })
+        .unwrap_or_default();
+
+    format!(
+        "rust-panosmcp {} by {} on-behalf-of={} request.id={}{}{}",
+        record.id, principal, on_behalf_of, attribution.request_id, approval_info, change_set_info
+    )
+}
+
+/// Build the PAN-OS `<commit>` command carrying the operation's description.
+///
+/// Split from [`commit_worker`] so the description actually reaching the device
+/// is testable. The worker needs a live PAN-OS session, so without this seam the
+/// only covered thing would be `commit_description` in isolation — and a
+/// description that is built correctly but never placed in the command is
+/// exactly the defect this change exists to fix.
+///
+/// Both interpolations are XML-escaped. The description embeds token names,
+/// which are operator-supplied, and an unescaped `<` would otherwise let a name
+/// close the element and inject into the command.
+fn commit_command(record: &OperationRecord, attribution: &Attribution, admin: &str) -> String {
+    format!(
+        "<commit><description>{}</description><partial><admin><member>{}</member></admin></partial></commit>",
+        escape(commit_description(record, attribution)),
+        escape(admin)
+    )
+}
+
 async fn commit_worker(
     coordinator: Arc<ChangesetCoordinator>,
     client: Arc<PanosClient>,
     admin: String,
     mut record: OperationRecord,
     _owner: &str,
+    attribution: Attribution,
 ) -> Result<CommitOutput> {
     let guard = coordinator
         .device_guard(&client.mutation_lock_key(), &CancellationToken::new())
         .await?;
-    let command = format!(
-        "<commit><description>rust-panosmcp {}</description><partial><admin><member>{}</member></admin></partial></commit>",
-        escape(&record.id),
-        escape(&admin)
-    );
+    let command = commit_command(&record, &attribution, &admin);
     let mut result: Result<CommitOutput> = async {
         let response = client
             .post_fields(
@@ -1950,6 +2072,195 @@ fn policy(field: &'static str, reason: &str) -> PanosMcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An operation record, optionally linked to a change set.
+    fn operation_record(change_set_id: Option<&str>) -> OperationRecord {
+        OperationRecord {
+            id: "10b9c0321bc7".to_owned(),
+            owner: "claude-test".to_owned(),
+            device: "fw".to_owned(),
+            endpoint: "https://fw.example".to_owned(),
+            action: serde_json::json!({"op": "set"}),
+            xpath: None,
+            actions: vec![serde_json::json!({"op": "set"})],
+            change_set_id: change_set_id.map(str::to_owned),
+            current: format!("sha256:{}", "a".repeat(64)),
+            state: LifecycleState::Committing,
+            job_id: None,
+            details: None,
+            config_lock_held: true,
+            policy_signature: String::new(),
+            attribution: None,
+            rollback_deadline_unix: None,
+            config_authority: None,
+        }
+    }
+
+    fn attribution_with(approver: Option<&str>, change_set_id: Option<&str>) -> Attribution {
+        let mut attribution = Attribution {
+            principal: mecmcp_audit::Principal::Token("claude-test".to_owned()),
+            actor_type: mecmcp_audit::ActorType::Agent,
+            agent: None,
+            on_behalf_of: Some("mharman".to_owned()),
+            change_ref: None,
+            request_id: uuid::Uuid::nil(),
+            token_verified_fields: mecmcp_audit::TokenVerifiedFields::none(),
+            approver: None,
+            change_set_id: None,
+        };
+        if let Some(id) = change_set_id {
+            attribution.with_change_set(id, approver);
+        }
+        attribution
+    }
+
+    /// The defect: the device's commit log named nobody at all.
+    ///
+    /// The production description was `rust-panosmcp <operation-id>` and
+    /// carried no principal, no approver, no change set and no request id — so
+    /// PAN-OS's own commit history could not say who made a change, let alone
+    /// who approved it.
+    #[test]
+    fn commit_description_names_the_principal_and_request() {
+        let description =
+            commit_description(&operation_record(None), &attribution_with(None, None));
+
+        assert!(
+            description.contains("by claude-test"),
+            "the acting principal must reach the device: {description}"
+        );
+        assert!(
+            description.contains("request.id=00000000-0000-0000-0000-000000000000"),
+            "the request id joins the commit to its audit event: {description}"
+        );
+    }
+
+    /// The operation id stays, and stays first.
+    ///
+    /// Anything already reading these descriptions matches on the existing
+    /// `rust-panosmcp <id>` shape; the attribution is appended, not substituted.
+    #[test]
+    fn commit_description_keeps_the_operation_id_prefix() {
+        let description =
+            commit_description(&operation_record(None), &attribution_with(None, None));
+
+        assert!(
+            description.starts_with("rust-panosmcp 10b9c0321bc7"),
+            "the existing prefix must survive unchanged: {description}"
+        );
+    }
+
+    /// The two-person evidence reaches the firewall (the #307 equivalent).
+    #[test]
+    fn commit_description_names_the_approver_and_change_set() {
+        let full = "86324b20a3ecbfde732b981a8c69a664d44b176c29b5cdaf59e23e4ea96d4175";
+        let description = commit_description(
+            &operation_record(Some(full)),
+            &attribution_with(Some("codex-approver"), Some(full)),
+        );
+
+        assert!(
+            description.contains("approved-by=codex-approver"),
+            "the approver must reach the device: {description}"
+        );
+        assert!(
+            description.contains("change-set=86324b20a3ecbfde"),
+            "the change set must reach the device: {description}"
+        );
+        assert!(
+            !description.contains(full),
+            "only a correlating prefix is written, not all 64 characters: {description}"
+        );
+    }
+
+    /// A commit outside the change-set flow claims no approval.
+    ///
+    /// `commit_panos_candidate` can be called on a candidate that never went
+    /// through a change set. Writing `approved-by=` with nothing after it would
+    /// read, to anyone scanning a commit log, like an approval that happened.
+    #[test]
+    fn commit_description_omits_an_absent_approver_and_change_set() {
+        let description =
+            commit_description(&operation_record(None), &attribution_with(None, None));
+
+        assert!(!description.contains("approved-by"), "{description}");
+        assert!(!description.contains("change-set"), "{description}");
+    }
+
+    /// The description must stay inside what PAN-OS accepts.
+    ///
+    /// Every variable field is a token name, capped at 128 characters by
+    /// `mecmcp_auth::MAX_TOKEN_NAME`. PAN-OS truncates or rejects an over-long
+    /// commit description, and a commit that fails here fails after the
+    /// candidate is already staged.
+    #[test]
+    fn worst_case_description_stays_within_the_panos_ceiling() {
+        let long = "n".repeat(128);
+        let mut attribution = attribution_with(None, None);
+        attribution.principal = mecmcp_audit::Principal::Token(long.clone());
+        attribution.on_behalf_of = Some(long.clone());
+        attribution.with_change_set(&"f".repeat(64), Some(&long));
+
+        let description =
+            commit_description(&operation_record(Some(&"f".repeat(64))), &attribution);
+
+        assert!(
+            description.len() <= 512,
+            "commit description is {} characters, over the 512 PAN-OS allows: {description}",
+            description.len()
+        );
+    }
+
+    /// The description must actually reach the command sent to the device.
+    ///
+    /// Without this, a description built correctly and then dropped on the way
+    /// to the firewall would pass every other test here — which is precisely
+    /// the defect being fixed.
+    #[test]
+    fn commit_command_carries_the_description_to_the_device() {
+        let full = "86324b20a3ecbfde732b981a8c69a664d44b176c29b5cdaf59e23e4ea96d4175";
+        let command = commit_command(
+            &operation_record(Some(full)),
+            &attribution_with(Some("codex-approver"), Some(full)),
+            "panos-admin",
+        );
+
+        assert!(
+            command.contains("approved-by=codex-approver"),
+            "the approver must be in the command sent to PAN-OS: {command}"
+        );
+        assert!(
+            command.contains("change-set=86324b20a3ecbfde"),
+            "the change set must be in the command sent to PAN-OS: {command}"
+        );
+        assert!(
+            command.contains("<member>panos-admin</member>"),
+            "the partial-commit admin must survive: {command}"
+        );
+    }
+
+    /// A token name carrying XML metacharacters cannot escape the element.
+    ///
+    /// Token names are operator-supplied and reach the description verbatim. An
+    /// unescaped `<` would close `<description>` and inject into the commit
+    /// command itself.
+    #[test]
+    fn commit_command_escapes_xml_metacharacters_in_a_principal() {
+        let mut attribution = attribution_with(None, None);
+        attribution.principal = mecmcp_audit::Principal::Token("</description><evil>x".to_owned());
+
+        let command = commit_command(&operation_record(None), &attribution, "admin");
+
+        assert!(
+            !command.contains("<evil>"),
+            "a principal must not be able to inject an element: {command}"
+        );
+        assert_eq!(
+            command.matches("</description>").count(),
+            1,
+            "exactly one description element may close: {command}"
+        );
+    }
 
     #[test]
     fn destructive_confirmation_and_element_policy_are_exact() {
