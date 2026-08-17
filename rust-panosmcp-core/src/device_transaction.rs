@@ -624,6 +624,8 @@ mod tests {
                 on_behalf_of: false,
                 provider: false,
             },
+            approver: None,
+            change_set_id: None,
         };
         let outcome = client
             .commit(&staged, &attribution, &CommitOptions::default())
@@ -681,6 +683,8 @@ mod tests {
                 on_behalf_of: false,
                 provider: false,
             },
+            approver: None,
+            change_set_id: None,
         };
         let outcome = client
             .commit(&staged, &attribution, &CommitOptions::default())
