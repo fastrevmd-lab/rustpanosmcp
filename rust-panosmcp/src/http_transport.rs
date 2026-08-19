@@ -1,14 +1,14 @@
 //! Bearer-protected MCP Streamable HTTP transport using mecmcp-transport 0.9.0.
 
 use crate::{PanosMcpServer, RuntimeState};
-use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant};
+use mecmcp_auth::{BearerSyntax, CallerCtx};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy, HttpServeError,
     HttpTransportBuildError, HttpTransportConfig, LimitsConfig, MalformedArgumentsPolicy,
     ServePlan, TargetField, ToolScopePreflight, TransportIdentity, build_streamable_http_router,
     loopback_origins, serve_router,
 };
-use rust_panosmcp_auth::MUTATION_TOOLS;
+use rust_panosmcp_auth::{MUTATION_TOOLS, MutationGrant};
 use std::{net::SocketAddr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -87,13 +87,15 @@ pub fn build_router(
             let snapshot = auth_runtime.snapshot();
             let store = snapshot.tokens.as_ref()?;
             let entry = store.authenticate(candidate)?;
-            // mecmcp-transport inserts CallerCtx<NoGrant> into extensions.
-            // Manually construct from TokenEntry<MutationGrant> with grant: None.
-            Some(CallerCtx::<NoGrant> {
+            // The boundary inserts whatever grant type this closure produces,
+            // so the context is built over `MutationGrant` and carries the
+            // entry's grant. Dropping it here left every change-set write
+            // refused as ungranted (#116).
+            Some(CallerCtx::<MutationGrant> {
                 token_name: entry.name.clone(),
                 devices: entry.devices.clone(),
                 tools: entry.tools.clone(),
-                grant: None,
+                grant: entry.grant.clone(),
                 provider: entry.provider.clone(),
                 provider_tier: entry.provider_tier,
                 on_behalf_of: entry.on_behalf_of.clone(),
