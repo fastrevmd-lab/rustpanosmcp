@@ -231,22 +231,23 @@ impl PanosMcpServer {
     }
 
     fn caller(extensions: &Extensions) -> Option<CallerContext> {
-        // mecmcp-transport's bearer boundary inserts CallerCtx<NoGrant> into the
-        // http::request::Parts extensions. rmcp's Extensions carries Parts, so we
-        // must extract two levels deep: extensions → Parts → Parts.extensions → CallerCtx.
-        // Reading only the outer map returns None, which would fail open.
+        // The bearer boundary inserts the CallerCtx the authenticator built,
+        // which is typed over `MutationGrant` so the grant survives the hop.
+        // rmcp's Extensions carries Parts, so we must extract two levels deep:
+        // extensions → Parts → Parts.extensions → CallerCtx. Reading only the
+        // outer map returns None, which would fail open.
         extensions
             .get::<http::request::Parts>()
             .and_then(|parts| {
                 parts
                     .extensions
-                    .get::<mecmcp_auth::CallerCtx<mecmcp_auth::NoGrant>>()
+                    .get::<mecmcp_auth::CallerCtx<rust_panosmcp_auth::MutationGrant>>()
             })
             .map(|ctx| rust_panosmcp_auth::CallerContext {
                 token_name: ctx.token_name.clone(),
                 devices: ctx.devices.clone(),
                 tools: ctx.tools.clone(),
-                grant: None,
+                grant: ctx.grant.clone(),
                 provider: ctx.provider.clone(),
                 provider_tier: ctx.provider_tier,
                 on_behalf_of: ctx.on_behalf_of.clone(),
