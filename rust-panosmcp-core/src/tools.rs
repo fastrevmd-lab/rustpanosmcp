@@ -32,6 +32,15 @@ pub struct PanosService {
     inventory: Inventory,
     clients: Arc<BTreeMap<String, Arc<PanosClient>>>,
     pub(crate) mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
+    /// SSDF evidence recorder, when the pipeline is configured.
+    ///
+    /// Held alongside the coordinator because PAN-OS commits through its own
+    /// worker rather than `ChangesetCoordinator::commit_operation`, and that
+    /// call is the only coordinator path emitting apply intent and the receipt.
+    /// Proposal and approval come from the coordinator; execution comes from
+    /// here. **Both must share one recorder** -- a different one splits a single
+    /// change across two chains, and both halves verify as valid chains.
+    pub(crate) evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     policy: Option<Arc<Policy<Action>>>,
     pub(crate) allow_plane_owned_writes: bool,
 }
@@ -95,12 +104,12 @@ impl PanosService {
         .map_err(crate::mutation::coord_error)?;
         // `reload` rebuilds from `previous.mutations`, so the recorder attached
         // here survives a SIGHUP without any further plumbing.
-        if let Some(recorder) = evidence {
+        if let Some(recorder) = evidence.clone() {
             coordinator = coordinator.with_evidence(recorder);
         }
         let coordinator = Arc::new(coordinator);
 
-        Self::build(inventory, coordinator, allow_plane_owned_writes)
+        Self::build(inventory, coordinator, evidence, allow_plane_owned_writes)
     }
 
     /// Rebuild clients while retaining in-flight mutation state across atomic reload.
@@ -108,6 +117,9 @@ impl PanosService {
         Self::build(
             inventory,
             previous.mutations.clone(),
+            // The same recorder the previous service used: reload must not
+            // start a second chain for one writer.
+            previous.evidence.clone(),
             previous.allow_plane_owned_writes,
         )
     }
@@ -115,6 +127,7 @@ impl PanosService {
     fn build(
         inventory: Inventory,
         mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
+        evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
         allow_plane_owned_writes: bool,
     ) -> Result<Self> {
         let mut clients = BTreeMap::new();
@@ -130,6 +143,7 @@ impl PanosService {
             inventory,
             clients: Arc::new(clients),
             mutations,
+            evidence,
             policy: policy.map(Arc::new),
             allow_plane_owned_writes,
         })

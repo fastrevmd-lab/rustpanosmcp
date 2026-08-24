@@ -1377,12 +1377,22 @@ impl PanosService {
         }
 
         let coordinator = self.mutations.clone();
+        let evidence = self.evidence.clone();
         let owner = owner.to_owned();
         let operation_id = record.id.clone();
         let (sender, receiver) = oneshot::channel();
         tokio::spawn(async move {
             let result =
-                commit_worker(coordinator, client, policy.admin, record, &owner, attribution).await;
+                commit_worker(
+                coordinator,
+                client,
+                policy.admin,
+                record,
+                &owner,
+                attribution,
+                evidence,
+            )
+            .await;
             let _ = sender.send(result);
         });
         tokio::select! {
@@ -1636,11 +1646,32 @@ async fn commit_worker(
     mut record: OperationRecord,
     _owner: &str,
     attribution: Attribution,
+    evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
 ) -> Result<CommitOutput> {
     let guard = coordinator
         .device_guard(&client.mutation_lock_key(), &CancellationToken::new())
         .await?;
     let command = commit_command(&record, &attribution, &admin);
+
+    // PAN-OS commits here rather than through `ChangesetCoordinator::commit_operation`,
+    // which is the only coordinator path that emits execution evidence -- so
+    // without this the trail showed a proposal and an approval and nothing about
+    // the commit that followed. Written before the device is touched, and
+    // refused if it cannot be persisted: a firewall committed with no record
+    // that anyone tried is the state this chain exists to rule out.
+    if let Some(recorder) = &evidence
+        && let Err(error) = recorder.apply_intent(
+            &attribution.request_id.to_string(),
+            &record.id,
+            &record.device,
+            &attribution.principal.to_string(),
+        )
+    {
+        return Err(PanosMcpError::Configuration(format!(
+            "commit refused: the apply-intent evidence record could not be persisted \
+             ({error}); the operation is still staged"
+        )));
+    }
     let mut result: Result<CommitOutput> = async {
         let response = client
             .post_fields(
@@ -1701,6 +1732,32 @@ async fn commit_worker(
         record.state = LifecycleState::Indeterminate;
         record.details = Some(error.to_string());
     }
+    // PAN-OS answered. Emitted before the state write, because that write can
+    // fail and the receipt describes what the device did, which local
+    // persistence cannot retract. `Indeterminate` gets no receipt at all: the
+    // commit may have landed, and recording a failure would state it did not.
+    if let Some(recorder) = &evidence {
+        if record.state == LifecycleState::Indeterminate {
+            tracing::error!(
+                operation_id = %record.id,
+                "the PAN-OS commit outcome is indeterminate; no result receipt is emitted"
+            );
+        } else if let Err(error) = recorder.result_receipt(
+            &attribution.request_id.to_string(),
+            &record.id,
+            &record.device,
+            &attribution.principal.to_string(),
+            record.state == LifecycleState::Committed,
+            record.details.as_deref().unwrap_or(""),
+        ) {
+            tracing::error!(
+                %error,
+                operation_id = %record.id,
+                "PAN-OS answered but the result receipt could not be persisted"
+            );
+        }
+    }
+
     coordinator.update(record.clone()).await?;
     result
 }
