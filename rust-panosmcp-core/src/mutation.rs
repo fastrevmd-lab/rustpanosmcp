@@ -1685,11 +1685,26 @@ async fn commit_worker(
         // it -- which is also what the error message claims.
         record.state = LifecycleState::Validated;
         record.details = Some(format!("apply-intent evidence not persisted: {error}"));
-        let _ = coordinator.update(record.clone()).await;
-        return Err(PanosMcpError::Configuration(format!(
-            "commit refused: the apply-intent evidence record could not be persisted \
-             ({error}); the operation is still staged and can be retried"
-        )));
+        // Whether the restore itself worked decides what the caller is told.
+        // Swallowing its failure would repeat the mistake one level down:
+        // claiming the operation is retryable while it sits in `Committing`,
+        // holding the candidate and the configuration lock.
+        return Err(PanosMcpError::Configuration(
+            match coordinator.update(record.clone()).await {
+                Ok(()) => format!(
+                    "commit refused: the apply-intent evidence record could not be \
+                     persisted ({error}); the operation is still staged and can be \
+                     retried"
+                ),
+                Err(restore_error) => format!(
+                    "commit refused: the apply-intent evidence record could not be \
+                     persisted ({error}), and the operation could not be returned to a \
+                     retryable state ({restore_error}); it is stranded in `committing` \
+                     with its candidate and configuration lock held, and needs manual \
+                     reconciliation"
+                ),
+            },
+        ));
     }
     let mut result: Result<CommitOutput> = async {
         let response = client
