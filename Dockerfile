@@ -3,7 +3,12 @@
 # Builder version is taken from rust-toolchain.toml (currently 1.97.0). The two
 # must stay in sync. Both image indexes are pinned and Dependabot proposes
 # digest refreshes; the explicit Debian generation prevents an unplanned ABI jump.
-FROM rust:1.97-slim-bookworm@sha256:37cb5d16e04dcf484fdf071dfb132ce95d9b449d75ac12df3b7031b6f7023675 AS builder
+# Full patch version, deliberately. `rust:1.97-slim-bookworm` is a floating
+# tag: it already points at 1.97.1 while rust-toolchain.toml declares 1.97.0,
+# so a digest-only Dependabot refresh moves the compiler across a point
+# release while the CI sync check still reports a match. Digest resolved from
+# the registry 2026-08-24.
+FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS builder
 
 WORKDIR /src
 ENV CARGO_INCREMENTAL=0

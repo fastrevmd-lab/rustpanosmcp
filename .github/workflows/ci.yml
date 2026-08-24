@@ -32,14 +32,23 @@ jobs:
           TOOLCHAIN_FILE=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
           DOCKERFILE_VERSION=$(sed -n 's/^FROM rust:\([0-9.]*\)-.*/\1/p' Dockerfile)
           echo "rust-toolchain.toml: $TOOLCHAIN_FILE"
-          echo "Dockerfile: $DOCKERFILE_VERSION"
-          # Normalize versions for comparison (strip trailing .0 from toolchain file if present)
-          TOOLCHAIN_NORM="${TOOLCHAIN_FILE%.0}"
-          if [[ "$TOOLCHAIN_NORM" != "$DOCKERFILE_VERSION" ]]; then
-            echo "ERROR: Toolchain versions do not match"
+          echo "Dockerfile:          $DOCKERFILE_VERSION"
+          # Both must carry a full X.Y.Z. A floating minor tag such as
+          # `rust:1.97-slim-bookworm` lets a digest-only Dependabot refresh move the
+          # builder from 1.97.0 to 1.97.1 while both strings still read "1.97" and
+          # "1.97.0" — which a normalizing comparison would call a match. That had
+          # already happened before this check was tightened.
+          for pair in "rust-toolchain.toml:$TOOLCHAIN_FILE" "Dockerfile:$DOCKERFILE_VERSION"; do
+            if [[ ! "${pair#*:}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: ${pair%%:*} must pin a full X.Y.Z version, got '${pair#*:}'"
+              exit 1
+            fi
+          done
+          if [[ "$TOOLCHAIN_FILE" != "$DOCKERFILE_VERSION" ]]; then
+            echo "ERROR: toolchain versions do not match"
             exit 1
           fi
-          echo "Toolchain versions match: $TOOLCHAIN_FILE = $DOCKERFILE_VERSION"
+          echo "Toolchain versions match exactly: $TOOLCHAIN_FILE"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
