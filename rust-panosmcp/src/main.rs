@@ -136,7 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.lab_mode,
         Some(cli.approval_timeout_secs),
         cli.allow_plane_owned_writes,
-        evidence.as_ref().map(mecmcp_audit::EvidenceService::recorder),
+        evidence
+            .as_ref()
+            .map(mecmcp_audit::EvidenceService::recorder),
     )?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
