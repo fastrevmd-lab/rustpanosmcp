@@ -1,0 +1,37 @@
+# Example systemd drop-in for SSDF evidence pipeline configuration.
+#
+# This file demonstrates how to enable SSDF audit evidence delivery to a
+# site-specific evidence endpoint. Place this (or a modified version) at:
+#
+#   /etc/systemd/system/rust-panosmcp.service.d/ssdf-audit.conf
+#
+# and run `systemctl daemon-reload && systemctl restart rust-panosmcp.service`.
+#
+# The SSDF audit endpoint, credential files, and CA cert are site-specific and
+# must be created and secured manually before enabling this drop-in. See
+# OPERATIONS.md for credential generation and verification procedures.
+
+[Service]
+# Override ExecStart to add SSDF evidence flags to the shipped defaults.
+# systemd requires clearing ExecStart= before setting a new value.
+ExecStart=
+ExecStart=/usr/local/bin/rust-panosmcp \
+    --device-mapping /etc/rust-panosmcp/devices.json \
+    --transport streamable-http \
+    --host 127.0.0.1 \
+    --port 30031 \
+    --tokens-file /var/lib/rust-panosmcp/tokens.json \
+    --state-file /var/lib/rust-panosmcp/mutation-state.json \
+    --audit-format json \
+    --audit-log-file /var/lib/rust-panosmcp/audit.jsonl \
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rust-panosmcp/audit-hmac.key \
+    --ssdf-audit-endpoint https://192.168.1.151:8443 \
+    --ssdf-audit-server-id prod-labmode-panos \
+    --ssdf-audit-password-file /etc/rust-panosmcp/ssdf-audit.pw \
+    --ssdf-audit-verify-password-file /etc/rust-panosmcp/ssdf-audit-verify.pw \
+    --ssdf-audit-ca-file /etc/rust-panosmcp/ssdf-ca.crt \
+    --ssdf-audit-outbox /var/lib/rust-panosmcp/evidence-outbox.ndjson \
+    --ssdf-audit-ledger /var/lib/rust-panosmcp/evidence-ledger.ndjson \
+    --ssdf-audit-interval-secs 30
