@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-# Both image indexes are pinned. Dependabot is configured to propose digest
-# refreshes; the explicit Debian generation prevents an unplanned ABI jump.
-FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS builder
+# Builder version is taken from rust-toolchain.toml (currently 1.97.0). The two
+# must stay in sync. Both image indexes are pinned and Dependabot proposes
+# digest refreshes; the explicit Debian generation prevents an unplanned ABI jump.
+FROM rust:1.97-slim-bookworm@sha256:37cb5d16e04dcf484fdf071dfb132ce95d9b449d75ac12df3b7031b6f7023675 AS builder
 
 WORKDIR /src
 ENV CARGO_INCREMENTAL=0
@@ -18,7 +19,7 @@ COPY rust-panosmcp-core/src rust-panosmcp-core/src
 
 RUN cargo build --release --locked --bin rust-panosmcp
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
 
 ARG VERSION=0.2.0
 ARG VCS_REF=unknown
