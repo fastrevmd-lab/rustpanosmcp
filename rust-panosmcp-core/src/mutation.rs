@@ -1377,12 +1377,22 @@ impl PanosService {
         }
 
         let coordinator = self.mutations.clone();
+        let evidence = self.evidence.clone();
         let owner = owner.to_owned();
         let operation_id = record.id.clone();
         let (sender, receiver) = oneshot::channel();
         tokio::spawn(async move {
             let result =
-                commit_worker(coordinator, client, policy.admin, record, &owner, attribution).await;
+                commit_worker(
+                coordinator,
+                client,
+                policy.admin,
+                record,
+                &owner,
+                attribution,
+                evidence,
+            )
+            .await;
             let _ = sender.send(result);
         });
         tokio::select! {
@@ -1636,11 +1646,77 @@ async fn commit_worker(
     mut record: OperationRecord,
     _owner: &str,
     attribution: Attribution,
+    evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
 ) -> Result<CommitOutput> {
     let guard = coordinator
         .device_guard(&client.mutation_lock_key(), &CancellationToken::new())
         .await?;
     let command = commit_command(&record, &attribution, &admin);
+
+    // PAN-OS commits here rather than through `ChangesetCoordinator::commit_operation`,
+    // which is the only coordinator path that emits execution evidence -- so
+    // without this the trail showed a proposal and an approval and nothing about
+    // the commit that followed. Written before the device is touched, and
+    // refused if it cannot be persisted: a firewall committed with no record
+    // that anyone tried is the state this chain exists to rule out.
+    // The approved change set, not the operation. `apply_panos_change_set`
+    // mints a fresh operation id, while the approval and its digest are keyed
+    // by `change_set_id` -- writing execution records under the operation id
+    // leaves an auditor unable to join the commit to the digest that was
+    // approved. Standalone operations have no change set, so the operation id
+    // is the fallback there.
+    let evidence_change_set = record
+        .change_set_id
+        .clone()
+        .unwrap_or_else(|| record.id.clone());
+
+    if let Some(recorder) = &evidence
+        && let Err(error) = recorder.apply_intent(
+            &attribution.request_id.to_string(),
+            &evidence_change_set,
+            &record.device,
+            &attribution.principal.to_string(),
+        )
+    {
+        // `commit_candidate` persisted `Committing` before spawning this
+        // worker. Returning without undoing that strands the operation: retry
+        // requires `Validated`, discard refuses `Committing`, and the candidate
+        // and configuration lock stay held. Put it back where a retry can find
+        // it -- which is also what the error message claims.
+        record.state = LifecycleState::Validated;
+        record.details = Some(format!("apply-intent evidence not persisted: {error}"));
+        // Whether the restore itself worked decides what the caller is told.
+        // Swallowing its failure would repeat the mistake one level down:
+        // claiming the operation is retryable while it sits in `Committing`,
+        // holding the candidate and the configuration lock.
+        return Err(PanosMcpError::Configuration(
+            match coordinator.update(record.clone()).await {
+                Ok(()) => format!(
+                    "commit refused: the apply-intent evidence record could not be \
+                     persisted ({error}); the operation is still staged and can be \
+                     retried"
+                ),
+                Err(restore_error) => {
+                    // Name only what is actually held. Telling an operator a
+                    // configuration lock needs releasing when the deployment
+                    // runs lock-free sends them after something that does not
+                    // exist -- the same inaccurate-state reporting this whole
+                    // path exists to stop.
+                    let held = if record.config_lock_held {
+                        "its candidate and configuration lock held"
+                    } else {
+                        "its candidate held"
+                    };
+                    format!(
+                        "commit refused: the apply-intent evidence record could not be \
+                         persisted ({error}), and the operation could not be returned to \
+                         a retryable state ({restore_error}); it is stranded in \
+                         `committing` with {held}, and needs manual reconciliation"
+                    )
+                }
+            },
+        ));
+    }
     let mut result: Result<CommitOutput> = async {
         let response = client
             .post_fields(
@@ -1701,6 +1777,47 @@ async fn commit_worker(
         record.state = LifecycleState::Indeterminate;
         record.details = Some(error.to_string());
     }
+    // PAN-OS answered. Emitted before the state write, because that write can
+    // fail and the receipt describes what the device did, which local
+    // persistence cannot retract.
+    //
+    // Keyed on the **job outcome**, not the lifecycle state. A commit that
+    // PAN-OS reported as successful and whose *lock release* then failed is
+    // marked `Indeterminate` above -- correctly, for reconciliation -- but the
+    // device action is known, and suppressing the receipt there would leave the
+    // chain at apply intent for something PAN-OS proved. Only an unknown job
+    // outcome gets no receipt.
+    if let Some(recorder) = &evidence {
+        let job_outcome_known = commit_succeeded || result.is_ok();
+        if !job_outcome_known {
+            tracing::error!(
+                operation_id = %record.id,
+                "the PAN-OS commit outcome is unknown; no result receipt is emitted"
+            );
+        } else if let Err(error) = recorder.result_receipt(
+            &attribution.request_id.to_string(),
+            &evidence_change_set,
+            &record.device,
+            &attribution.principal.to_string(),
+            commit_succeeded,
+            // Only a failure's details are an error. A successful commit's
+            // details are warnings or a job note, and filing those as errors
+            // hands every warning-bearing success back to anyone filtering the
+            // trail for failures.
+            if commit_succeeded {
+                ""
+            } else {
+                record.details.as_deref().unwrap_or("")
+            },
+        ) {
+            tracing::error!(
+                %error,
+                operation_id = %record.id,
+                "PAN-OS answered but the result receipt could not be persisted"
+            );
+        }
+    }
+
     coordinator.update(record.clone()).await?;
     result
 }
