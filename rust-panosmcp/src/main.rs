@@ -12,6 +12,75 @@ use rust_panosmcp::{
 use rust_panosmcp_core::inventory::Inventory;
 use std::net::{IpAddr, SocketAddr};
 
+/// Scan for stale secret files and warn if any are found.
+///
+/// Checks both /etc/rust-panosmcp and /var/lib/rust-panosmcp for superseded
+/// tokens, retired TLS keys, and backup files. Warns but does not fail — a
+/// stale file should not block startup.
+fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    use mecmcp_auth::find_stale_secrets;
+    use std::path::Path;
+
+    // Live files that should not be flagged as stale.
+    let live_files = [
+        "devices.json",
+        "devices.json.example",
+        "audit-hmac.key",
+        "tokens.json",
+        "mutation-state.json",
+        "audit.jsonl",
+        "evidence-outbox.ndjson",
+        "evidence-ledger.ndjson",
+    ];
+
+    // Check /etc/rust-panosmcp
+    let config_dir = cli
+        .device_mapping
+        .parent()
+        .unwrap_or_else(|| Path::new("/etc/rust-panosmcp"));
+    let config_stale = find_stale_secrets(config_dir, &live_files);
+
+    // Check /var/lib/rust-panosmcp
+    let state_dir = cli
+        .state_file
+        .as_ref()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| Path::new("/var/lib/rust-panosmcp"));
+    let state_stale = find_stale_secrets(state_dir, &live_files);
+
+    // Also check for TLS key if configured
+    let mut tls_stale = Vec::new();
+    if let Some(ref key_path) = cli.tls_key
+        && let Some(tls_dir) = key_path.parent()
+    {
+        // Only flag keys in the same directory, not the key itself
+        let key_file_name = key_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("server.key");
+        let mut extended_live = live_files.to_vec();
+        extended_live.push(key_file_name);
+        tls_stale = find_stale_secrets(tls_dir, &extended_live);
+    }
+
+    let total_stale = config_stale.len() + state_stale.len() + tls_stale.len();
+    if total_stale > 0 {
+        tracing::warn!(
+            "found {} potentially stale secret file(s) - review and remove manually if unused:",
+            total_stale
+        );
+        for secret in config_stale.iter().chain(&state_stale).chain(&tls_stale) {
+            tracing::warn!("  {} ({:?})", secret.path.display(), secret.reason);
+        }
+        tracing::warn!(
+            "stale tokens may still hold revoked credentials; \
+             retired TLS keys can decrypt captured traffic"
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -146,6 +215,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         authenticated = runtime.snapshot().tokens.is_some(),
         "validated PAN-OS runtime"
     );
+
+    // Scan for stale secret files in config and state directories.
+    check_stale_secrets(&cli)?;
+
     spawn_reload_handler(runtime.clone())?;
 
     // Bound rather than propagated with `?`, so the evidence flush below runs

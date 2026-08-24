@@ -14,7 +14,12 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --host 127.0.0.1 \
     --port 30031 \
     --tokens-file /var/lib/rust-panosmcp/tokens.json \
-    --state-file /var/lib/rust-panosmcp/mutation-state.json
+    --state-file /var/lib/rust-panosmcp/mutation-state.json \
+    --audit-format json \
+    --audit-log-file /var/lib/rust-panosmcp/audit.jsonl \
+    --audit-journald \
+    --audit-redact devices=hmac \
+    --audit-hmac-key-file /etc/rust-panosmcp/audit-hmac.key
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -56,7 +61,19 @@ RemoveIPC=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
 SystemCallErrorNumber=EPERM
+
+# IP address restrictions: deny link-local and cloud metadata ranges.
+# The server must reach:
+# - PAN-OS devices (per /etc/rust-panosmcp/devices.json inventory)
+# - SSDF audit endpoint at 192.168.1.151:8443 (when configured via drop-in)
+# Link-local (169.254.0.0/16, fe80::/10) and AWS metadata (fd00:ec2::254/128)
+# are not used by any supported target.
+IPAddressAllow=localhost
+IPAddressDeny=169.254.0.0/16 fe80::/10 fd00:ec2::254/128
+IPAccounting=yes
+
 TasksMax=256
 LimitNOFILE=4096
 

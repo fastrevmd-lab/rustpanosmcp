@@ -114,13 +114,30 @@ if [[ -e "$PACKAGE_ROOT/config/devices.example.json" ]]; then
 fi
 
 # Create tokens.json only if absent, with strict 0600 permissions.
-if [[ ! -e "$CONFIG_DIR/tokens.json" ]]; then
-    printf '%s\n' '{"version":1,"tokens":[]}' >"$CONFIG_DIR/tokens.json"
-    chmod 0600 "$CONFIG_DIR/tokens.json"
+# The unit reads from /var/lib (ProtectSystem=strict makes /etc read-only).
+if [[ ! -e "$STATE_DIR/tokens.json" ]]; then
+    printf '%s\n' '{"version":1,"tokens":[]}' >"$STATE_DIR/tokens.json"
+    chmod 0600 "$STATE_DIR/tokens.json"
 fi
 
 # Ensure tokens.json has 0600 even on upgrade.
-chmod 0600 "$CONFIG_DIR/tokens.json"
+chmod 0600 "$STATE_DIR/tokens.json"
+
+# Warn if the old /etc location still exists — it may be a live file from
+# before the /var/lib migration, or it may be a leftover decoy. Do not delete:
+# if it holds live credentials, deletion is not the installer's call.
+if [[ -e "$CONFIG_DIR/tokens.json" ]]; then
+    echo ">> WARNING: Found tokens.json at $CONFIG_DIR/tokens.json"
+    echo ">> WARNING: The service reads from $STATE_DIR/tokens.json."
+    echo ">> WARNING: The /etc file may be stale. Review and remove manually if unused."
+fi
+
+# Create audit HMAC key if absent. Never regenerate on upgrade — a new key
+# breaks verification of every prior record.
+if [[ ! -e "$CONFIG_DIR/audit-hmac.key" ]]; then
+    head -c 32 /dev/urandom | base64 >"$CONFIG_DIR/audit-hmac.key"
+    chmod 0600 "$CONFIG_DIR/audit-hmac.key"
+fi
 
 # If devices.json exists, ensure it has 0600.
 if [[ -e "$CONFIG_DIR/devices.json" ]]; then
@@ -132,15 +149,17 @@ fi
 
 if [[ "$SKIP_USER_SETUP" != "1" ]]; then
     chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
-    if [[ -e "$CONFIG_DIR/tokens.json" ]]; then
-        chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/tokens.json"
-    fi
     if [[ -e "$CONFIG_DIR/devices.json" ]]; then
         chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/devices.json"
     fi
     if [[ -e "$CONFIG_DIR/devices.json.example" ]]; then
         chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/devices.json.example"
     fi
+    if [[ -e "$CONFIG_DIR/audit-hmac.key" ]]; then
+        chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR/audit-hmac.key"
+    fi
+    # The state dir holds tokens.json, mutation-state.json, evidence files.
+    # Recursive ownership for everything under /var/lib.
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR" 2>/dev/null || true
 fi
 
