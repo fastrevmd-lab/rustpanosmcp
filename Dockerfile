@@ -8,7 +8,7 @@
 # so a digest-only Dependabot refresh moves the compiler across a point
 # release while the CI sync check still reports a match. Digest resolved from
 # the registry 2026-08-24.
-FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS builder
+FROM rust:1.98.0-slim-bookworm@sha256:94e9efa4033213dbb70d4f665527e7ece3944ddb7ba1dd2e43f6fd6e2490af58 AS builder
 
 WORKDIR /src
 ENV CARGO_INCREMENTAL=0
