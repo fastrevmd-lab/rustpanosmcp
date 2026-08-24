@@ -27,6 +27,20 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Verify toolchain sync
+        run: |
+          TOOLCHAIN_FILE=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          DOCKERFILE_VERSION=$(sed -n 's/^FROM rust:\([0-9.]*\)-.*/\1/p' Dockerfile)
+          echo "rust-toolchain.toml: $TOOLCHAIN_FILE"
+          echo "Dockerfile: $DOCKERFILE_VERSION"
+          # Normalize versions for comparison (strip trailing .0 from toolchain file if present)
+          TOOLCHAIN_NORM="${TOOLCHAIN_FILE%.0}"
+          if [[ "$TOOLCHAIN_NORM" != "$DOCKERFILE_VERSION" ]]; then
+            echo "ERROR: Toolchain versions do not match"
+            exit 1
+          fi
+          echo "Toolchain versions match: $TOOLCHAIN_FILE = $DOCKERFILE_VERSION"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -48,6 +62,8 @@ jobs:
   msrv:
     name: Minimum supported Rust 1.88
     runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -57,6 +73,7 @@ jobs:
 
       - name: Check workspace at MSRV
         run: |
+          rustc --version
           cargo check --workspace --all-targets --locked
           cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
@@ -88,6 +105,8 @@ jobs:
   release-candidate:
     name: Release candidate packaging
     runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -96,7 +115,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Verify packaging policy
-        run: scripts/verify-packaging.sh
+        run: |
+          rustc --version
+          scripts/verify-packaging.sh
 
       - name: Verify and build reproducible archive
         env:
