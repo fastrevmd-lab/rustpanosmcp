@@ -1,50 +1,43 @@
 #!/usr/bin/env bash
-# Test that the stale secrets scan uses different live-file lists for /etc and /var/lib,
-# so a legacy /etc/rust-panosmcp/tokens.json is flagged while /var/lib/rust-panosmcp/tokens.json is not.
-# This was P2: the same live_files array was used for both, so tokens.json in /etc was never flagged.
-
+# The legacy /etc token store must be reported, and the configured store must not.
+#
+# History worth keeping: an earlier version of this test asserted that
+# `config_live_files` must NOT contain "tokens.json", on the theory that omitting
+# it would make find_stale_secrets flag the legacy store. It does not — that
+# helper only recognises backup suffixes, retired keys, and superseded files
+# matched by a live-name PREFIX, so a bare `tokens.json` matches nothing.
+# Omitting the name achieved no detection and additionally broke classification
+# of `tokens.json.pre-17`. The test also passed for the wrong reason: its grep
+# captured the array's declaration line rather than the multi-line array, so it
+# would have passed with the detection removed entirely.
+#
+# Detection is therefore explicit and path-based, and this test asserts the
+# behaviour rather than the shape of the source.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PACKAGE_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd -P)"
-MAIN_RS="$PACKAGE_ROOT/rust-panosmcp/src/main.rs"
+cd "$(dirname "$0")/../../.."
+SRC=rust-panosmcp/src/main.rs
 
-# Check that the code defines separate live file arrays
-if ! grep -q "config_live_files" "$MAIN_RS"; then
-    echo "FAIL: main.rs does not define config_live_files" >&2
-    exit 1
-fi
+fail() { echo "FAIL: $*" >&2; exit 1; }
 
-if ! grep -q "state_live_files" "$MAIN_RS"; then
-    echo "FAIL: main.rs does not define state_live_files" >&2
-    exit 1
-fi
+# 1. tokens.json must remain in the config live list, or prefix-based
+#    classification of tokens.json.pre-* is lost.
+awk '/let config_live_files/,/\];/' "$SRC" | grep -q '"tokens.json"' \
+    || fail 'config_live_files must contain "tokens.json" so tokens.json.pre-* is classified'
 
-# Check that config_live_files does NOT include tokens.json (legacy path should be flagged)
-# It's a single-line array after rustfmt
-CONFIG_LINE=$(grep 'let config_live_files = ' "$MAIN_RS")
-if echo "$CONFIG_LINE" | grep -q '"tokens.json"'; then
-    echo "FAIL: config_live_files includes tokens.json - legacy /etc path won't be flagged" >&2
-    echo "Line: $CONFIG_LINE" >&2
-    exit 1
-fi
+# 2. The live /var/lib store must also be excluded from stale reporting.
+awk '/let state_live_files/,/\];/' "$SRC" | grep -q '"tokens.json"' \
+    || fail 'state_live_files must contain "tokens.json"'
 
-# Check that state_live_files DOES include tokens.json (live path should not be flagged)
-STATE_ARRAY=$(sed -n '/let state_live_files = \[/,/\];/p' "$MAIN_RS")
-if ! echo "$STATE_ARRAY" | grep -q '"tokens.json"'; then
-    echo "FAIL: state_live_files does not include tokens.json" >&2
-    exit 1
-fi
+# 3. Explicit legacy detection must exist...
+grep -q 'let legacy_tokens = Path::new("/etc/rust-panosmcp/tokens.json")' "$SRC" \
+    || fail 'explicit legacy token store detection is missing'
 
-# Check that the two arrays are passed to different find_stale_secrets calls
-if ! grep -q 'find_stale_secrets(config_dir, &config_live_files)' "$MAIN_RS"; then
-    echo "FAIL: config scan does not use config_live_files" >&2
-    exit 1
-fi
+# 4. ...and must not fire when that path is the configured store, or the warning
+#    tells an operator to erase their live credentials.
+grep -q 'configured_is_legacy' "$SRC" \
+    || fail 'legacy warning must be suppressed when /etc is the configured store'
+grep -q '&& !configured_is_legacy' "$SRC" \
+    || fail 'legacy warning must be gated on !configured_is_legacy'
 
-if ! grep -q 'find_stale_secrets(state_dir, &state_live_files)' "$MAIN_RS"; then
-    echo "FAIL: state scan does not use state_live_files" >&2
-    exit 1
-fi
-
-echo "PASS: stale scan uses separate live-file lists, legacy /etc/tokens.json will be flagged"
+echo ">> stale scan legacy detection test passed"

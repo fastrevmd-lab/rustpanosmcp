@@ -83,13 +83,22 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // a copy left in /etc is a duplicated bearer-token secret on disk, and /etc
     // is read-only to the service under ProtectSystem=strict so it is not the
     // file being maintained.
+    // Only when it is NOT the store this process is actually using. A source or
+    // Phase 2 deployment may legitimately run with
+    // `--tokens-file /etc/rust-panosmcp/tokens.json`; warning there would tell
+    // an operator to securely erase their live credentials, and following the
+    // advice would leave the next start with no tokens at all. A warning that
+    // can destroy a working deployment is worse than the duplicate it reports.
     let legacy_tokens = Path::new("/etc/rust-panosmcp/tokens.json");
-    let legacy_present = legacy_tokens.is_file();
-    if legacy_present {
+    let configured_is_legacy = cli
+        .tokens_file
+        .as_deref()
+        .is_some_and(|p| p.as_os_str() == legacy_tokens.as_os_str());
+    if legacy_tokens.is_file() && !configured_is_legacy {
         tracing::warn!(
             path = %legacy_tokens.display(),
-            "legacy token store present; the service reads /var/lib/rust-panosmcp/tokens.json. \
-             Migrate deliberately and securely erase this copy — it may hold revoked credentials"
+            "legacy token store present and NOT the configured store; migrate deliberately \
+             and securely erase this copy — it may hold revoked credentials"
         );
     }
 
