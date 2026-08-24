@@ -1696,13 +1696,24 @@ async fn commit_worker(
                      persisted ({error}); the operation is still staged and can be \
                      retried"
                 ),
-                Err(restore_error) => format!(
-                    "commit refused: the apply-intent evidence record could not be \
-                     persisted ({error}), and the operation could not be returned to a \
-                     retryable state ({restore_error}); it is stranded in `committing` \
-                     with its candidate and configuration lock held, and needs manual \
-                     reconciliation"
-                ),
+                Err(restore_error) => {
+                    // Name only what is actually held. Telling an operator a
+                    // configuration lock needs releasing when the deployment
+                    // runs lock-free sends them after something that does not
+                    // exist -- the same inaccurate-state reporting this whole
+                    // path exists to stop.
+                    let held = if record.config_lock_held {
+                        "its candidate and configuration lock held"
+                    } else {
+                        "its candidate held"
+                    };
+                    format!(
+                        "commit refused: the apply-intent evidence record could not be \
+                         persisted ({error}), and the operation could not be returned to \
+                         a retryable state ({restore_error}); it is stranded in \
+                         `committing` with {held}, and needs manual reconciliation"
+                    )
+                }
             },
         ));
     }
