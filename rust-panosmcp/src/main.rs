@@ -22,9 +22,21 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
 
     // Live files in /etc/rust-panosmcp that should not be flagged as stale.
-    // tokens.json is deliberately excluded — it's a legacy path and should be
-    // migrated to /var/lib, so flag it if present.
-    let config_live_files = ["devices.json", "devices.json.example", "audit-hmac.key"];
+    //
+    // `tokens.json` IS listed here even though /etc is the legacy location. It has
+    // to be: find_stale_secrets classifies a superseded file by its live-name
+    // prefix, so dropping "tokens.json" would stop `tokens.json.pre-17` and friends
+    // being recognised — and it would NOT cause the bare legacy store to be
+    // reported, because the helper only knows backup suffixes, retired keys, and
+    // prefixed superseded files. A bare `tokens.json` matches none of those.
+    //
+    // The legacy store is therefore reported explicitly, below.
+    let config_live_files = [
+        "devices.json",
+        "devices.json.example",
+        "audit-hmac.key",
+        "tokens.json",
+    ];
 
     // Live files in /var/lib/rust-panosmcp that should not be flagged as stale.
     let state_live_files = [
@@ -64,6 +76,21 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let mut extended_live = config_live_files.to_vec();
         extended_live.push(key_file_name);
         tls_stale = find_stale_secrets(tls_dir, &extended_live);
+    }
+
+    // The legacy token store itself. find_stale_secrets cannot classify a bare
+    // live-named file, so detect it by path. #125 moved the store to /var/lib;
+    // a copy left in /etc is a duplicated bearer-token secret on disk, and /etc
+    // is read-only to the service under ProtectSystem=strict so it is not the
+    // file being maintained.
+    let legacy_tokens = Path::new("/etc/rust-panosmcp/tokens.json");
+    let legacy_present = legacy_tokens.is_file();
+    if legacy_present {
+        tracing::warn!(
+            path = %legacy_tokens.display(),
+            "legacy token store present; the service reads /var/lib/rust-panosmcp/tokens.json. \
+             Migrate deliberately and securely erase this copy — it may hold revoked credentials"
+        );
     }
 
     let total_stale = config_stale.len() + state_stale.len() + tls_stale.len();

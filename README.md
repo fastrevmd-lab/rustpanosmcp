@@ -66,8 +66,13 @@ sudo install -m 0644 packaging/systemd/rust-panosmcp.service /etc/systemd/system
 sudo systemd-sysusers
 sudo systemd-tmpfiles --create
 
-# Generate the HMAC key for audit redaction (required)
-sudo sh -c 'head -c 32 /dev/urandom | base64 > /etc/rust-panosmcp/audit-hmac.key'
+# Generate the HMAC key for audit redaction (required).
+# Guarded: NEVER overwrite an existing key. The key is what makes an HMAC-redacted
+# device identifier comparable across audit history, so replacing it silently
+# breaks correlation with every record already written. These steps are safe to
+# re-run during an upgrade only because of this guard.
+sudo sh -c '[ -f /etc/rust-panosmcp/audit-hmac.key ] ||
+    head -c 32 /dev/urandom | base64 > /etc/rust-panosmcp/audit-hmac.key'
 sudo chmod 0600 /etc/rust-panosmcp/audit-hmac.key
 sudo chown rust-panosmcp:rust-panosmcp /etc/rust-panosmcp/audit-hmac.key
 
