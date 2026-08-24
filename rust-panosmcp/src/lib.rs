@@ -56,7 +56,7 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
     ) -> Result<Self, RuntimeLoadError> {
-        Self::load_with_state(inventory_path, token_path, None, false, None, false)
+        Self::load_with_state(inventory_path, token_path, None, false, None, false, None)
     }
 
     /// Load runtime with an optional persistent private mutation-state file.
@@ -67,6 +67,7 @@ impl RuntimeState {
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
         allow_plane_owned_writes: bool,
+        evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
         let token_path = token_path.map(Path::to_path_buf);
@@ -74,10 +75,13 @@ impl RuntimeState {
             &inventory_path,
             token_path.as_deref(),
             None,
-            state_path,
-            lab_mode,
-            approval_timeout_secs,
-            allow_plane_owned_writes,
+            SnapshotOptions {
+                state_path: state_path.map(Path::to_path_buf),
+                lab_mode,
+                approval_timeout_secs,
+                allow_plane_owned_writes,
+                evidence,
+            },
         )?;
         Ok(Self {
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
@@ -117,16 +121,12 @@ impl RuntimeState {
             &self.inventory_path,
             self.token_path.as_ref().map(|path| path.as_path()),
             Some(&current.service),
-            None,
-            // Unused on this path: reload reuses the previous service's
-            // coordinator, so the lab-mode decision made at startup stands. A
+            // Every field is unused on this path: reload rebuilds from the
+            // previous service's coordinator, so lab mode, the break-glass
+            // posture and the evidence recorder all carry over from startup. A
             // SIGHUP must not be able to change whether two-person control
             // applies.
-            false,
-            None,
-            // Same for allow_plane_owned_writes: reloading reuses the previous
-            // service's value so a SIGHUP cannot change the break-glass posture.
-            false,
+            SnapshotOptions::default(),
         )?;
         self.current.store(Arc::new(replacement));
         Ok(())
@@ -145,15 +145,35 @@ impl RuntimeState {
     }
 }
 
+/// What a fresh snapshot needs beyond its paths.
+///
+/// Grouped rather than passed positionally: `lab_mode` and
+/// `allow_plane_owned_writes` are adjacent bools, and swapping them silently
+/// turns off two-person control while turning on writes to plane-owned devices
+/// -- the two things most worth not getting wrong by transposition.
+#[derive(Default)]
+struct SnapshotOptions {
+    state_path: Option<PathBuf>,
+    lab_mode: bool,
+    approval_timeout_secs: Option<u64>,
+    allow_plane_owned_writes: bool,
+    evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+}
+
 fn load_snapshot(
     inventory_path: &Path,
     token_path: Option<&Path>,
     previous_service: Option<&PanosService>,
-    state_path: Option<&Path>,
-    lab_mode: bool,
-    approval_timeout_secs: Option<u64>,
-    allow_plane_owned_writes: bool,
+    options: SnapshotOptions,
 ) -> Result<RuntimeSnapshot, RuntimeLoadError> {
+    let SnapshotOptions {
+        state_path,
+        lab_mode,
+        approval_timeout_secs,
+        allow_plane_owned_writes,
+        evidence,
+    } = options;
+    let state_path = state_path.as_deref();
     let inventory = Inventory::load(inventory_path)?;
     let service = Arc::new(match previous_service {
         Some(previous) => PanosService::reload(inventory, previous)?,
@@ -163,6 +183,7 @@ fn load_snapshot(
             lab_mode,
             approval_timeout_secs,
             allow_plane_owned_writes,
+            evidence,
         )?,
     });
     let tokens = token_path

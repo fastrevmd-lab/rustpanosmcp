@@ -51,7 +51,7 @@ impl PanosService {
         state_path: Option<&Path>,
         lab_mode: bool,
     ) -> Result<Self> {
-        Self::new_with_options(inventory, state_path, lab_mode, None, false)
+        Self::new_with_options(inventory, state_path, lab_mode, None, false, None)
     }
 
     /// As [`new_with_state`](Self::new_with_state), with an approval TTL override.
@@ -61,6 +61,7 @@ impl PanosService {
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
         allow_plane_owned_writes: bool,
+        evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self> {
         let limits = mecmcp_changeset::OperationLimits {
             max_operations: crate::mutation::MAX_OPERATIONS,
@@ -84,16 +85,20 @@ impl PanosService {
         // the coordinator apply it while loading, so memory and the state file are
         // written by one owner. The previous approach rewrote the file after
         // construction and left the two divergent (#72).
-        let coordinator = Arc::new(
-            mecmcp_changeset::ChangesetCoordinator::load_with_recovery(
-                state_path,
-                limits,
-                approval_ttl,
-                lab_mode,
-                mecmcp_changeset::StagedRecovery::Retain,
-            )
-            .map_err(crate::mutation::coord_error)?,
-        );
+        let mut coordinator = mecmcp_changeset::ChangesetCoordinator::load_with_recovery(
+            state_path,
+            limits,
+            approval_ttl,
+            lab_mode,
+            mecmcp_changeset::StagedRecovery::Retain,
+        )
+        .map_err(crate::mutation::coord_error)?;
+        // `reload` rebuilds from `previous.mutations`, so the recorder attached
+        // here survives a SIGHUP without any further plumbing.
+        if let Some(recorder) = evidence {
+            coordinator = coordinator.with_evidence(recorder);
+        }
+        let coordinator = Arc::new(coordinator);
 
         Self::build(inventory, coordinator, allow_plane_owned_writes)
     }
