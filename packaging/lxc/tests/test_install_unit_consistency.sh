@@ -34,10 +34,13 @@ UNIT_PATHS=$(grep -E '^\s*(ExecStart=|--[a-z-]+\s+/)' "$UNIT_FILE" \
 
 # Extract paths that install.sh creates, chmods, or chowns.
 # This captures lines like:
-#   printf ... >"$STATE_DIR/tokens.json"
+#   printf ... >"$STATE_DIR/tokens.json"  (actual redirect, not a message)
 #   chmod 0600 "$STATE_DIR/tokens.json"
 #   chown ... "$CONFIG_DIR/audit-hmac.key"
-INSTALL_PATHS=$(grep -E '(printf|chmod|chown|head.*>).*(\$STATE_DIR|\$CONFIG_DIR)' "$INSTALL_SCRIPT" \
+# Match only lines with actual file operations: chmod, chown, redirects (>"), or
+# head/base64 pipes. Exclude plain printf messages (no redirect).
+# shellcheck disable=SC2016  # We're matching literal $STATE_DIR in the script source
+INSTALL_PATHS=$(grep -E '(chmod|chown|>"\$|head.*\||base64 >\$)' "$INSTALL_SCRIPT" \
     | grep -oE '(\$STATE_DIR|\$CONFIG_DIR)/[a-z._-]+' \
     | sed 's|\$STATE_DIR|/var/lib/rust-panosmcp|g; s|\$CONFIG_DIR|/etc/rust-panosmcp|g' \
     | sort -u)

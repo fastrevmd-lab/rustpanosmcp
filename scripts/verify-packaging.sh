@@ -26,4 +26,12 @@ if grep -En '(^|[[:space:]])(curl|wget|apt-get|apk|dnf)([[:space:]]|$)' Dockerfi
     echo "runtime/container build contains an unapproved package-fetch command" >&2
     exit 1
 fi
+
+# Run the installer/unit consistency test to catch path mismatches.
+if [[ -x "$ROOT/packaging/lxc/tests/test_install_unit_consistency.sh" ]]; then
+    "$ROOT/packaging/lxc/tests/test_install_unit_consistency.sh"
+else
+    echo "WARN: install/unit consistency test not found or not executable" >&2
+fi
+
 echo "packaging policy checks passed"

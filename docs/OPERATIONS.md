@@ -51,6 +51,16 @@ install -o rust-panosmcp -g rust-panosmcp -m 0600 panos-api.key \
   /etc/rust-panosmcp/panos-api.key
 ```
 
+Generate the audit HMAC key, required for device-name redaction in audit logs.
+The packaged unit enables `--audit-redact devices=hmac` unconditionally and will
+not start without this file. Never regenerate the key on upgrade — a new key
+invalidates verification of every prior audit record.
+
+```bash
+head -c 32 /dev/urandom | base64 | install -o rust-panosmcp -g rust-panosmcp -m 0600 /dev/stdin \
+  /etc/rust-panosmcp/audit-hmac.key
+```
+
 Mint the initial read token as the service account so atomic rotations preserve
 ownership. Capture stdout directly into a secret manager:
 

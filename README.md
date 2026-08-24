@@ -62,14 +62,21 @@ sudo install -m 0644 packaging/systemd/rust-panosmcp.sysusers /usr/lib/sysusers.
 sudo install -m 0644 packaging/systemd/rust-panosmcp.tmpfiles /usr/lib/tmpfiles.d/rust-panosmcp.conf
 sudo install -m 0644 packaging/systemd/rust-panosmcp.service /etc/systemd/system/rust-panosmcp.service
 
-# Create the service user and directories, then start
+# Create the service user and directories
 sudo systemd-sysusers
 sudo systemd-tmpfiles --create
+
+# Generate the HMAC key for audit redaction (required)
+sudo sh -c 'head -c 32 /dev/urandom | base64 > /etc/rust-panosmcp/audit-hmac.key'
+sudo chmod 0600 /etc/rust-panosmcp/audit-hmac.key
+sudo chown rust-panosmcp:rust-panosmcp /etc/rust-panosmcp/audit-hmac.key
+
+# Start the service
 sudo systemctl daemon-reload
 sudo systemctl enable --now rust-panosmcp
 ```
 
-This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-panosmcp` (config, root-owned) and `/var/lib/rust-panosmcp` (state). The extracted archive includes configuration examples in `config/` — use `devices.example.json` and `tokens.example.json` as starting templates under `/etc/rust-panosmcp` before starting. See [packaging/systemd/](packaging/systemd/) for unit details.
+This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-panosmcp` (config, root-owned) and `/var/lib/rust-panosmcp` (state). The HMAC key at `/etc/rust-panosmcp/audit-hmac.key` is required for device-redaction in audit logs — the service will not start without it. The extracted archive includes configuration examples in `config/` — use `devices.example.json` and `tokens.example.json` as starting templates under `/etc/rust-panosmcp` before starting. See [packaging/systemd/](packaging/systemd/) for unit details.
 
 #### LXC (Debian 13)
 

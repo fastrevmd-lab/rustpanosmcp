@@ -21,11 +21,13 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     use mecmcp_auth::find_stale_secrets;
     use std::path::Path;
 
-    // Live files that should not be flagged as stale.
-    let live_files = [
-        "devices.json",
-        "devices.json.example",
-        "audit-hmac.key",
+    // Live files in /etc/rust-panosmcp that should not be flagged as stale.
+    // tokens.json is deliberately excluded — it's a legacy path and should be
+    // migrated to /var/lib, so flag it if present.
+    let config_live_files = ["devices.json", "devices.json.example", "audit-hmac.key"];
+
+    // Live files in /var/lib/rust-panosmcp that should not be flagged as stale.
+    let state_live_files = [
         "tokens.json",
         "mutation-state.json",
         "audit.jsonl",
@@ -38,7 +40,7 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .device_mapping
         .parent()
         .unwrap_or_else(|| Path::new("/etc/rust-panosmcp"));
-    let config_stale = find_stale_secrets(config_dir, &live_files);
+    let config_stale = find_stale_secrets(config_dir, &config_live_files);
 
     // Check /var/lib/rust-panosmcp
     let state_dir = cli
@@ -46,19 +48,20 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .and_then(|p| p.parent())
         .unwrap_or_else(|| Path::new("/var/lib/rust-panosmcp"));
-    let state_stale = find_stale_secrets(state_dir, &live_files);
+    let state_stale = find_stale_secrets(state_dir, &state_live_files);
 
     // Also check for TLS key if configured
     let mut tls_stale = Vec::new();
     if let Some(ref key_path) = cli.tls_key
         && let Some(tls_dir) = key_path.parent()
     {
-        // Only flag keys in the same directory, not the key itself
+        // Only flag keys in the same directory, not the key itself.
+        // TLS keys live under /etc, so use the config live list.
         let key_file_name = key_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("server.key");
-        let mut extended_live = live_files.to_vec();
+        let mut extended_live = config_live_files.to_vec();
         extended_live.push(key_file_name);
         tls_stale = find_stale_secrets(tls_dir, &extended_live);
     }

@@ -124,6 +124,11 @@ fi
 #
 # The file is never copied automatically — that would leave a duplicate secret
 # behind, which is exactly what the stale-secret scan exists to flag.
+#
+# For staged installs (SKIP_USER_SETUP=1), systemd-tmpfiles is skipped, so ensure
+# the state directory exists before writing to it.
+install -d -m 0700 "$STATE_DIR"
+
 if [[ ! -e "$STATE_DIR/tokens.json" ]]; then
     if [[ -e "$CONFIG_DIR/tokens.json" ]]; then
         printf '%s\n' ">> Not creating $STATE_DIR/tokens.json: a token store already exists at"
