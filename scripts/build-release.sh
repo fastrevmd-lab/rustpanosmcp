@@ -41,7 +41,8 @@ install -m 0644 docs/OPERATIONS.md docs/COMPATIBILITY.md docs/BENCHMARKS.md \
     docs/V0.2_CHANGE_SETS.md "$PKG/docs/"
 install -m 0644 packaging/systemd/rust-panosmcp.service \
     packaging/systemd/rust-panosmcp.sysusers \
-    packaging/systemd/rust-panosmcp.tmpfiles "$PKG/packaging/systemd/"
+    packaging/systemd/rust-panosmcp.tmpfiles \
+    packaging/systemd/ssdf-audit.conf.example "$PKG/packaging/systemd/"
 install -m 0755 packaging/lxc/install.sh "$PKG/packaging/lxc/install.sh"
 install -m 0644 config/devices.example.json \
     config/devices.mutation.example.json \

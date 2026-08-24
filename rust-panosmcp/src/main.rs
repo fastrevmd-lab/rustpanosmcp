@@ -12,6 +12,114 @@ use rust_panosmcp::{
 use rust_panosmcp_core::inventory::Inventory;
 use std::net::{IpAddr, SocketAddr};
 
+/// Scan for stale secret files and warn if any are found.
+///
+/// Checks both /etc/rust-panosmcp and /var/lib/rust-panosmcp for superseded
+/// tokens, retired TLS keys, and backup files. Warns but does not fail — a
+/// stale file should not block startup.
+fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    use mecmcp_auth::find_stale_secrets;
+    use std::path::Path;
+
+    // Live files in /etc/rust-panosmcp that should not be flagged as stale.
+    //
+    // `tokens.json` IS listed here even though /etc is the legacy location. It has
+    // to be: find_stale_secrets classifies a superseded file by its live-name
+    // prefix, so dropping "tokens.json" would stop `tokens.json.pre-17` and friends
+    // being recognised — and it would NOT cause the bare legacy store to be
+    // reported, because the helper only knows backup suffixes, retired keys, and
+    // prefixed superseded files. A bare `tokens.json` matches none of those.
+    //
+    // The legacy store is therefore reported explicitly, below.
+    let config_live_files = [
+        "devices.json",
+        "devices.json.example",
+        "audit-hmac.key",
+        "tokens.json",
+    ];
+
+    // Live files in /var/lib/rust-panosmcp that should not be flagged as stale.
+    let state_live_files = [
+        "tokens.json",
+        "mutation-state.json",
+        "audit.jsonl",
+        "evidence-outbox.ndjson",
+        "evidence-ledger.ndjson",
+    ];
+
+    // Check /etc/rust-panosmcp
+    let config_dir = cli
+        .device_mapping
+        .parent()
+        .unwrap_or_else(|| Path::new("/etc/rust-panosmcp"));
+    let config_stale = find_stale_secrets(config_dir, &config_live_files);
+
+    // Check /var/lib/rust-panosmcp
+    let state_dir = cli
+        .state_file
+        .as_ref()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| Path::new("/var/lib/rust-panosmcp"));
+    let state_stale = find_stale_secrets(state_dir, &state_live_files);
+
+    // Also check for TLS key if configured
+    let mut tls_stale = Vec::new();
+    if let Some(ref key_path) = cli.tls_key
+        && let Some(tls_dir) = key_path.parent()
+    {
+        // Only flag keys in the same directory, not the key itself.
+        // TLS keys live under /etc, so use the config live list.
+        let key_file_name = key_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("server.key");
+        let mut extended_live = config_live_files.to_vec();
+        extended_live.push(key_file_name);
+        tls_stale = find_stale_secrets(tls_dir, &extended_live);
+    }
+
+    // The legacy token store itself. find_stale_secrets cannot classify a bare
+    // live-named file, so detect it by path. #125 moved the store to /var/lib;
+    // a copy left in /etc is a duplicated bearer-token secret on disk, and /etc
+    // is read-only to the service under ProtectSystem=strict so it is not the
+    // file being maintained.
+    // Only when it is NOT the store this process is actually using. A source or
+    // Phase 2 deployment may legitimately run with
+    // `--tokens-file /etc/rust-panosmcp/tokens.json`; warning there would tell
+    // an operator to securely erase their live credentials, and following the
+    // advice would leave the next start with no tokens at all. A warning that
+    // can destroy a working deployment is worse than the duplicate it reports.
+    let legacy_tokens = Path::new("/etc/rust-panosmcp/tokens.json");
+    let configured_is_legacy = cli
+        .tokens_file
+        .as_deref()
+        .is_some_and(|p| p.as_os_str() == legacy_tokens.as_os_str());
+    if legacy_tokens.is_file() && !configured_is_legacy {
+        tracing::warn!(
+            path = %legacy_tokens.display(),
+            "legacy token store present and NOT the configured store; migrate deliberately \
+             and securely erase this copy — it may hold revoked credentials"
+        );
+    }
+
+    let total_stale = config_stale.len() + state_stale.len() + tls_stale.len();
+    if total_stale > 0 {
+        tracing::warn!(
+            "found {} potentially stale secret file(s) - review and remove manually if unused:",
+            total_stale
+        );
+        for secret in config_stale.iter().chain(&state_stale).chain(&tls_stale) {
+            tracing::warn!("  {} ({:?})", secret.path.display(), secret.reason);
+        }
+        tracing::warn!(
+            "stale tokens may still hold revoked credentials; \
+             retired TLS keys can decrypt captured traffic"
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -146,6 +254,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         authenticated = runtime.snapshot().tokens.is_some(),
         "validated PAN-OS runtime"
     );
+
+    // Scan for stale secret files in config and state directories.
+    check_stale_secrets(&cli)?;
+
     spawn_reload_handler(runtime.clone())?;
 
     // Bound rather than propagated with `?`, so the evidence flush below runs
