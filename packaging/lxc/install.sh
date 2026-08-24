@@ -115,9 +115,26 @@ fi
 
 # Create tokens.json only if absent, with strict 0600 permissions.
 # The unit reads from /var/lib (ProtectSystem=strict makes /etc read-only).
+# tokens.json moved from /etc/rust-panosmcp to /var/lib/rust-panosmcp (#125).
+#
+# Create an empty store ONLY when no legacy store exists. The runtime prefers an
+# existing primary, so writing an empty file here while the live tokens are still
+# at "$CONFIG_DIR/tokens.json" would shadow them: the service starts and rejects every
+# existing bearer token. A silent auth wipe on upgrade is worse than a refusal.
+#
+# The file is never copied automatically — that would leave a duplicate secret
+# behind, which is exactly what the stale-secret scan exists to flag.
 if [[ ! -e "$STATE_DIR/tokens.json" ]]; then
-    printf '%s\n' '{"version":1,"tokens":[]}' >"$STATE_DIR/tokens.json"
-    chmod 0600 "$STATE_DIR/tokens.json"
+    if [[ -e "$CONFIG_DIR/tokens.json" ]]; then
+        printf '%s\n' ">> Not creating $STATE_DIR/tokens.json: a token store already exists at"
+        printf '%s\n' ">> $CONFIG_DIR/tokens.json. The server reads it via the legacy fallback and warns."
+        printf '%s\n' ">> Migrate it deliberately, then remove the old copy:"
+        printf '%s\n' ">>   install -m 0600 -o $SERVICE_USER -g $SERVICE_GROUP $CONFIG_DIR/tokens.json $STATE_DIR/tokens.json"
+        printf '%s\n' ">>   rm $CONFIG_DIR/tokens.json"
+    else
+        printf '%s\n' '{"version":1,"tokens":[]}' >"$STATE_DIR/tokens.json"
+        chmod 0600 "$STATE_DIR/tokens.json"
+    fi
 fi
 
 # Ensure tokens.json has 0600 even on upgrade.
