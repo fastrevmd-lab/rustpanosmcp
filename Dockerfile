@@ -18,7 +18,7 @@ COPY rust-panosmcp-core/src rust-panosmcp-core/src
 
 RUN cargo build --release --locked --bin rust-panosmcp
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512
 
 ARG VERSION=0.2.0
 ARG VCS_REF=unknown
