@@ -166,6 +166,8 @@ if [[ "$INSTALL_ROOT" == "/" && "$SKIP_RUNTIME_DEPS" != "1" ]]; then
             DEBIAN_FRONTEND=noninteractive apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 curl ca-certificates
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
         else
             # Not fatal: the server itself runs fine without curl. Only the
             # documented verification step needs it.

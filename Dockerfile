@@ -1,8 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
-# Both image indexes are pinned. Dependabot is configured to propose digest
-# refreshes; the explicit Debian generation prevents an unplanned ABI jump.
-FROM rust:1.88.0-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS builder
+# Builder version is taken from rust-toolchain.toml (currently 1.97.0). The two
+# must stay in sync. Both image indexes are pinned and Dependabot proposes
+# digest refreshes; the explicit Debian generation prevents an unplanned ABI jump.
+# Full patch version, deliberately. `rust:1.97-slim-bookworm` is a floating
+# tag: it already points at 1.97.1 while rust-toolchain.toml declares 1.97.0,
+# so a digest-only Dependabot refresh moves the compiler across a point
+# release while the CI sync check still reports a match. Digest resolved from
+# the registry 2026-08-24.
+FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS builder
 
 WORKDIR /src
 ENV CARGO_INCREMENTAL=0
@@ -18,6 +24,10 @@ COPY rust-panosmcp-core/src rust-panosmcp-core/src
 
 RUN cargo build --release --locked --bin rust-panosmcp
 
+# Runtime base digest verified against registry on 2026-08-24.
+# Digests have no version ordering and must be validated by resolving the tag
+# against the registry (docker pull gcr.io/distroless/cc-debian13:nonroot),
+# never by comparing hashes or by matching sibling repos.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512
 
 ARG VERSION=0.2.0

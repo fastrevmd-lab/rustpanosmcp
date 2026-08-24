@@ -27,6 +27,29 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Verify toolchain sync
+        run: |
+          TOOLCHAIN_FILE=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          DOCKERFILE_VERSION=$(sed -n 's/^FROM rust:\([0-9.]*\)-.*/\1/p' Dockerfile)
+          echo "rust-toolchain.toml: $TOOLCHAIN_FILE"
+          echo "Dockerfile:          $DOCKERFILE_VERSION"
+          # Both must carry a full X.Y.Z. A floating minor tag such as
+          # `rust:1.97-slim-bookworm` lets a digest-only Dependabot refresh move the
+          # builder from 1.97.0 to 1.97.1 while both strings still read "1.97" and
+          # "1.97.0" — which a normalizing comparison would call a match. That had
+          # already happened before this check was tightened.
+          for pair in "rust-toolchain.toml:$TOOLCHAIN_FILE" "Dockerfile:$DOCKERFILE_VERSION"; do
+            if [[ ! "${pair#*:}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: ${pair%%:*} must pin a full X.Y.Z version, got '${pair#*:}'"
+              exit 1
+            fi
+          done
+          if [[ "$TOOLCHAIN_FILE" != "$DOCKERFILE_VERSION" ]]; then
+            echo "ERROR: toolchain versions do not match"
+            exit 1
+          fi
+          echo "Toolchain versions match exactly: $TOOLCHAIN_FILE"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -48,6 +71,8 @@ jobs:
   msrv:
     name: Minimum supported Rust 1.88
     runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -57,6 +82,7 @@ jobs:
 
       - name: Check workspace at MSRV
         run: |
+          rustc --version
           cargo check --workspace --all-targets --locked
           cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
@@ -88,6 +114,8 @@ jobs:
   release-candidate:
     name: Release candidate packaging
     runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -96,7 +124,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Verify packaging policy
-        run: scripts/verify-packaging.sh
+        run: |
+          rustc --version
+          scripts/verify-packaging.sh
 
       - name: Verify and build reproducible archive
         env:
