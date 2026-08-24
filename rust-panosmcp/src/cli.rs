@@ -155,6 +155,10 @@ pub struct Cli {
     /// HMAC key file for audit redaction (required if audit-redact requests hmac).
     #[arg(long)]
     pub audit_hmac_key_file: Option<PathBuf>,
+
+    /// SSDF evidence pipeline. Inert unless `--ssdf-audit-endpoint` is given.
+    #[command(flatten)]
+    pub evidence: mecmcp_runtime::cli::EvidenceArgs,
 }
 
 /// Top-level management commands.

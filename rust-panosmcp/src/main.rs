@@ -104,6 +104,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
+    // Built before the runtime because the coordinator inside it takes the
+    // recorder, and started eagerly so a misconfiguration stops the server here
+    // rather than at the first change.
+    let evidence = match cli.evidence.into_config() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                server_id = %config.server_id,
+                run_id = %config.run_id,
+                "SSDF evidence pipeline enabled"
+            );
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let transport = std::sync::Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    cli.evidence.ca_file(),
+                    provider,
+                )?,
+            );
+            Some(mecmcp_audit::EvidenceService::start_with_transport(
+                config, transport,
+            )?)
+        }
+        Ok(None) => None,
+        Err(error) => return Err(format!("SSDF evidence configuration: {error}").into()),
+    };
+
     let runtime = RuntimeState::load_with_state(
         &cli.device_mapping,
         tokens,
@@ -111,6 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.lab_mode,
         Some(cli.approval_timeout_secs),
         cli.allow_plane_owned_writes,
+        evidence
+            .as_ref()
+            .map(mecmcp_audit::EvidenceService::recorder),
     )?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
@@ -120,44 +148,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     spawn_reload_handler(runtime.clone())?;
 
-    match cli.transport {
-        Transport::Stdio => {
-            let service = PanosMcpServer::from_runtime(runtime)
-                .serve((tokio::io::stdin(), tokio::io::stdout()))
-                .await?;
-            service.waiting().await?;
+    // Bound rather than propagated with `?`, so the evidence flush below runs
+    // whichever way serving ended. `EvidenceService::Drop` deliberately does not
+    // spool -- a Drop performing network I/O turns teardown into an
+    // unpredictable stall -- so returning the error directly would lose every
+    // proposal and approval the recorder still held, on exactly the controlled
+    // failure the trail exists to describe.
+    let served: Result<(), Box<dyn std::error::Error>> = async {
+        match cli.transport {
+            Transport::Stdio => {
+                let service = PanosMcpServer::from_runtime(runtime)
+                    .serve((tokio::io::stdin(), tokio::io::stdout()))
+                    .await?;
+                service.waiting().await?;
+            }
+            Transport::StreamableHttp => {
+                let ip: IpAddr = cli.host.parse()?;
+                let address = SocketAddr::new(ip, cli.port);
+                let listener_tls = match (cli.tls_cert.as_deref(), cli.tls_key.as_deref()) {
+                    (Some(cert), Some(key)) => {
+                        let provider =
+                            std::sync::Arc::new(rustls::crypto::ring::default_provider());
+                        Some(mecmcp_transport::tls::load(cert, key, provider)?)
+                    }
+                    (None, None) => None,
+                    _ => unreachable!("CLI refusal matrix validated the TLS pair"),
+                };
+                let options = HttpOptions {
+                    port: cli.port,
+                    tls: listener_tls.is_some(),
+                    allow_insecure_bind: cli.allow_insecure_bind,
+                    allowed_hosts: cli.allowed_host,
+                    allowed_origins: cli.allowed_origin,
+                    ip_rate_per_minute: cli.ip_rate_per_minute,
+                    token_rate_per_minute: cli.token_rate_per_minute,
+                    request_body_limit: cli.request_body_limit,
+                    max_inflight_requests: cli.max_inflight_requests,
+                    max_inflight_requests_per_token: cli.max_inflight_requests_per_token,
+                    max_inflight_requests_per_target: cli.max_inflight_requests_per_target,
+                    max_sessions: cli.max_sessions,
+                    max_sessions_per_token: cli.max_sessions_per_token,
+                };
+                http_transport::serve(runtime, address, options, cli.enable_metrics, listener_tls)
+                    .await?;
+            }
         }
-        Transport::StreamableHttp => {
-            let ip: IpAddr = cli.host.parse()?;
-            let address = SocketAddr::new(ip, cli.port);
-            let listener_tls = match (cli.tls_cert.as_deref(), cli.tls_key.as_deref()) {
-                (Some(cert), Some(key)) => {
-                    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-                    Some(mecmcp_transport::tls::load(cert, key, provider)?)
-                }
-                (None, None) => None,
-                _ => unreachable!("CLI refusal matrix validated the TLS pair"),
-            };
-            let options = HttpOptions {
-                port: cli.port,
-                tls: listener_tls.is_some(),
-                allow_insecure_bind: cli.allow_insecure_bind,
-                allowed_hosts: cli.allowed_host,
-                allowed_origins: cli.allowed_origin,
-                ip_rate_per_minute: cli.ip_rate_per_minute,
-                token_rate_per_minute: cli.token_rate_per_minute,
-                request_body_limit: cli.request_body_limit,
-                max_inflight_requests: cli.max_inflight_requests,
-                max_inflight_requests_per_token: cli.max_inflight_requests_per_token,
-                max_inflight_requests_per_target: cli.max_inflight_requests_per_target,
-                max_sessions: cli.max_sessions,
-                max_sessions_per_token: cli.max_sessions_per_token,
-            };
-            http_transport::serve(runtime, address, options, cli.enable_metrics, listener_tls)
-                .await?;
-        }
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    // Deliver what is still spooled before leaving. The drain ships on an
+    // interval, so without this every record since the last tick waits for the
+    // next start, and a segment still open has never been spooled at all.
+    if let Some(service) = evidence
+        && let Err(error) = service.shutdown()
+    {
+        tracing::error!(%error, "the SSDF evidence pipeline did not flush cleanly");
+    }
+
+    served
 }
 
 #[cfg(unix)]
