@@ -104,6 +104,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
+    // Built before the runtime because the coordinator inside it takes the
+    // recorder, and started eagerly so a misconfiguration stops the server here
+    // rather than at the first change.
+    let evidence = match cli.evidence.into_config() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                server_id = %config.server_id,
+                run_id = %config.run_id,
+                "SSDF evidence pipeline enabled"
+            );
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let transport = std::sync::Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    cli.evidence.ca_file(),
+                    provider,
+                )?,
+            );
+            Some(mecmcp_audit::EvidenceService::start_with_transport(
+                config, transport,
+            )?)
+        }
+        Ok(None) => None,
+        Err(error) => return Err(format!("SSDF evidence configuration: {error}").into()),
+    };
+
     let runtime = RuntimeState::load_with_state(
         &cli.device_mapping,
         tokens,
@@ -111,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.lab_mode,
         Some(cli.approval_timeout_secs),
         cli.allow_plane_owned_writes,
+        evidence.as_ref().map(mecmcp_audit::EvidenceService::recorder),
     )?;
     tracing::info!(
         inventory = %runtime.inventory_path().display(),
@@ -157,6 +183,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
         }
     }
+
+    // Deliver what is still spooled before leaving. The drain ships on an
+    // interval, so without this every record since the last tick waits for the
+    // next start, and a segment still open has never been spooled at all.
+    if let Some(service) = evidence
+        && let Err(error) = service.shutdown()
+    {
+        tracing::error!(%error, "the SSDF evidence pipeline did not flush cleanly");
+    }
+
     Ok(())
 }
 
