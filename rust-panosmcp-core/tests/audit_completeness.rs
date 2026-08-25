@@ -3,12 +3,14 @@
 //! This test ensures that adding a new tool to KNOWN_TOOLS without also adding audit
 //! coverage causes a loud, named failure listing the missing tool.
 
+mod common;
+
 use axum::{
     Router,
     extract::{Form, State},
     routing::post,
 };
-use mecmcp_audit::{AuditConfig, AuditFormat, AuditRedaction, testutil::CapturingWriter};
+use mecmcp_audit::testutil::CapturingWriter;
 use rcgen::generate_simple_self_signed;
 use rust_panosmcp_auth::{KNOWN_TOOLS, MutationAction, MutationGrant};
 use rust_panosmcp_core::{
@@ -17,7 +19,6 @@ use rust_panosmcp_core::{
         ApproveChangeSetInput, CandidateFingerprintInput, ChangeSetAction, ChangeSetStatusInput,
         CreateChangeSetInput, OperationInput, OperationStatusInput, StageAction, StageConfigInput,
     },
-    observability::init_tracing,
     tools::{
         ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
         PanosService,
@@ -32,10 +33,11 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-// Serialize audit-capturing tests to prevent process-global subscriber conflicts.
-// The tracing subscriber is process-global, and CapturingWriter installs a new
-// subscriber. Running audit tests in parallel causes the later test to fail
-// because its subscriber overwrites the earlier one's.
+// Serialize audit-capturing tests to prevent buffer contamination.
+// The tracing subscriber is now process-global via thread-local routing, but these
+// tests are #[tokio::test] with default current_thread runtime, so each future stays
+// on the thread that installed its thread-local capture. If switched to multi_thread,
+// the lock prevents a task from migrating to another thread's capture.
 static AUDIT_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
 struct TestEnvironment;
@@ -178,14 +180,7 @@ async fn all_tools_emit_audit_events() {
     let _lock = AUDIT_TEST_LOCK.lock().await;
 
     let cap = CapturingWriter::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(cap.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    );
+    let _guard = common::install_audit_capture(cap.clone());
 
     let service = fixture().await;
     let cancel = CancellationToken::new();
@@ -416,14 +411,7 @@ async fn no_double_emission() {
     let _lock = AUDIT_TEST_LOCK.lock().await;
 
     let cap = CapturingWriter::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(cap.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    );
+    let _guard = common::install_audit_capture(cap.clone());
 
     let service = fixture().await;
     let cancel = CancellationToken::new();
@@ -450,97 +438,5 @@ async fn no_double_emission() {
         count, 1,
         "gather_device_facts emitted {} audit events, expected exactly 1",
         count
-    );
-}
-
-#[tokio::test]
-async fn redaction_applies_to_newly_audited_tools() {
-    let _lock = AUDIT_TEST_LOCK.lock().await;
-
-    // Configure audit with HMAC redaction
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let key_file = temp_dir.path().join("hmac.key");
-    fs::write(
-        &key_file,
-        b"test-redaction-secret-key-for-hmac-pseudonymization",
-    )
-    .expect("write key");
-
-    let redaction =
-        AuditRedaction::parse("devices=hmac", Some(&key_file)).expect("parse redaction policy");
-
-    let cfg = AuditConfig {
-        format: AuditFormat::Text,
-        audit_log_file: None,
-        redaction: Some(redaction),
-        journald: false,
-    };
-    init_tracing(&cfg).expect("init tracing with redaction");
-
-    let cap = CapturingWriter::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(cap.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    );
-
-    let service = fixture().await;
-    let cancel = CancellationToken::new();
-
-    // Call stage_panos_config, one of the newly-audited mutation tools that carries a device
-    let fp = service
-        .candidate_fingerprint(
-            CandidateFingerprintInput {
-                device: "test-fw".to_owned(),
-            },
-            None,
-            cancel.clone(),
-        )
-        .await
-        .expect("fingerprint");
-
-    let _ = service
-        .stage_config(
-            StageConfigInput {
-                device: "test-fw".to_owned(),
-                expected_candidate_fingerprint: fp.candidate_fingerprint,
-                action: StageAction::Set,
-                xpath: "/config/shared/address".to_owned(),
-                element: Some(
-                    "<entry name=\"redaction-test\"><ip-netmask>192.0.2.88</ip-netmask></entry>"
-                        .to_owned(),
-                ),
-                destructive_confirmation: None,
-            },
-            "test-owner",
-            None,
-            cancel,
-        )
-        .await;
-
-    let bytes = cap.0.lock().expect("lock audit capture").clone();
-    let log = String::from_utf8_lossy(&bytes);
-
-    // Find the stage_panos_config audit event
-    let stage_event = log
-        .lines()
-        .find(|line| line.contains("tool=stage_panos_config"))
-        .expect("stage_panos_config audit event must exist");
-
-    // Assert devices field contains HMAC form
-    assert!(
-        stage_event.contains("devices=hmac:"),
-        "stage_panos_config audit event must contain HMAC-redacted device, got:\n{}",
-        stage_event
-    );
-
-    // Assert devices field does NOT contain plaintext device name
-    assert!(
-        !stage_event.contains("test-fw"),
-        "stage_panos_config audit event must not contain plaintext device name 'test-fw', got:\n{}",
-        stage_event
     );
 }

@@ -1,5 +1,7 @@
 //! Guarded candidate lifecycle against a deterministic mock PAN-OS XML API.
 
+mod common;
+
 use axum::{
     Router,
     extract::{Form, State},
@@ -225,14 +227,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     // Set up audit capture for the entire test
     use mecmcp_audit::testutil::CapturingWriter;
     let cap = CapturingWriter::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_writer(cap.clone())
-            .with_ansi(false)
-            .with_target(true)
-            .with_max_level(tracing::Level::INFO)
-            .finish(),
-    );
+    let _guard = common::install_audit_capture(cap.clone());
 
     let fixture = fixture(false, false).await;
     let initial = fixture
