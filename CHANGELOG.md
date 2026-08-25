@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-25
+
+### Added
+
+- **SSDF evidence pipeline** (mecmcp#292). The PAN-OS commit worker emits
+  execution evidence, attributed to the applying request, and the evidence is
+  flushed even when serving ends in an error. Receipts name the executor.
+
+### Security
+
+- **Tier-2 hardening.** `tokens.json` path handling, audit HMAC key guarding,
+  staged installs, a stale-secret scan, an SSDF drop-in, and systemd IP
+  restrictions.
+- **The legacy token store is no longer shadowed by an empty one.** An upgrade
+  that found an empty primary could mask a populated legacy store, which reads
+  as "every credential was rejected" rather than as a packaging fault.
+- **An operator is never told to erase their configured token store.** The
+  previous guidance could destroy live credentials.
+- Packaging probes real egress enforcement rather than implying it.
+
+### Changed
+
+- **`mecmcp` 0.12.0 -> 0.19.0.** That is the jump from the v0.10.0 baseline;
+  0.17.0 was an intermediate untagged step. The fuzz workspace keeps its own
+  lockfile and CI checks it with `--locked`, so it moves in the same commit.
+
+### Upgrade note — rolling back needs the state file, not just the binary
+
+`mutation-state.json` carries a schema version. v0.10.0 links
+`mecmcp-changeset` 0.12.0, whose reader accepts **v1-v3 only**. 0.11.0 links
+0.19.0, which accepts v1-v4 and **stamps v4 on any write to a store holding a
+real approval**.
+
+So once this release has written state on such a store, **reinstalling the
+0.10.0 binary alone will not start** — it rejects the file with
+`unsupported changeset state version 4`.
+
+**Roll back with the Proxmox snapshot**, which restores `/var/lib` along with
+the binary. A binary-only downgrade is not a rollback path for this release.
+- `rmcp` 3.1.2 -> 3.1.4.
+- Toolchain and Dockerfile both move to 1.98.0, with the builder pinned to a
+  full patch version and a toolchain sync check. MSRV enforcement corrected.
+- A weekly advisory check for distroless digest drift.
+
+### Fixed
+
+- Audit test capture uses a thread-local buffer, removing a callsite race.
+- Only the resources actually held are named in errors, and the server says so
+  when a retryable state cannot be restored.
+
+> **Gap: 0.7.3, 0.7.4, 0.8.0, 0.9.0 and 0.10.0 were tagged but never written
+> up here.** Their contents are recoverable from `git log v0.7.2..v0.10.0` and
+> the release tags. Noted rather than reconstructed, so the omission is visible
+> instead of those five versions looking like they never existed.
+
 ## [0.7.2] - 2026-07-31
 
 ### Changed
