@@ -10,7 +10,7 @@ use axum::{
     extract::{Form, State},
     routing::post,
 };
-use mecmcp_audit::{AuditConfig, AuditFormat, AuditRedaction, testutil::CapturingWriter};
+use mecmcp_audit::testutil::CapturingWriter;
 use rcgen::generate_simple_self_signed;
 use rust_panosmcp_auth::{KNOWN_TOOLS, MutationAction, MutationGrant};
 use rust_panosmcp_core::{
@@ -19,7 +19,6 @@ use rust_panosmcp_core::{
         ApproveChangeSetInput, CandidateFingerprintInput, ChangeSetAction, ChangeSetStatusInput,
         CreateChangeSetInput, OperationInput, OperationStatusInput, StageAction, StageConfigInput,
     },
-    observability::init_tracing,
     tools::{
         ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
         PanosService,
@@ -441,4 +440,3 @@ async fn no_double_emission() {
         count
     );
 }
-

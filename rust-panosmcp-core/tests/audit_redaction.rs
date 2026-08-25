@@ -4,10 +4,13 @@
 //! with the thread-local routing pattern used by other audit tests. It lives in its own
 //! test binary to prevent cross-contamination.
 
-use axum::{extract::{Form, State}, routing::post, Router};
+use axum::{
+    Router,
+    extract::{Form, State},
+    routing::post,
+};
 use mecmcp_audit::{AuditConfig, AuditFormat, AuditRedaction, testutil::CapturingWriter};
 use rcgen::generate_simple_self_signed;
-use rust_panosmcp_auth::MutationGrant;
 use rust_panosmcp_core::{
     inventory::{Environment, Inventory},
     mutation::{CandidateFingerprintInput, StageAction, StageConfigInput},
