@@ -1,0 +1,76 @@
+name: digest drift
+
+# Advisory only, and deliberately not a PR gate: upstream republishing a tag
+# must not fail an unrelated contributor's build. Dependabot is the primary
+# mechanism; this catches the case where it does not fire.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: pinned digest vs registry
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the pinned tag and compare
+        id: drift
+        run: |
+          set -euo pipefail
+          line=$(grep -m1 '^FROM gcr.io/distroless/cc-debian13' Dockerfile)
+          pinned=$(printf '%s' "$line" | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')
+          tag=$(printf '%s' "$line" | sed -n 's|^FROM gcr.io/distroless/cc-debian13:\([^@]*\)@.*|\1|p')
+          [ -n "$pinned" ] && [ -n "$tag" ] || { echo "could not parse Dockerfile FROM line"; exit 1; }
+
+          token=$(curl -sf "https://gcr.io/v2/token?scope=repository:distroless/cc-debian13:pull&service=gcr.io" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+          current=$(curl -sfI -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://gcr.io/v2/distroless/cc-debian13/manifests/$tag" \
+            | tr -d '\r' | sed -n 's/^docker-content-digest: //Ip')
+          [ -n "$current" ] || { echo "registry did not return a digest"; exit 1; }
+
+          echo "tag=$tag"; echo "pinned=$pinned"; echo "current=$current"
+          {
+            echo "tag=$tag"
+            echo "pinned=$pinned"
+            echo "current=$current"
+            if [ "$pinned" = "$current" ]; then echo "drifted=false"; else echo "drifted=true"; fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the drift issue
+        if: steps.drift.outputs.drifted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.drift.outputs.tag }}
+          PINNED: ${{ steps.drift.outputs.pinned }}
+          CURRENT: ${{ steps.drift.outputs.current }}
+        run: |
+          set -euo pipefail
+          title="Pinned distroless digest has drifted from the registry"
+          body=$(printf '%s\n' \
+            "\`gcr.io/distroless/cc-debian13:$TAG\` no longer resolves to the pinned digest." \
+            "" \
+            "| | digest |" \
+            "|---|---|" \
+            "| pinned in Dockerfile | \`$PINNED\` |" \
+            "| registry now returns | \`$CURRENT\` |" \
+            "" \
+            "Dependabot normally handles this. If it has not opened a PR, check that the" \
+            "\`docker\` ecosystem is enabled in \`.github/dependabot.yml\`." \
+            "" \
+            "**Pin what the registry reports — never copy a digest from a sibling repo.**" \
+            "Comparing repos to each other is how a stale value became \"fleet consensus\"" \
+            "in rustpanosmcp#127.")
+          existing=$(gh issue list --state open --search "$title in:title" --json number -q '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
