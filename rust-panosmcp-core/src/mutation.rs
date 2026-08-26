@@ -555,6 +555,21 @@ impl PanosService {
                 // with [device].
                 targets: Vec::new(),
                 preview: None,
+                // mecmcp 0.20.0 records a vendor task handle so an apply that
+                // dies mid-flight leaves something to re-probe. A change set
+                // never has one to record: its apply only issues synchronous
+                // config requests, and it reaches `Applied` before the commit
+                // is even started. The asynchronous PAN-OS commit job *is*
+                // captured, but it belongs to the linked operation — see
+                // `record.job_id` on the `OperationRecord` — so a crashed commit
+                // is re-probed from there, by `operation_id`, not from here.
+                //
+                // `None` is also what keeps rollback working, for the same
+                // reason as `policy_signature` and `targets` above: the field is
+                // `skip_serializing_if = "Option::is_none"`, so an absent handle
+                // never appears in the file and a previous binary, which rejects
+                // unknown fields, can still read it.
+                task_id: None,
             };
             self.mutations
                 .insert_change_set(record.clone())
