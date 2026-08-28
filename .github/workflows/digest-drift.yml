@@ -17,7 +17,7 @@ jobs:
     name: pinned digest vs registry
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve the pinned tag and compare
         id: drift
