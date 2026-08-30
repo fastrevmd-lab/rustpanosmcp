@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Re-pinned the `mecmcp-*` crates from `v0.21.0` to `v0.23.0`, spanning two
+  minors. Both lockfiles move, including `fuzz/Cargo.lock`, which CI checks
+  with `--locked`.
+- The apply takes `claim_change_set_for_apply` instead of writing
+  `Approved -> Applying` itself. mecmcp 0.22.0 made the claim the only legal
+  route onto that edge -- it does the read and the write under one lock, so two
+  applies cannot both read `Approved` and both push configuration -- and a
+  plain `update_change_set` there is now refused outright. `ApplyHandle::None`,
+  because a PAN-OS apply is synchronous and hands back no pollable handle: a
+  crash mid-apply leaves an outcome only the device knows, which is what
+  `apply_without_handle` records honestly.
+- If the operation id cannot be persisted after the claim, the change set is
+  settled to `Failed` rather than left claimed. Nothing has reached PAN-OS at
+  that point -- the actions are applied afterwards -- so `Failed` is the true
+  outcome, and without it the record would keep `Applying` across a restart with
+  no `operation_id` and no `OperationRecord`, leaving the owner unable to retry,
+  cancel or reconcile it through any normal API.
+- `ChangeSetRecord` literals carry the new `apply_without_handle` field, and the
+  `#[cfg(test)]` state writer calls `write_state_for_test`, since `write_state`
+  is no longer public. The `test-util` feature is a dev-dependency, so a release
+  build never enables it.
+- **A candidate PAN-OS rejected could still be committed.** `validate` returned
+  the failure as data -- `Ok(PanosValidation { succeeded: false, .. })` -- and
+  mecmcp's lifecycle records any `Ok` there as `Validated`, which is the state
+  `commit` requires. A failed validation is now an error, so the apply stops.
+  This also makes the `dry_run_validation: true` below true rather than an
+  advertisement the implementation did not honour.
+- `PanosClient` declares `Atomicity::candidate_configuration()` rather than
+  inheriting the trait's `nothing_guaranteed()` default. PAN-OS edits a
+  candidate configuration and commits it, so all three guarantees hold: the
+  commit lands every staged change or none, the device validates before
+  applying, and a revert is exact. Inherited, an approval prompt keyed on this
+  would tell an operator that none of the three hold -- wrong in the direction
+  that matters, since it describes weaker change control than PAN-OS provides.
+
+### Upgrading
+
+- **A binary-only rollback to a build pinned at mecmcp v0.21.0 will refuse to
+  start once any change set has been approved under this one.** 0.23.0 signs a
+  two-person approval with `digest_version: 5`, and a record carrying one stamps
+  `mutation-state.json` as schema 6, which the v0.21.0 reader does not accept --
+  correctly, since it cannot verify what it cannot parse. Roll
+  `mutation-state.json` back alongside the binary, or take a snapshot of the
+  guest before upgrading and restore that instead.
+
 ## [0.11.0] - 2026-08-25
 
 ### Added
