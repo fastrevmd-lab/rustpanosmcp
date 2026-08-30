@@ -567,25 +567,140 @@ fn read_envelope_attributes(
     Ok(())
 }
 
+/// Trim only the four characters XML calls whitespace.
+///
+/// `str::trim` uses Unicode `White_Space`, which includes U+00A0 and friends.
+/// Those are ordinary text in an XML document -- and one of them is what
+/// `&#160;` resolves to, so trimming Unicode-wide would silently delete a
+/// character reference this parser had just been careful to resolve. XML's
+/// production is `#x20 | #x9 | #xD | #xA` and nothing else, which is also what
+/// quick-xml's own `trim_text` applied before accumulation replaced it.
+fn trim_xml_whitespace(value: &str) -> &str {
+    value.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
+/// Append an entity reference's value to `out`.
+///
+/// Since quick-xml 0.38 an entity reference is its own `Event::GeneralRef`
+/// rather than part of the surrounding `Event::Text`, so a reader that returns
+/// on the first `Text` stops at the first `&` in a value. Accumulating across
+/// both is what keeps `fw&amp;01` from reading back as `fw`.
+///
+/// Numeric character references and the five predefined entities resolve.
+/// Anything else is preserved verbatim as `&name;`: this parser forbids
+/// DOCTYPE, so a custom entity cannot have been defined, and there is nothing
+/// to expand it to. Writing the reference back is lossless and invents
+/// nothing, where dropping it silently is the failure this whole change is
+/// about.
+fn push_entity_ref(out: &mut String, entity: &quick_xml::events::BytesRef<'_>) -> Result<()> {
+    let name: &str = entity;
+    // A numeric reference is either resolvable or the document is malformed --
+    // `&#xZZ;` and an out-of-range codepoint both land here. Preserving it
+    // verbatim like an unknown named entity would put a literal `&#xZZ;` into a
+    // hostname or a job status, which is neither the text nor an error.
+    if name.starts_with('#') {
+        let resolved = entity
+            .resolve_char_ref()
+            .map_err(|error| PanosMcpError::Xml(format!("invalid character reference: {error}")))?
+            .ok_or_else(|| {
+                PanosMcpError::Xml(format!("character reference &{name}; does not resolve"))
+            })?;
+        if !is_xml_char(resolved) {
+            return Err(PanosMcpError::Xml(format!(
+                "character reference &{name}; is U+{:04X}, which XML 1.0 forbids",
+                resolved as u32
+            )));
+        }
+        out.push(resolved);
+        return Ok(());
+    }
+    // `resolve_xml_entity`, not `resolve_predefined_entity`. The latter is
+    // `resolve_html5_entity` when quick-xml's `escape-html` feature is on, and
+    // Cargo unifies features across the whole graph -- so an unrelated
+    // dependency turning that on would silently start resolving `&nbsp;` to
+    // U+00A0 here instead of preserving it, and this parser's output would
+    // depend on something no PAN-OS response can see. The five predefined XML
+    // entities are the whole set this format has.
+    match quick_xml::escape::resolve_xml_entity(name) {
+        Some(resolved) => out.push_str(resolved),
+        // DOCTYPE is forbidden here, so a named entity cannot have been defined
+        // and there is nothing to expand it to. Writing the reference back is
+        // lossless and invents nothing.
+        None => {
+            out.push('&');
+            out.push_str(name);
+            out.push(';');
+        }
+    }
+    Ok(())
+}
+
+/// Whether a codepoint is legal in an XML 1.0 document.
+///
+/// `Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`.
+/// A numeric reference can name a codepoint outside this set -- `&#1;` is the
+/// common one -- and accepting it puts a control character into an extracted
+/// fact or an error message.
+const fn is_xml_char(value: char) -> bool {
+    matches!(value, '\u{9}' | '\u{A}' | '\u{D}'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}')
+}
+
+/// Refuse an accumulating value once it passes the extraction bound.
+///
+/// Checked while accumulating rather than only at the end: a hostile document
+/// can otherwise drive unbounded growth through many small text runs before
+/// anything looks at the total.
+fn guard_extracted_len(value: &str) -> Result<()> {
+    if value.len() > MAX_EXTRACTED_TEXT_BYTES {
+        return Err(PanosMcpError::Xml(format!(
+            "extracted element text exceeds {MAX_EXTRACTED_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
     let mut reader = Reader::from_reader(input);
-    reader.config_mut().trim_text(true);
+    // Raw, then trimmed once on return: per-run trimming would eat the
+    // whitespace either side of an entity. See `collect_text_for_elements`.
+    reader.config_mut().trim_text(false);
     let mut inside = false;
+    // `None` until the element opens, so an element that is present but empty
+    // is still distinguishable from one that never appeared.
+    let mut collected: Option<String> = None;
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) if element.name().as_ref().as_bytes() == wanted => {
-                inside = true
+                inside = true;
+                collected.get_or_insert_with(String::new);
+            }
+            // `<hostname/>` is `Event::Empty`, not Start+End. Without this the
+            // element reads as absent while `<hostname></hostname>` reads as
+            // present-and-empty, so two equivalent serializations of the same
+            // document disagree.
+            Ok(Event::Empty(element)) if element.name().as_ref().as_bytes() == wanted => {
+                return Ok(Some(String::new()));
             }
             Ok(Event::Text(text)) if inside => {
-                let value = text.into_inner().into_owned();
-                return bounded_extracted_text(value).map(Some);
+                let value = collected.get_or_insert_with(String::new);
+                value.push_str(&text);
+                guard_extracted_len(value)?;
             }
             Ok(Event::CData(text)) if inside => {
-                let value = text.into_inner().into_owned();
-                return bounded_extracted_text(value).map(Some);
+                let value = collected.get_or_insert_with(String::new);
+                value.push_str(&text);
+                guard_extracted_len(value)?;
+            }
+            Ok(Event::GeneralRef(entity)) if inside => {
+                let value = collected.get_or_insert_with(String::new);
+                push_entity_ref(value, &entity)?;
+                guard_extracted_len(value)?;
             }
             Ok(Event::End(element)) if element.name().as_ref().as_bytes() == wanted => {
-                return Ok(None);
+                return Ok(collected.map(|value| trim_xml_whitespace(&value).to_owned()));
             }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
@@ -601,10 +716,27 @@ fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
 
 fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option<String>> {
     let mut reader = Reader::from_reader(input);
-    reader.config_mut().trim_text(true);
+    // Raw, then trimmed once on return: per-run trimming would eat the
+    // whitespace either side of an entity. See `collect_text_for_elements`.
+    reader.config_mut().trim_text(false);
     let mut parent_depth = None;
     let mut depth = 0_usize;
     let mut inside_wanted = false;
+    // Pieces plus a running buffer, exactly as `collect_text_for_elements`
+    // does, because the wanted element is not always leaf text. A PAN-OS job
+    // `<details>` carries `<line>` children, and appending straight into one
+    // buffer glued them together: `firstsecond`, one corrupted diagnostic where
+    // there were two. `None` until the element opens keeps present-but-empty
+    // distinguishable from absent.
+    let mut pieces: Option<Vec<String>> = None;
+    let mut current = String::new();
+    let flush = |current: &mut String, pieces: &mut Option<Vec<String>>| {
+        let piece = std::mem::take(current);
+        let piece = trim_xml_whitespace(&piece);
+        if !piece.is_empty() {
+            pieces.get_or_insert_with(Vec::new).push(piece.to_owned());
+        }
+    };
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
@@ -615,19 +747,59 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
                     && element.name().as_ref().as_bytes() == wanted
                 {
                     inside_wanted = true;
+                    pieces.get_or_insert_with(Vec::new);
+                } else if inside_wanted {
+                    // A nested child opens: whatever preceded it is its own
+                    // piece, not the same value continued.
+                    flush(&mut current, &mut pieces);
                 }
             }
+            // As in `first_element_text`: a self-closing *wanted* child is
+            // present and empty.
+            Ok(Event::Empty(element))
+                if !inside_wanted
+                    && parent_depth.is_some_and(|value| depth + 1 == value + 1)
+                    && element.name().as_ref().as_bytes() == wanted =>
+            {
+                return Ok(Some(String::new()));
+            }
+            // Any *other* self-closing element inside the wanted one is a
+            // boundary, exactly like a Start or End would be. Matching only the
+            // wanted name let `<details>first<line/>second</details>` keep both
+            // runs in one buffer and come back as `firstsecond`.
+            Ok(Event::Empty(_)) if inside_wanted => {
+                flush(&mut current, &mut pieces);
+            }
             Ok(Event::Text(text)) if inside_wanted => {
-                let value = text.into_inner().into_owned();
-                return bounded_extracted_text(value).map(Some);
+                current.push_str(&text);
+                guard_extracted_len(&current)?;
             }
             Ok(Event::CData(text)) if inside_wanted => {
-                let value = text.into_inner().into_owned();
-                return bounded_extracted_text(value).map(Some);
+                current.push_str(&text);
+                guard_extracted_len(&current)?;
+            }
+            Ok(Event::GeneralRef(entity)) if inside_wanted => {
+                push_entity_ref(&mut current, &entity)?;
+                guard_extracted_len(&current)?;
             }
             Ok(Event::End(element)) => {
                 if inside_wanted && element.name().as_ref().as_bytes() == wanted {
-                    return Ok(None);
+                    flush(&mut current, &mut pieces);
+                    // Bound the joined value, not only each piece. Per-piece
+                    // checks let a hundred short `<line>` children add up well
+                    // past the limit -- and `JobStatus::details` is contracted
+                    // to be bounded, so the join is what has to be checked.
+                    return match pieces.map(|pieces| pieces.join("; ")) {
+                        Some(joined) => {
+                            guard_extracted_len(&joined)?;
+                            Ok(Some(joined))
+                        }
+                        None => Ok(None),
+                    };
+                }
+                if inside_wanted {
+                    // A nested child closes: same reason as its opening.
+                    flush(&mut current, &mut pieces);
                 }
                 if parent_depth == Some(depth) && element.name().as_ref().as_bytes() == parent {
                     return Ok(None);
@@ -648,23 +820,61 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
 
 fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -> Result<String> {
     let mut reader = Reader::from_reader(input);
-    reader.config_mut().trim_text(true);
+    // Not `trim_text(true)`: that trims every *run*, and an entity splits one
+    // value into several runs. `done &amp; dusted` arrives as "done ", "&",
+    // " dusted", and per-run trimming eats both spaces to give `done&dusted`.
+    // Accumulate raw and trim once, at the element boundary.
+    reader.config_mut().trim_text(false);
     let mut matched_depth = 0_usize;
     let mut pieces = Vec::new();
+    let mut current = String::new();
+    // Flush at an element boundary rather than on every text run. A run break
+    // caused by an entity is not a value break -- pushing each run separately
+    // put the `; ` separator *inside* a value, so `done &amp; dusted` was
+    // reported as `done; dusted`, which reads like two messages. A real
+    // boundary still separates, so sibling `<line>` elements still join.
+    let flush = |current: &mut String, pieces: &mut Vec<String>| {
+        let piece = std::mem::take(current);
+        let piece = trim_xml_whitespace(&piece);
+        if !piece.is_empty() {
+            pieces.push(piece.to_owned());
+        }
+    };
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                if matched_depth > 0 || wanted.contains(&element.name().as_ref().as_bytes()) {
+                if matched_depth > 0 {
+                    flush(&mut current, &mut pieces);
+                    matched_depth += 1;
+                } else if wanted.contains(&element.name().as_ref().as_bytes()) {
                     matched_depth += 1;
                 }
             }
-            Ok(Event::End(_)) if matched_depth > 0 => matched_depth -= 1,
+            Ok(Event::End(_)) if matched_depth > 0 => {
+                matched_depth -= 1;
+                flush(&mut current, &mut pieces);
+            }
+            // A self-closing child is a boundary too. `<msg>first<line/>second</msg>`
+            // emits `Empty`, which the Start and End arms both miss, so the two
+            // runs shared one buffer and came back as `firstsecond`.
+            Ok(Event::Empty(_)) if matched_depth > 0 => {
+                flush(&mut current, &mut pieces);
+            }
+            // No `guard_extracted_len` here: this collector has its own
+            // `max_bytes`, applied by truncation at the end, and
+            // `parse_panos_response` passes 1024. Applying the 4096-byte
+            // scalar-field *rejection* limit turned a long-but-valid error
+            // envelope into malformed XML, losing the API code and message it
+            // carried -- exactly when the message matters most. Growth is
+            // bounded by the response size, which `XmlLimits` already caps.
             Ok(Event::Text(text)) if matched_depth > 0 => {
-                let value = text.into_inner();
-                let value = value.trim();
-                if !value.is_empty() {
-                    pieces.push(value.to_owned());
-                }
+                current.push_str(&text);
+            }
+            Ok(Event::CData(text)) if matched_depth > 0 => {
+                current.push_str(&text);
+            }
+            Ok(Event::GeneralRef(entity)) if matched_depth > 0 => {
+                push_entity_ref(&mut current, &entity)?;
             }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
@@ -676,6 +886,10 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
             Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
         }
     }
+    // A document that ends inside a matched element still has text worth
+    // reporting -- this is the error path, and truncated input is exactly when
+    // the message matters.
+    flush(&mut current, &mut pieces);
     let mut message = pieces.join("; ");
     if message.len() > max_bytes {
         let mut boundary = max_bytes;
@@ -685,15 +899,6 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
         message.truncate(boundary);
     }
     Ok(message)
-}
-
-fn bounded_extracted_text(value: String) -> Result<String> {
-    if value.len() > MAX_EXTRACTED_TEXT_BYTES {
-        return Err(PanosMcpError::Xml(format!(
-            "extracted element text exceeds {MAX_EXTRACTED_TEXT_BYTES} bytes"
-        )));
-    }
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -806,5 +1011,328 @@ mod tests {
         ).expect("job response");
         let job = parse_job_status(&response).expect("job");
         assert!(job.succeeded());
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+
+    /// #149: element text was returned on the first `Event::Text`, and since
+    /// quick-xml 0.38 an entity reference arrives as its own `GeneralRef`
+    /// event — so every value was cut at its first `&`, `<` or `>`, with no
+    /// error. A hostname or a job `details` string came back plausible and
+    /// wrong, which is the worst way to be wrong.
+    #[test]
+    fn element_text_survives_an_entity() {
+        let cases: &[(&str, &str)] = &[
+            ("fw&amp;01", "fw&01"),
+            ("a&lt;b&gt;c", "a<b>c"),
+            ("x&#38;y", "x&y"),
+            ("x&#x26;y", "x&y"),
+            ("&quot;q&quot;", "\"q\""),
+            ("it&apos;s", "it's"),
+            ("plain-fw-01", "plain-fw-01"),
+            ("caf\u{e9}-11.1", "caf\u{e9}-11.1"),
+            ("a&amp;b&amp;c", "a&b&c"),
+        ];
+        for (input, expected) in cases {
+            let xml = format!(
+                "<response status=\"success\"><result><hostname>{input}</hostname></result></response>"
+            );
+            let got =
+                first_element_text(xml.as_bytes(), b"hostname").expect("well-formed input parses");
+            assert_eq!(
+                got.as_deref(),
+                Some(*expected),
+                "input {input} truncated or mangled"
+            );
+        }
+    }
+
+    /// The same defect, one level down.
+    #[test]
+    fn child_text_survives_an_entity() {
+        let xml = br#"<result><entry><name>fw&amp;01</name></entry></result>"#;
+        let got = first_child_text(xml, b"entry", b"name").expect("parses");
+        assert_eq!(got.as_deref(), Some("fw&01"));
+    }
+
+    /// `collect_text_for_elements` joins with `; `. Pushing each text run
+    /// separately put that separator *inside* a value split by an entity, so
+    /// `done &amp; dusted` was reported as `done; dusted` — a message that
+    /// reads like two messages.
+    #[test]
+    fn collected_text_does_not_gain_a_separator_from_an_entity() {
+        let xml = br#"<response><msg>done &amp; dusted</msg></response>"#;
+        let got = collect_text_for_elements(xml, &[b"msg"], 4096).expect("parses");
+        assert_eq!(got, "done & dusted");
+    }
+
+    /// Genuinely separate elements still join, so the fix did not merge them.
+    #[test]
+    fn separate_elements_still_join_with_the_separator() {
+        let xml = br#"<response><line>first</line><line>second</line></response>"#;
+        let got = collect_text_for_elements(xml, &[b"line"], 4096).expect("parses");
+        assert_eq!(got, "first; second");
+    }
+
+    /// An element that is present but empty is not the same as one that is
+    /// absent, and the accumulating form must keep them apart.
+    #[test]
+    fn an_empty_element_is_not_a_missing_one() {
+        let empty = br#"<result><hostname></hostname></result>"#;
+        assert_eq!(
+            first_element_text(empty, b"hostname")
+                .expect("parses")
+                .as_deref(),
+            Some("")
+        );
+        let absent = br#"<result><model>x</model></result>"#;
+        assert_eq!(
+            first_element_text(absent, b"hostname").expect("parses"),
+            None
+        );
+    }
+
+    /// DOCTYPE is forbidden, so a non-predefined entity cannot have been
+    /// defined and there is nothing to expand it to. Preserving the reference
+    /// verbatim is lossless; dropping it silently is the bug this fixes.
+    #[test]
+    fn an_unresolvable_entity_is_preserved_not_dropped() {
+        let xml = br#"<result><hostname>a&custom;b</hostname></result>"#;
+        let got = first_element_text(xml, b"hostname").expect("parses");
+        assert_eq!(got.as_deref(), Some("a&custom;b"));
+    }
+
+    /// The extraction bound still applies, and now applies while accumulating
+    /// rather than only to a single run.
+    #[test]
+    fn accumulated_text_is_still_bounded() {
+        let big = "a&amp;".repeat(3000);
+        let xml = format!("<result><hostname>{big}</hostname></result>");
+        let error = first_element_text(xml.as_bytes(), b"hostname")
+            .expect_err("an over-long accumulation must be refused");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod entity_edge_tests {
+    use super::*;
+
+    /// A long `<msg>` must still produce a typed API error with a bounded
+    /// message. Applying the 4096-byte scalar *rejection* limit here turned a
+    /// valid long error envelope into malformed XML and lost the code and
+    /// message it carried.
+    #[test]
+    fn a_long_message_is_truncated_not_rejected() {
+        let long = "e".repeat(9000);
+        let xml = format!("<response status=\"error\" code=\"7\"><msg>{long}</msg></response>");
+        let got = collect_text_for_elements(xml.as_bytes(), &[b"msg"], 1024)
+            .expect("a long message must not be rejected as malformed");
+        assert_eq!(got.len(), 1024, "should be truncated to max_bytes");
+    }
+
+    /// A numeric reference that cannot resolve is malformed XML, not text.
+    /// Preserving `&#xZZ;` verbatim would put that literal into a hostname.
+    #[test]
+    fn an_invalid_numeric_reference_is_an_error() {
+        for bad in ["&#xZZ;", "&#x110000;"] {
+            let xml = format!("<result><hostname>a{bad}b</hostname></result>");
+            let result = first_element_text(xml.as_bytes(), b"hostname");
+            assert!(
+                result.is_err(),
+                "{bad} should be refused, got {:?}",
+                result.ok()
+            );
+        }
+    }
+
+    /// XML 1.0 forbids most control characters, and a numeric reference can
+    /// name one. Accepting it puts a control character into an extracted fact.
+    #[test]
+    fn a_control_character_reference_is_refused() {
+        let xml = br#"<result><hostname>a&#1;b</hostname></result>"#;
+        let error =
+            first_element_text(xml, b"hostname").expect_err("U+0001 is not a legal XML char");
+        assert!(error.to_string().contains("forbids"), "{error}");
+    }
+
+    /// The legal ones still work, including the boundary cases.
+    #[test]
+    fn legal_character_references_still_resolve() {
+        for (input, expected) in [("&#9;", "\t"), ("&#xA;", "\n"), ("&#x20;", " ")] {
+            let xml = format!("<result><model>x{input}y</model></result>");
+            let got = first_element_text(xml.as_bytes(), b"model")
+                .expect("a legal reference resolves")
+                .expect("present");
+            assert_eq!(got, format!("x{expected}y").trim(), "{input}");
+        }
+    }
+
+    /// `<hostname/>` and `<hostname></hostname>` are the same document. They
+    /// must extract the same way, or the present-versus-absent distinction is
+    /// decided by the serializer.
+    #[test]
+    fn a_self_closing_element_is_present_and_empty() {
+        let self_closing = br#"<result><hostname/></result>"#;
+        let expanded = br#"<result><hostname></hostname></result>"#;
+        assert_eq!(
+            first_element_text(self_closing, b"hostname").expect("parses"),
+            first_element_text(expanded, b"hostname").expect("parses"),
+        );
+        assert_eq!(
+            first_element_text(self_closing, b"hostname")
+                .expect("parses")
+                .as_deref(),
+            Some("")
+        );
+
+        let child_self_closing = br#"<result><entry><name/></entry></result>"#;
+        assert_eq!(
+            first_child_text(child_self_closing, b"entry", b"name")
+                .expect("parses")
+                .as_deref(),
+            Some("")
+        );
+    }
+}
+
+#[cfg(test)]
+mod entity_resolver_tests {
+    use super::*;
+
+    /// The named-entity set must be the five XML ones, whatever any other crate
+    /// in the graph asks quick-xml for.
+    ///
+    /// `resolve_predefined_entity` becomes `resolve_html5_entity` when the
+    /// `escape-html` feature is enabled, and Cargo unifies features across the
+    /// whole dependency graph -- so this parser's output would otherwise depend
+    /// on a crate that has nothing to do with PAN-OS. `&nbsp;` is the canary:
+    /// HTML5 resolves it to U+00A0, XML does not define it at all.
+    #[test]
+    fn only_the_five_xml_entities_resolve() {
+        let xml = br#"<result><hostname>a&nbsp;b</hostname></result>"#;
+        let got = first_element_text(xml, b"hostname").expect("parses");
+        assert_eq!(
+            got.as_deref(),
+            Some("a&nbsp;b"),
+            "an HTML5-only entity must be preserved, not resolved"
+        );
+
+        for (entity, expected) in [
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&amp;", "&"),
+            ("&apos;", "'"),
+            ("&quot;", "\""),
+        ] {
+            let xml = format!("<result><model>x{entity}y</model></result>");
+            let got = first_element_text(xml.as_bytes(), b"model")
+                .expect("parses")
+                .expect("present");
+            assert_eq!(got, format!("x{expected}y"), "{entity}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    /// A PAN-OS job `<details>` carries `<line>` children. Accumulating them
+    /// into one buffer glued distinct diagnostic lines together -- one
+    /// corrupted message where there were two.
+    #[test]
+    fn nested_children_stay_separate_lines() {
+        let xml = br#"<result><job><details><line>first</line><line>second</line></details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("first; second"));
+    }
+
+    /// ...while an entity inside one of those lines is still not a boundary.
+    #[test]
+    fn an_entity_inside_a_nested_line_is_not_a_boundary() {
+        let xml =
+            br#"<result><job><details><line>done &amp; dusted</line></details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("done & dusted"));
+    }
+
+    /// Plain leaf text is unaffected by the piece machinery.
+    #[test]
+    fn leaf_text_is_returned_whole() {
+        let xml = br#"<result><job><status>FIN</status></job></result>"#;
+        assert_eq!(
+            first_child_text(xml, b"job", b"status")
+                .expect("parses")
+                .as_deref(),
+            Some("FIN")
+        );
+    }
+
+    /// A self-closing child inside a collected element is a boundary. Neither
+    /// the Start nor the End arm sees `Event::Empty`, so both runs shared one
+    /// buffer and came back joined.
+    #[test]
+    fn a_self_closing_child_separates_the_text_around_it() {
+        let xml = br#"<response><msg>first<line/>second</msg></response>"#;
+        let got = collect_text_for_elements(xml, &[b"msg"], 4096).expect("parses");
+        assert_eq!(got, "first; second");
+    }
+}
+
+#[cfg(test)]
+mod bound_and_trim_tests {
+    use super::*;
+
+    /// The bound belongs on the joined value. Checking each `<line>` separately
+    /// let a hundred short ones add up well past the limit, while
+    /// `JobStatus::details` is contracted to be bounded.
+    #[test]
+    fn joined_child_text_is_bounded_in_total() {
+        let lines: String = (0..100)
+            .map(|_| format!("<line>{}</line>", "x".repeat(100)))
+            .collect();
+        let xml = format!("<result><job><details>{lines}</details></job></result>");
+        let error = first_child_text(xml.as_bytes(), b"job", b"details")
+            .expect_err("100 x 100 bytes joined must exceed the extraction bound");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    /// A self-closing element that is not the wanted one is still a boundary.
+    #[test]
+    fn a_self_closing_descendant_separates_text() {
+        let xml = br#"<result><job><details>first<line/>second</details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("first; second"));
+    }
+
+    /// U+00A0 is text, not whitespace, in XML. `str::trim` removes it -- which
+    /// would silently delete a `&#160;` this parser had just resolved.
+    #[test]
+    fn non_xml_whitespace_is_content_not_padding() {
+        let xml = "<result><hostname>\u{a0}fw01\u{a0}</hostname></result>";
+        let got = first_element_text(xml.as_bytes(), b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "\u{a0}fw01\u{a0}", "U+00A0 was trimmed away");
+
+        let resolved = "<result><hostname>&#160;fw01</hostname></result>";
+        let got = first_element_text(resolved.as_bytes(), b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "\u{a0}fw01", "a resolved &#160; was trimmed away");
+    }
+
+    /// XML's own four whitespace characters are still trimmed.
+    #[test]
+    fn xml_whitespace_is_still_trimmed() {
+        let xml = b"<result><hostname>\n  fw01\t\r\n</hostname></result>";
+        let got = first_element_text(xml, b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "fw01");
     }
 }
