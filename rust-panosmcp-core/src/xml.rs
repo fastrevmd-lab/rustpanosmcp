@@ -580,20 +580,53 @@ fn read_envelope_attributes(
 /// to expand it to. Writing the reference back is lossless and invents
 /// nothing, where dropping it silently is the failure this whole change is
 /// about.
-fn push_entity_ref(out: &mut String, entity: &quick_xml::events::BytesRef<'_>) {
-    if let Ok(Some(resolved)) = entity.resolve_char_ref() {
-        out.push(resolved);
-        return;
-    }
+fn push_entity_ref(out: &mut String, entity: &quick_xml::events::BytesRef<'_>) -> Result<()> {
     let name: &str = entity;
+    // A numeric reference is either resolvable or the document is malformed --
+    // `&#xZZ;` and an out-of-range codepoint both land here. Preserving it
+    // verbatim like an unknown named entity would put a literal `&#xZZ;` into a
+    // hostname or a job status, which is neither the text nor an error.
+    if name.starts_with('#') {
+        let resolved = entity
+            .resolve_char_ref()
+            .map_err(|error| PanosMcpError::Xml(format!("invalid character reference: {error}")))?
+            .ok_or_else(|| {
+                PanosMcpError::Xml(format!("character reference &{name}; does not resolve"))
+            })?;
+        if !is_xml_char(resolved) {
+            return Err(PanosMcpError::Xml(format!(
+                "character reference &{name}; is U+{:04X}, which XML 1.0 forbids",
+                resolved as u32
+            )));
+        }
+        out.push(resolved);
+        return Ok(());
+    }
     match quick_xml::escape::resolve_predefined_entity(name) {
         Some(resolved) => out.push_str(resolved),
+        // DOCTYPE is forbidden here, so a named entity cannot have been defined
+        // and there is nothing to expand it to. Writing the reference back is
+        // lossless and invents nothing.
         None => {
             out.push('&');
             out.push_str(name);
             out.push(';');
         }
     }
+    Ok(())
+}
+
+/// Whether a codepoint is legal in an XML 1.0 document.
+///
+/// `Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`.
+/// A numeric reference can name a codepoint outside this set -- `&#1;` is the
+/// common one -- and accepting it puts a control character into an extracted
+/// fact or an error message.
+const fn is_xml_char(value: char) -> bool {
+    matches!(value, '\u{9}' | '\u{A}' | '\u{D}'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}')
 }
 
 /// Refuse an accumulating value once it passes the extraction bound.
@@ -625,6 +658,13 @@ fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
                 inside = true;
                 collected.get_or_insert_with(String::new);
             }
+            // `<hostname/>` is `Event::Empty`, not Start+End. Without this the
+            // element reads as absent while `<hostname></hostname>` reads as
+            // present-and-empty, so two equivalent serializations of the same
+            // document disagree.
+            Ok(Event::Empty(element)) if element.name().as_ref().as_bytes() == wanted => {
+                return Ok(Some(String::new()));
+            }
             Ok(Event::Text(text)) if inside => {
                 let value = collected.get_or_insert_with(String::new);
                 value.push_str(&text);
@@ -637,7 +677,7 @@ fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
             }
             Ok(Event::GeneralRef(entity)) if inside => {
                 let value = collected.get_or_insert_with(String::new);
-                push_entity_ref(value, &entity);
+                push_entity_ref(value, &entity)?;
                 guard_extracted_len(value)?;
             }
             Ok(Event::End(element)) if element.name().as_ref().as_bytes() == wanted => {
@@ -677,6 +717,13 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
                     collected.get_or_insert_with(String::new);
                 }
             }
+            // As in `first_element_text`: a self-closing child is present.
+            Ok(Event::Empty(element))
+                if parent_depth.is_some_and(|value| depth + 1 == value + 1)
+                    && element.name().as_ref().as_bytes() == wanted =>
+            {
+                return Ok(Some(String::new()));
+            }
             Ok(Event::Text(text)) if inside_wanted => {
                 let value = collected.get_or_insert_with(String::new);
                 value.push_str(&text);
@@ -689,7 +736,7 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
             }
             Ok(Event::GeneralRef(entity)) if inside_wanted => {
                 let value = collected.get_or_insert_with(String::new);
-                push_entity_ref(value, &entity);
+                push_entity_ref(value, &entity)?;
                 guard_extracted_len(value)?;
             }
             Ok(Event::End(element)) => {
@@ -749,17 +796,21 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
                 matched_depth -= 1;
                 flush(&mut current, &mut pieces);
             }
+            // No `guard_extracted_len` here: this collector has its own
+            // `max_bytes`, applied by truncation at the end, and
+            // `parse_panos_response` passes 1024. Applying the 4096-byte
+            // scalar-field *rejection* limit turned a long-but-valid error
+            // envelope into malformed XML, losing the API code and message it
+            // carried -- exactly when the message matters most. Growth is
+            // bounded by the response size, which `XmlLimits` already caps.
             Ok(Event::Text(text)) if matched_depth > 0 => {
                 current.push_str(&text);
-                guard_extracted_len(&current)?;
             }
             Ok(Event::CData(text)) if matched_depth > 0 => {
                 current.push_str(&text);
-                guard_extracted_len(&current)?;
             }
             Ok(Event::GeneralRef(entity)) if matched_depth > 0 => {
-                push_entity_ref(&mut current, &entity);
-                guard_extracted_len(&current)?;
+                push_entity_ref(&mut current, &entity)?;
             }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
@@ -999,5 +1050,87 @@ mod entity_tests {
         let error = first_element_text(xml.as_bytes(), b"hostname")
             .expect_err("an over-long accumulation must be refused");
         assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod entity_edge_tests {
+    use super::*;
+
+    /// A long `<msg>` must still produce a typed API error with a bounded
+    /// message. Applying the 4096-byte scalar *rejection* limit here turned a
+    /// valid long error envelope into malformed XML and lost the code and
+    /// message it carried.
+    #[test]
+    fn a_long_message_is_truncated_not_rejected() {
+        let long = "e".repeat(9000);
+        let xml = format!("<response status=\"error\" code=\"7\"><msg>{long}</msg></response>");
+        let got = collect_text_for_elements(xml.as_bytes(), &[b"msg"], 1024)
+            .expect("a long message must not be rejected as malformed");
+        assert_eq!(got.len(), 1024, "should be truncated to max_bytes");
+    }
+
+    /// A numeric reference that cannot resolve is malformed XML, not text.
+    /// Preserving `&#xZZ;` verbatim would put that literal into a hostname.
+    #[test]
+    fn an_invalid_numeric_reference_is_an_error() {
+        for bad in ["&#xZZ;", "&#x110000;"] {
+            let xml = format!("<result><hostname>a{bad}b</hostname></result>");
+            let result = first_element_text(xml.as_bytes(), b"hostname");
+            assert!(
+                result.is_err(),
+                "{bad} should be refused, got {:?}",
+                result.ok()
+            );
+        }
+    }
+
+    /// XML 1.0 forbids most control characters, and a numeric reference can
+    /// name one. Accepting it puts a control character into an extracted fact.
+    #[test]
+    fn a_control_character_reference_is_refused() {
+        let xml = br#"<result><hostname>a&#1;b</hostname></result>"#;
+        let error =
+            first_element_text(xml, b"hostname").expect_err("U+0001 is not a legal XML char");
+        assert!(error.to_string().contains("forbids"), "{error}");
+    }
+
+    /// The legal ones still work, including the boundary cases.
+    #[test]
+    fn legal_character_references_still_resolve() {
+        for (input, expected) in [("&#9;", "\t"), ("&#xA;", "\n"), ("&#x20;", " ")] {
+            let xml = format!("<result><model>x{input}y</model></result>");
+            let got = first_element_text(xml.as_bytes(), b"model")
+                .expect("a legal reference resolves")
+                .expect("present");
+            assert_eq!(got, format!("x{expected}y").trim(), "{input}");
+        }
+    }
+
+    /// `<hostname/>` and `<hostname></hostname>` are the same document. They
+    /// must extract the same way, or the present-versus-absent distinction is
+    /// decided by the serializer.
+    #[test]
+    fn a_self_closing_element_is_present_and_empty() {
+        let self_closing = br#"<result><hostname/></result>"#;
+        let expanded = br#"<result><hostname></hostname></result>"#;
+        assert_eq!(
+            first_element_text(self_closing, b"hostname").expect("parses"),
+            first_element_text(expanded, b"hostname").expect("parses"),
+        );
+        assert_eq!(
+            first_element_text(self_closing, b"hostname")
+                .expect("parses")
+                .as_deref(),
+            Some("")
+        );
+
+        let child_self_closing = br#"<result><entry><name/></entry></result>"#;
+        assert_eq!(
+            first_child_text(child_self_closing, b"entry", b"name")
+                .expect("parses")
+                .as_deref(),
+            Some("")
+        );
     }
 }
