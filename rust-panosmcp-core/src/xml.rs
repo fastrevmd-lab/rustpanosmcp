@@ -710,7 +710,21 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
     let mut parent_depth = None;
     let mut depth = 0_usize;
     let mut inside_wanted = false;
-    let mut collected: Option<String> = None;
+    // Pieces plus a running buffer, exactly as `collect_text_for_elements`
+    // does, because the wanted element is not always leaf text. A PAN-OS job
+    // `<details>` carries `<line>` children, and appending straight into one
+    // buffer glued them together: `firstsecond`, one corrupted diagnostic where
+    // there were two. `None` until the element opens keeps present-but-empty
+    // distinguishable from absent.
+    let mut pieces: Option<Vec<String>> = None;
+    let mut current = String::new();
+    let flush = |current: &mut String, pieces: &mut Option<Vec<String>>| {
+        let piece = std::mem::take(current);
+        let piece = piece.trim();
+        if !piece.is_empty() {
+            pieces.get_or_insert_with(Vec::new).push(piece.to_owned());
+        }
+    };
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
@@ -721,7 +735,11 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
                     && element.name().as_ref().as_bytes() == wanted
                 {
                     inside_wanted = true;
-                    collected.get_or_insert_with(String::new);
+                    pieces.get_or_insert_with(Vec::new);
+                } else if inside_wanted {
+                    // A nested child opens: whatever preceded it is its own
+                    // piece, not the same value continued.
+                    flush(&mut current, &mut pieces);
                 }
             }
             // As in `first_element_text`: a self-closing child is present.
@@ -732,23 +750,25 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
                 return Ok(Some(String::new()));
             }
             Ok(Event::Text(text)) if inside_wanted => {
-                let value = collected.get_or_insert_with(String::new);
-                value.push_str(&text);
-                guard_extracted_len(value)?;
+                current.push_str(&text);
+                guard_extracted_len(&current)?;
             }
             Ok(Event::CData(text)) if inside_wanted => {
-                let value = collected.get_or_insert_with(String::new);
-                value.push_str(&text);
-                guard_extracted_len(value)?;
+                current.push_str(&text);
+                guard_extracted_len(&current)?;
             }
             Ok(Event::GeneralRef(entity)) if inside_wanted => {
-                let value = collected.get_or_insert_with(String::new);
-                push_entity_ref(value, &entity)?;
-                guard_extracted_len(value)?;
+                push_entity_ref(&mut current, &entity)?;
+                guard_extracted_len(&current)?;
             }
             Ok(Event::End(element)) => {
                 if inside_wanted && element.name().as_ref().as_bytes() == wanted {
-                    return Ok(collected.map(|value| value.trim().to_owned()));
+                    flush(&mut current, &mut pieces);
+                    return Ok(pieces.map(|pieces| pieces.join("; ")));
+                }
+                if inside_wanted {
+                    // A nested child closes: same reason as its opening.
+                    flush(&mut current, &mut pieces);
                 }
                 if parent_depth == Some(depth) && element.name().as_ref().as_bytes() == parent {
                     return Ok(None);
@@ -801,6 +821,12 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
             }
             Ok(Event::End(_)) if matched_depth > 0 => {
                 matched_depth -= 1;
+                flush(&mut current, &mut pieces);
+            }
+            // A self-closing child is a boundary too. `<msg>first<line/>second</msg>`
+            // emits `Empty`, which the Start and End arms both miss, so the two
+            // runs shared one buffer and came back as `firstsecond`.
+            Ok(Event::Empty(_)) if matched_depth > 0 => {
                 flush(&mut current, &mut pieces);
             }
             // No `guard_extracted_len` here: this collector has its own
@@ -1177,5 +1203,51 @@ mod entity_resolver_tests {
                 .expect("present");
             assert_eq!(got, format!("x{expected}y"), "{entity}");
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    /// A PAN-OS job `<details>` carries `<line>` children. Accumulating them
+    /// into one buffer glued distinct diagnostic lines together -- one
+    /// corrupted message where there were two.
+    #[test]
+    fn nested_children_stay_separate_lines() {
+        let xml = br#"<result><job><details><line>first</line><line>second</line></details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("first; second"));
+    }
+
+    /// ...while an entity inside one of those lines is still not a boundary.
+    #[test]
+    fn an_entity_inside_a_nested_line_is_not_a_boundary() {
+        let xml =
+            br#"<result><job><details><line>done &amp; dusted</line></details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("done & dusted"));
+    }
+
+    /// Plain leaf text is unaffected by the piece machinery.
+    #[test]
+    fn leaf_text_is_returned_whole() {
+        let xml = br#"<result><job><status>FIN</status></job></result>"#;
+        assert_eq!(
+            first_child_text(xml, b"job", b"status")
+                .expect("parses")
+                .as_deref(),
+            Some("FIN")
+        );
+    }
+
+    /// A self-closing child inside a collected element is a boundary. Neither
+    /// the Start nor the End arm sees `Event::Empty`, so both runs shared one
+    /// buffer and came back joined.
+    #[test]
+    fn a_self_closing_child_separates_the_text_around_it() {
+        let xml = br#"<response><msg>first<line/>second</msg></response>"#;
+        let got = collect_text_for_elements(xml, &[b"msg"], 4096).expect("parses");
+        assert_eq!(got, "first; second");
     }
 }
