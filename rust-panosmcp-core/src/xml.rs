@@ -300,7 +300,7 @@ pub fn validate_config_element(element: &str) -> Result<()> {
     let root = loop {
         match reader.read_event() {
             Ok(Event::Start(node) | Event::Empty(node)) => {
-                break node.name().as_ref().to_vec();
+                break node.name().as_ref().as_bytes().to_vec();
             }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
@@ -459,7 +459,7 @@ fn validate_xml_root(
                     )));
                 }
                 if !saw_root {
-                    if element.name().as_ref() != expected_root {
+                    if element.name().as_ref().as_bytes() != expected_root {
                         return Err(PanosMcpError::Xml(format!(
                             "root element must be '{}'",
                             String::from_utf8_lossy(expected_root)
@@ -488,7 +488,7 @@ fn validate_xml_root(
                     )));
                 }
                 if !saw_root {
-                    if element.name().as_ref() != expected_root {
+                    if element.name().as_ref().as_bytes() != expected_root {
                         return Err(PanosMcpError::Xml(format!(
                             "root element must be '{}'",
                             String::from_utf8_lossy(expected_root)
@@ -511,6 +511,7 @@ fn validate_xml_root(
             Ok(Event::Text(text))
                 if depth == 0
                     && text
+                        .as_bytes()
                         .iter()
                         .any(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r')) =>
             {
@@ -542,14 +543,14 @@ fn validate_xml_root(
 }
 
 fn read_envelope_attributes(
-    reader: &Reader<&[u8]>,
+    _reader: &Reader<&[u8]>,
     element: &quick_xml::events::BytesStart<'_>,
     summary: &mut EnvelopeSummary,
 ) -> Result<()> {
     for attribute in element.attributes().with_checks(true) {
         let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
         let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|error| PanosMcpError::Xml(error.to_string()))?
             .into_owned();
         if value.len() > MAX_ENVELOPE_ATTRIBUTE_BYTES {
@@ -558,8 +559,8 @@ fn read_envelope_attributes(
             )));
         }
         match attribute.key.as_ref() {
-            b"status" => summary.status = Some(value),
-            b"code" => summary.code = Some(value),
+            "status" => summary.status = Some(value),
+            "code" => summary.code = Some(value),
             _ => {}
         }
     }
@@ -572,22 +573,20 @@ fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
     let mut inside = false;
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element)) if element.name().as_ref() == wanted => inside = true,
+            Ok(Event::Start(element)) if element.name().as_ref().as_bytes() == wanted => {
+                inside = true
+            }
             Ok(Event::Text(text)) if inside => {
-                let value = text
-                    .decode()
-                    .map_err(|error| PanosMcpError::Xml(error.to_string()))?
-                    .into_owned();
+                let value = text.into_inner().into_owned();
                 return bounded_extracted_text(value).map(Some);
             }
             Ok(Event::CData(text)) if inside => {
-                let value = text
-                    .decode()
-                    .map_err(|error| PanosMcpError::Xml(error.to_string()))?
-                    .into_owned();
+                let value = text.into_inner().into_owned();
                 return bounded_extracted_text(value).map(Some);
             }
-            Ok(Event::End(element)) if element.name().as_ref() == wanted => return Ok(None),
+            Ok(Event::End(element)) if element.name().as_ref().as_bytes() == wanted => {
+                return Ok(None);
+            }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
                     "DOCTYPE declarations are forbidden".to_owned(),
@@ -610,31 +609,27 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 depth += 1;
-                if parent_depth.is_none() && element.name().as_ref() == parent {
+                if parent_depth.is_none() && element.name().as_ref().as_bytes() == parent {
                     parent_depth = Some(depth);
                 } else if parent_depth.is_some_and(|value| depth == value + 1)
-                    && element.name().as_ref() == wanted
+                    && element.name().as_ref().as_bytes() == wanted
                 {
                     inside_wanted = true;
                 }
             }
             Ok(Event::Text(text)) if inside_wanted => {
-                return text
-                    .decode()
-                    .map_err(|error| PanosMcpError::Xml(error.to_string()))
-                    .and_then(|value| bounded_extracted_text(value.into_owned()).map(Some));
+                let value = text.into_inner().into_owned();
+                return bounded_extracted_text(value).map(Some);
             }
             Ok(Event::CData(text)) if inside_wanted => {
-                return text
-                    .decode()
-                    .map_err(|error| PanosMcpError::Xml(error.to_string()))
-                    .and_then(|value| bounded_extracted_text(value.into_owned()).map(Some));
+                let value = text.into_inner().into_owned();
+                return bounded_extracted_text(value).map(Some);
             }
             Ok(Event::End(element)) => {
-                if inside_wanted && element.name().as_ref() == wanted {
+                if inside_wanted && element.name().as_ref().as_bytes() == wanted {
                     return Ok(None);
                 }
-                if parent_depth == Some(depth) && element.name().as_ref() == parent {
+                if parent_depth == Some(depth) && element.name().as_ref().as_bytes() == parent {
                     return Ok(None);
                 }
                 depth = depth.saturating_sub(1);
@@ -659,15 +654,13 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                if matched_depth > 0 || wanted.contains(&element.name().as_ref()) {
+                if matched_depth > 0 || wanted.contains(&element.name().as_ref().as_bytes()) {
                     matched_depth += 1;
                 }
             }
             Ok(Event::End(_)) if matched_depth > 0 => matched_depth -= 1,
             Ok(Event::Text(text)) if matched_depth > 0 => {
-                let value = text
-                    .decode()
-                    .map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+                let value = text.into_inner();
                 let value = value.trim();
                 if !value.is_empty() {
                     pieces.push(value.to_owned());
