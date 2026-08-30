@@ -567,6 +567,18 @@ fn read_envelope_attributes(
     Ok(())
 }
 
+/// Trim only the four characters XML calls whitespace.
+///
+/// `str::trim` uses Unicode `White_Space`, which includes U+00A0 and friends.
+/// Those are ordinary text in an XML document -- and one of them is what
+/// `&#160;` resolves to, so trimming Unicode-wide would silently delete a
+/// character reference this parser had just been careful to resolve. XML's
+/// production is `#x20 | #x9 | #xD | #xA` and nothing else, which is also what
+/// quick-xml's own `trim_text` applied before accumulation replaced it.
+fn trim_xml_whitespace(value: &str) -> &str {
+    value.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
 /// Append an entity reference's value to `out`.
 ///
 /// Since quick-xml 0.38 an entity reference is its own `Event::GeneralRef`
@@ -688,7 +700,7 @@ fn first_element_text(input: &[u8], wanted: &[u8]) -> Result<Option<String>> {
                 guard_extracted_len(value)?;
             }
             Ok(Event::End(element)) if element.name().as_ref().as_bytes() == wanted => {
-                return Ok(collected.map(|value| value.trim().to_owned()));
+                return Ok(collected.map(|value| trim_xml_whitespace(&value).to_owned()));
             }
             Ok(Event::DocType(_)) => {
                 return Err(PanosMcpError::Xml(
@@ -720,7 +732,7 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
     let mut current = String::new();
     let flush = |current: &mut String, pieces: &mut Option<Vec<String>>| {
         let piece = std::mem::take(current);
-        let piece = piece.trim();
+        let piece = trim_xml_whitespace(&piece);
         if !piece.is_empty() {
             pieces.get_or_insert_with(Vec::new).push(piece.to_owned());
         }
@@ -742,12 +754,21 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
                     flush(&mut current, &mut pieces);
                 }
             }
-            // As in `first_element_text`: a self-closing child is present.
+            // As in `first_element_text`: a self-closing *wanted* child is
+            // present and empty.
             Ok(Event::Empty(element))
-                if parent_depth.is_some_and(|value| depth + 1 == value + 1)
+                if !inside_wanted
+                    && parent_depth.is_some_and(|value| depth + 1 == value + 1)
                     && element.name().as_ref().as_bytes() == wanted =>
             {
                 return Ok(Some(String::new()));
+            }
+            // Any *other* self-closing element inside the wanted one is a
+            // boundary, exactly like a Start or End would be. Matching only the
+            // wanted name let `<details>first<line/>second</details>` keep both
+            // runs in one buffer and come back as `firstsecond`.
+            Ok(Event::Empty(_)) if inside_wanted => {
+                flush(&mut current, &mut pieces);
             }
             Ok(Event::Text(text)) if inside_wanted => {
                 current.push_str(&text);
@@ -764,7 +785,17 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
             Ok(Event::End(element)) => {
                 if inside_wanted && element.name().as_ref().as_bytes() == wanted {
                     flush(&mut current, &mut pieces);
-                    return Ok(pieces.map(|pieces| pieces.join("; ")));
+                    // Bound the joined value, not only each piece. Per-piece
+                    // checks let a hundred short `<line>` children add up well
+                    // past the limit -- and `JobStatus::details` is contracted
+                    // to be bounded, so the join is what has to be checked.
+                    return match pieces.map(|pieces| pieces.join("; ")) {
+                        Some(joined) => {
+                            guard_extracted_len(&joined)?;
+                            Ok(Some(joined))
+                        }
+                        None => Ok(None),
+                    };
                 }
                 if inside_wanted {
                     // A nested child closes: same reason as its opening.
@@ -804,7 +835,7 @@ fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -
     // boundary still separates, so sibling `<line>` elements still join.
     let flush = |current: &mut String, pieces: &mut Vec<String>| {
         let piece = std::mem::take(current);
-        let piece = piece.trim();
+        let piece = trim_xml_whitespace(&piece);
         if !piece.is_empty() {
             pieces.push(piece.to_owned());
         }
@@ -1249,5 +1280,59 @@ mod boundary_tests {
         let xml = br#"<response><msg>first<line/>second</msg></response>"#;
         let got = collect_text_for_elements(xml, &[b"msg"], 4096).expect("parses");
         assert_eq!(got, "first; second");
+    }
+}
+
+#[cfg(test)]
+mod bound_and_trim_tests {
+    use super::*;
+
+    /// The bound belongs on the joined value. Checking each `<line>` separately
+    /// let a hundred short ones add up well past the limit, while
+    /// `JobStatus::details` is contracted to be bounded.
+    #[test]
+    fn joined_child_text_is_bounded_in_total() {
+        let lines: String = (0..100)
+            .map(|_| format!("<line>{}</line>", "x".repeat(100)))
+            .collect();
+        let xml = format!("<result><job><details>{lines}</details></job></result>");
+        let error = first_child_text(xml.as_bytes(), b"job", b"details")
+            .expect_err("100 x 100 bytes joined must exceed the extraction bound");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    /// A self-closing element that is not the wanted one is still a boundary.
+    #[test]
+    fn a_self_closing_descendant_separates_text() {
+        let xml = br#"<result><job><details>first<line/>second</details></job></result>"#;
+        let got = first_child_text(xml, b"job", b"details").expect("parses");
+        assert_eq!(got.as_deref(), Some("first; second"));
+    }
+
+    /// U+00A0 is text, not whitespace, in XML. `str::trim` removes it -- which
+    /// would silently delete a `&#160;` this parser had just resolved.
+    #[test]
+    fn non_xml_whitespace_is_content_not_padding() {
+        let xml = "<result><hostname>\u{a0}fw01\u{a0}</hostname></result>";
+        let got = first_element_text(xml.as_bytes(), b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "\u{a0}fw01\u{a0}", "U+00A0 was trimmed away");
+
+        let resolved = "<result><hostname>&#160;fw01</hostname></result>";
+        let got = first_element_text(resolved.as_bytes(), b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "\u{a0}fw01", "a resolved &#160; was trimmed away");
+    }
+
+    /// XML's own four whitespace characters are still trimmed.
+    #[test]
+    fn xml_whitespace_is_still_trimmed() {
+        let xml = b"<result><hostname>\n  fw01\t\r\n</hostname></result>";
+        let got = first_element_text(xml, b"hostname")
+            .expect("parses")
+            .expect("present");
+        assert_eq!(got, "fw01");
     }
 }
