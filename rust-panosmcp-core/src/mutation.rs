@@ -555,6 +555,10 @@ impl PanosService {
                 // with [device].
                 targets: Vec::new(),
                 preview: None,
+                // Never an apply that lost its handle: this is a record being
+                // created, and PAN-OS applies synchronously anyway. See the
+                // note below on why there is no handle to record.
+                apply_without_handle: false,
                 // mecmcp 0.20.0 records a vendor task handle so an apply that
                 // dies mid-flight leaves something to re-probe. A change set
                 // never has one to record: its apply only issues synchronous
@@ -891,7 +895,35 @@ impl PanosService {
             self.mutations.remove(&operation_id).await;
             return Err(error);
         }
-        change_set.state = ChangeSetState::Applying;
+        // mecmcp 0.22.0 makes `claim_change_set_for_apply` the only legal
+        // `Approved -> Applying` transition, and it does the read and the write
+        // under one lock so two applies cannot both read `Approved` and both
+        // push configuration. A plain `update_change_set` on this edge is
+        // refused outright.
+        //
+        // `None`: a PAN-OS apply is synchronous and hands back no pollable
+        // handle, so a crash mid-apply leaves an outcome only the device knows.
+        // That is what `apply_without_handle` records, and it is the honest
+        // state rather than an outcome nobody observed.
+        let mut change_set = match self
+            .mutations
+            .claim_change_set_for_apply(
+                &change_set.id,
+                &change_set.device,
+                mecmcp_changeset::ApplyHandle::None,
+            )
+            .await
+            .map_err(coord_error)
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                if config_lock_held {
+                    release_config_lock_best_effort(&client).await;
+                }
+                self.mutations.remove(&operation_id).await;
+                return Err(error);
+            }
+        };
         change_set.operation_id = Some(operation_id.clone());
         if let Err(error) = self
             .mutations
@@ -899,6 +931,24 @@ impl PanosService {
             .await
             .map_err(coord_error)
         {
+            // Nothing has been pushed to PAN-OS yet -- the actions are applied
+            // below -- so this failure leaves a claimed record that never ran,
+            // with no `operation_id` on it and its `OperationRecord` about to be
+            // removed. `ApplyHandle::None` keeps `Applying` across a restart, so
+            // without settling it here the owner could not retry, cancel or
+            // reconcile it through any normal API. `Failed` is the true outcome.
+            let mut abandoned = change_set.clone();
+            abandoned.state = ChangeSetState::Failed;
+            abandoned.operation_id = None;
+            if let Err(settle_error) = self.mutations.update_change_set(abandoned).await {
+                tracing::error!(
+                    target: "audit",
+                    %settle_error,
+                    change_set = %change_set.id,
+                    "claimed change set left applying after its operation id could not be \
+                     persisted; nothing was sent to the device, but it needs an operator"
+                );
+            }
             if config_lock_held {
                 release_config_lock_best_effort(&client).await;
             }
@@ -2155,9 +2205,9 @@ fn write_mutation_state(
     path: &std::path::Path,
     state: &mecmcp_changeset::persistence::ChangesetState,
 ) -> Result<()> {
-    mecmcp_changeset::persistence::write_state(path, state, MAX_STATE_BYTES).map_err(|error| {
-        PanosMcpError::Configuration(format!("could not write mutation state: {error}"))
-    })
+    mecmcp_changeset::persistence::write_state_for_test(path, state, MAX_STATE_BYTES).map_err(
+        |error| PanosMcpError::Configuration(format!("could not write mutation state: {error}")),
+    )
 }
 
 fn new_operation_id() -> Result<String> {

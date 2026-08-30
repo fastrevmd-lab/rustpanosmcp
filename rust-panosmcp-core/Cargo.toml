@@ -35,6 +35,9 @@ url.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
+# `write_state_for_test` is behind this feature; the state writer it backs is
+# `#[cfg(test)]` only. Dev-only, so a release build never enables it.
+mecmcp-changeset = { workspace = true, features = ["test-util"] }
 axum = "0.8"
 axum-server = { workspace = true }
 hex = "0.4"

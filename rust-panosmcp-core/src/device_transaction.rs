@@ -59,6 +59,17 @@ pub struct PanosValidation {
     pub details: Option<String>,
 }
 
+impl PanosClient {
+    /// The atomicity PAN-OS provides, as reported to
+    /// [`DeviceTransaction::atomicity`].
+    ///
+    /// A named constant so it can be asserted without standing up a client:
+    /// `PanosClient::new` wants an endpoint, a secret and loaded TLS trust,
+    /// none of which this declaration depends on.
+    pub const DECLARED_ATOMICITY: mecmcp_changeset::Atomicity =
+        mecmcp_changeset::Atomicity::candidate_configuration();
+}
+
 #[async_trait]
 impl DeviceTransaction for PanosClient {
     type Action = ChangeSetAction;
@@ -66,6 +77,21 @@ impl DeviceTransaction for PanosClient {
     type Diff = PanosDiff;
     type Validation = PanosValidation;
     type Error = PanosMcpError;
+
+    /// PAN-OS edits a candidate configuration and commits it, so all three
+    /// guarantees hold: the commit lands every staged change or none of them,
+    /// the device validates the candidate before it is applied, and a revert
+    /// to the running configuration is exact.
+    ///
+    /// Declared rather than inherited. The trait defaults to
+    /// [`mecmcp_changeset::Atomicity::nothing_guaranteed`], which is the safe answer for an
+    /// implementation that has not said -- but leaving it here would have an
+    /// approval prompt tell an operator that none of the three hold, which is
+    /// wrong in the direction that matters: it describes a weaker change
+    /// control than PAN-OS actually provides.
+    fn atomicity(&self) -> mecmcp_changeset::Atomicity {
+        PanosClient::DECLARED_ATOMICITY
+    }
 
     async fn fingerprint(&self) -> Result<String> {
         candidate_fingerprint(self, CancellationToken::new()).await
@@ -198,6 +224,22 @@ impl DeviceTransaction for PanosClient {
         let status = self
             .poll_job(&job_id, VALIDATE_DEADLINE, CancellationToken::new())
             .await?;
+        // A failed validation is an error, not an `Ok` carrying bad news.
+        // mecmcp's lifecycle records any `Ok` here as `Validated`, which is the
+        // state `commit` requires -- so returning the failure as data let a
+        // candidate PAN-OS had rejected go on to be committed. It also makes
+        // the `dry_run_validation: true` in `DECLARED_ATOMICITY` true: the
+        // device validates first, and a rejection now stops the apply.
+        if !status.succeeded() {
+            return Err(PanosMcpError::Policy {
+                field: "validate",
+                reason: format!(
+                    "PAN-OS validation job {job_id} did not succeed: {}",
+                    status.details.as_deref().unwrap_or("no detail reported")
+                ),
+            });
+        }
+
         Ok(PanosValidation {
             job_id: job_id.clone(),
             succeeded: status.succeeded(),
@@ -578,6 +620,40 @@ mod tests {
         (service, state, cert_dir)
     }
 
+    /// A candidate PAN-OS rejected must not become committable.
+    ///
+    /// mecmcp's lifecycle records any `Ok` from `validate` as `Validated`,
+    /// which is the state `commit` requires. Returning the failure as data --
+    /// `Ok(PanosValidation { succeeded: false, .. })` -- therefore walked a
+    /// rejected candidate straight towards commit, and made the
+    /// `dry_run_validation: true` in `DECLARED_ATOMICITY` an advertisement this
+    /// implementation did not honour.
+    #[tokio::test]
+    async fn a_failed_validation_is_an_error_not_an_ok() {
+        let (service, mock_state, _cert_dir) = test_service().await;
+        mock_state.lock().expect("state").validate_succeeds = false;
+        let client = service.client("test-fw").expect("client");
+
+        let actions = vec![ChangeSetAction {
+            action: StageAction::Set,
+            xpath: "/config/shared/address/entry[@name='test']".to_owned(),
+            element: Some(
+                "<entry name=\"test\"><ip-netmask>192.0.2.1</ip-netmask></entry>".to_owned(),
+            ),
+            destructive_confirmation: None,
+        }];
+        let staged = client.stage(&actions).await.expect("stage");
+
+        let error = client
+            .validate(&staged)
+            .await
+            .expect_err("a rejected candidate must not validate Ok");
+        assert!(
+            matches!(&error, PanosMcpError::Policy { field, .. } if *field == "validate"),
+            "the refusal must name the validate step: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn stage_diff_validate_commit_lifecycle() {
         let (service, mock_state, _cert_dir) = test_service().await;
@@ -732,5 +808,29 @@ mod tests {
             .await
             .expect("rollback");
         assert!(outcome.succeeded);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod atomicity_tests {
+    use super::*;
+
+    /// The declaration an approval prompt is keyed on.
+    ///
+    /// Inherited from the trait this would be `nothing_guaranteed()`, telling
+    /// an operator that a PAN-OS change offers no atomicity, no dry run and no
+    /// rollback -- none of which is true of a candidate configuration.
+    #[test]
+    fn panos_declares_the_candidate_configuration_guarantees() {
+        let atomicity = PanosClient::DECLARED_ATOMICITY;
+        assert_eq!(
+            atomicity,
+            mecmcp_changeset::Atomicity::candidate_configuration(),
+            "PAN-OS commits a candidate configuration and must say so"
+        );
+        assert!(atomicity.atomic_apply, "a commit lands all staged changes");
+        assert!(atomicity.dry_run_validation, "the device validates first");
+        assert!(atomicity.guaranteed_rollback, "a revert is exact");
     }
 }
