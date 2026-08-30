@@ -602,7 +602,14 @@ fn push_entity_ref(out: &mut String, entity: &quick_xml::events::BytesRef<'_>) -
         out.push(resolved);
         return Ok(());
     }
-    match quick_xml::escape::resolve_predefined_entity(name) {
+    // `resolve_xml_entity`, not `resolve_predefined_entity`. The latter is
+    // `resolve_html5_entity` when quick-xml's `escape-html` feature is on, and
+    // Cargo unifies features across the whole graph -- so an unrelated
+    // dependency turning that on would silently start resolving `&nbsp;` to
+    // U+00A0 here instead of preserving it, and this parser's output would
+    // depend on something no PAN-OS response can see. The five predefined XML
+    // entities are the whole set this format has.
+    match quick_xml::escape::resolve_xml_entity(name) {
         Some(resolved) => out.push_str(resolved),
         // DOCTYPE is forbidden here, so a named entity cannot have been defined
         // and there is nothing to expand it to. Writing the reference back is
@@ -1132,5 +1139,43 @@ mod entity_edge_tests {
                 .as_deref(),
             Some("")
         );
+    }
+}
+
+#[cfg(test)]
+mod entity_resolver_tests {
+    use super::*;
+
+    /// The named-entity set must be the five XML ones, whatever any other crate
+    /// in the graph asks quick-xml for.
+    ///
+    /// `resolve_predefined_entity` becomes `resolve_html5_entity` when the
+    /// `escape-html` feature is enabled, and Cargo unifies features across the
+    /// whole dependency graph -- so this parser's output would otherwise depend
+    /// on a crate that has nothing to do with PAN-OS. `&nbsp;` is the canary:
+    /// HTML5 resolves it to U+00A0, XML does not define it at all.
+    #[test]
+    fn only_the_five_xml_entities_resolve() {
+        let xml = br#"<result><hostname>a&nbsp;b</hostname></result>"#;
+        let got = first_element_text(xml, b"hostname").expect("parses");
+        assert_eq!(
+            got.as_deref(),
+            Some("a&nbsp;b"),
+            "an HTML5-only entity must be preserved, not resolved"
+        );
+
+        for (entity, expected) in [
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&amp;", "&"),
+            ("&apos;", "'"),
+            ("&quot;", "\""),
+        ] {
+            let xml = format!("<result><model>x{entity}y</model></result>");
+            let got = first_element_text(xml.as_bytes(), b"model")
+                .expect("parses")
+                .expect("present");
+            assert_eq!(got, format!("x{expected}y"), "{entity}");
+        }
     }
 }
