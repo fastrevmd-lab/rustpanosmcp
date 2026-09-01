@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-01
+
+### Fixed
+
+- **XML element text no longer truncated at the first entity** (#151). The
+  XPath set parser could silently truncate element content at the first entity
+  reference, which corrupted retrieved configuration values. quick-xml's decode
+  is now applied after extracting the raw text, preserving entities through to
+  the final decoded output.
+
 ### Changed
 
 - Re-pinned the `mecmcp-*` crates from `v0.21.0` to `v0.23.0`, spanning two
@@ -43,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applying, and a revert is exact. Inherited, an approval prompt keyed on this
   would tell an operator that none of the three hold -- wrong in the direction
   that matters, since it describes weaker change control than PAN-OS provides.
+- Moved `quick-xml` from 0.37 to 0.42 (#150), catching up four minors of parser
+  and XML handling improvements.
+- Dependency updates: rust base image to 1.98, distroless/cc-debian13 digest,
+  `actions/checkout` to v7, `uuid` to 1.25.0.
+- CI: Dependabot now ignores the git-pinned `mecmcp-*` crates (#153), which are
+  intentionally pinned to a tagged release rather than tracking a moving ref.
+
+### Security
+
+- Moved off the yanked `chacha20` 0.10.1, which was pulled from crates.io due
+  to a critical security issue. The workspace now uses a patched version.
 
 ### Upgrading
 
