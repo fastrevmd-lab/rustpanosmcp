@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-05
+
+### Changed
+
+- Moved `rmcp` from 3.1.4 to 3.2.0 (#159). Upstream adds OAuth refresh
+  coordination through credential stores and request-state key rotation, and
+  fixes legacy-protocol `initialize`, sessionless HTTP discover fallback, and
+  concurrent streamable-HTTP client requests.
+- Moved `futures-util` from 0.3.33 to 0.3.34 (#157), picking up the cloned
+  waker identity fix. The crate is used in exactly one place, the size-capped
+  PAN-OS response body read in `rust-panosmcp-core`.
+- Moved `docker/setup-qemu-action` from 4.2.0 to 4.3.0 (#158), a
+  dependency-only upstream release that carries transitive fixes including
+  `brace-expansion` 1.1.15 -> 1.1.18. The action's own source is unchanged, and
+  the release-image workflow passes it no inputs.
+
+### Upgrading
+
+- **Protocol negotiation changed for `initialize`.** With rmcp 3.2.0, an
+  `initialize` request naming protocol version `2026-07-28` is answered with
+  `2025-11-25` rather than `2026-07-28`. The downgrade is unconditional --
+  supplying the version in `_meta` does not avoid it. This is upstream's
+  intent: the 2026-07-28 revision removes the handshake, so a request that both
+  names that version and calls `initialize` is contradictory, and the server
+  answers with a legacy version it supports.
+
+  Verified against the lab rigs before release: the negotiated session is fully
+  functional. `tools/list` returns all 15 tools and `tools/call` succeeds. No
+  client-visible failure was observed, only a different negotiated version
+  string. Clients that hard-require `2026-07-28` from the handshake would need
+  to move to the stateless path.
+
+  Requests naming legacy versions (`2025-06-18`, `2024-11-05`) negotiate
+  exactly as before, and an unrecognized version still falls back to
+  `2025-11-25` with HTTP 200 -- unchanged from 0.12.0.
+
 ## [0.12.0] - 2026-09-01
 
 ### Fixed
