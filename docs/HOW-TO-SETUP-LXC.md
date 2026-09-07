@@ -93,7 +93,7 @@ pct create 612 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
     --cores 1 --memory 512 --swap 512 \
     --rootfs local-lvm:4 \
     --unprivileged 1 --features nesting=1 \
-    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip=192.168.1.232/24,type=veth \
+    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.0.2.1,ip=192.0.2.10/24,type=veth \
     --onboot 0 --ostype debian \
     --tags "disposable;test;twoperson"
 
@@ -104,7 +104,7 @@ pct start 612
 guest as safe to destroy, and the fleet's own safety rules key on it.
 
 For the lab-mode rig, use VMID 613, hostname `test-labmode-panos`,
-IP `192.168.1.233`, and tag `labmode` instead of `twoperson`.
+IP `192.0.2.11`, and tag `labmode` instead of `twoperson`.
 
 ## 4. Install
 
@@ -170,7 +170,7 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --tokens-file /var/lib/rust-panosmcp/tokens.json \
     --state-file /var/lib/rust-panosmcp/mutation-state.json \
     --allow-insecure-bind \
-    --allowed-host 192.168.1.232 \
+    --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-panos:30031
 ```
 
@@ -223,7 +223,7 @@ pid=$(pct exec 612 -- systemctl show -p MainPID --value rust-panosmcp.service)
 pct exec 612 -- grep -E '^Seccomp' /proc/$pid/status                                    # Seccomp: 2
 
 # 4. it is serving, and refusing unauthenticated callers
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.168.1.232:30031/mcp \
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.0.2.10:30031/mcp \
      -H 'content-type: application/json' -d '{}'                                        # 401
 ```
 
