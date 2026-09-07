@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-06
+
+### Changed
+
+- Documented the fleet seccomp posture agreed in mecmcp#354. The systemd unit's
+  `SystemCallErrorNumber=EPERM` directive is now documented as load-bearing:
+  without it a denied syscall raises SIGSYS and kills the process mid-request,
+  which is what killed rustunifimcp during a change-set state write
+  (mecmcp#351). An EPERM denial is silent at the systemd layer; visibility
+  requires the application to check errno instead of discarding it.
+
 ## [0.13.0] - 2026-09-05
 
 ### Changed

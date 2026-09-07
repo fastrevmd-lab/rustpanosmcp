@@ -60,6 +60,11 @@ RestrictSUIDSGID=true
 RemoveIPC=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
+# SystemCallErrorNumber=EPERM is critical: without it systemd's default applies
+# and a denied syscall raises SIGSYS, killing the process mid-request. That is
+# what killed rustunifimcp during a change-set state write (mecmcp#351).
+# An EPERM denial is silent at the systemd layer; visibility requires the
+# application to check errno instead of discarding it.
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
 SystemCallErrorNumber=EPERM
