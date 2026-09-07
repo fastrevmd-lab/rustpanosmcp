@@ -85,7 +85,7 @@ This creates a dedicated `rust-panosmcp` system user and provisions `/etc/rust-p
 
 #### LXC (Debian 13)
 
-For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspawn, the release tarball includes an idempotent installer that automates the manual sequence above.
+For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspawn, the release tarball includes an idempotent installer that automates the manual sequence above. For a complete setup guide including container creation, see [HOW-TO-SETUP-LXC.md](docs/HOW-TO-SETUP-LXC.md).
 
 ```bash
 # Download and verify
