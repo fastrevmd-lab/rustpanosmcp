@@ -114,7 +114,7 @@ The installer creates the `rust-panosmcp` user and directories via `systemd-sysu
 
 #### Docker / GHCR
 
-Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline.
+Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline. For a complete setup guide including both two-person and lab modes, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
 
 ```bash
 # Pull the image

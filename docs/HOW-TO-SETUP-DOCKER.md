@@ -1,0 +1,230 @@
+# How to run rust-panosmcp in Docker
+
+Runs the server as a container in either **lab mode** or **two-person** mode.
+Written from a working setup built on 2026-09-07: every command here was run,
+and the three failures that occurred are in [Troubleshooting](#troubleshooting)
+with their exact error text.
+
+| mode | approvals | use it for |
+|---|---|---|
+| **lab mode** (`--lab-mode`) | waived on creation, recorded as `approval_waiver=lab-mode` | ordinary tool work, reads, single-operator change sets |
+| **two-person** (no flag) | a second principal must approve before apply | anything that must prove the approval gate holds |
+
+The server announces lab mode at startup, as a `WARN`:
+
+```
+lab mode enabled: change sets are approved on creation with no second principal.
+Records carry approval_waiver=lab-mode. Do not run this against production devices.
+```
+
+If you see that line and did not intend it, stop and fix the flag.
+
+## The headline gotcha for this image
+
+The Dockerfile is `ENTRYPOINT ["/usr/local/bin/rust-panosmcp"]` with
+`CMD ["--device-mapping", "/etc/rust-panosmcp/devices.json"]`.
+
+Docker **replaces CMD entirely** when the caller supplies arguments. So the
+moment you pass anything — and you must, to set the bind address —
+`--device-mapping` disappears and the server falls back to looking for
+`devices.json` in its working directory.
+
+Observed failure:
+
+```
+Error: Core(Inventory("failed to read inventory: Permission denied (os error 13)"))
+```
+
+That message does not mention the flag you lost. **Always pass `--device-mapping`
+explicitly.** Note the contrast: rust-junosmcp puts its config paths in
+ENTRYPOINT, where they survive; copying a junos command line here silently loses
+the inventory.
+
+## 1. Prepare host paths
+
+```bash
+mkdir -p panos-docker/state
+cd panos-docker
+```
+
+`devices.json` follows `config/devices.example.json`. The API key can come from
+the environment:
+
+```json
+{
+  "version": 1,
+  "devices": [
+    {
+      "name": "panos-demo",
+      "endpoint": "https://192.0.2.20",
+      "vsys": "vsys1",
+      "api_key": {
+        "type": "env",
+        "name": "PANOS_DEMO_API_KEY"
+      },
+      "tags": ["lab", "read-only"]
+    }
+  ]
+}
+```
+
+Mint a bearer token. The binary can do this on the host — no container needed:
+
+```bash
+rust-panosmcp token add --tokens-file ./tokens.json --name my-client \
+    --devices '*' --tools '*' -f ./devices.json
+```
+
+The secret prints **once** and is stored hashed. `--tools '*'` resolves to
+read-only tools only; write tools must be named explicitly, so a wildcard token
+calling `create_panos_change_set` gets `insufficient_scope`. That is deliberate.
+
+Then lock the modes down:
+
+```bash
+chmod 0600 devices.json tokens.json
+```
+
+## 2. Ownership: two options
+
+The container process is UID 65532 and must read the config and write the state
+directory.
+
+**For a real deployment**, give it ownership:
+
+```bash
+sudo chown -R 65532:65532 devices.json tokens.json state
+sudo chmod 0700 state
+```
+
+**For local testing without root**, run the container as yourself instead. The
+files stay owned by you and nothing needs `sudo`:
+
+```bash
+--user "$(id -u):$(id -g)"
+```
+
+Both are shown below. The second is what the examples here were verified with.
+
+## 3. Run it — two-person mode
+
+```bash
+docker run -d --name panos-twoperson \
+  --user "$(id -u):$(id -g)" \
+  -p 30031:30031 \
+  -e PANOS_DEMO_API_KEY=... \
+  -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
+  -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
+  -v "$PWD/state:/var/lib/rust-panosmcp" \
+  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  --device-mapping /etc/rust-panosmcp/devices.json \
+  --transport streamable-http --host 0.0.0.0 --port 30031 \
+  --tokens-file /etc/rust-panosmcp/tokens.json \
+  --allow-insecure-bind \
+  --allowed-host 127.0.0.1:30031 --allowed-host localhost:30031 \
+  --allowed-origin http://127.0.0.1:30031 --allowed-origin http://localhost:30031
+```
+
+Configuration and tokens are mounted read-only; only the state directory is
+writable. It holds the change-set lifecycle state at `mutation-state.json` —
+do not delete that file while a server is running.
+
+## 4. Run it — lab mode
+
+Identical but for `--lab-mode`, and a different published port so both can run
+side by side:
+
+```bash
+docker run -d --name panos-labmode \
+  --user "$(id -u):$(id -g)" \
+  -p 30041:30031 \
+  -e PANOS_DEMO_API_KEY=... \
+  -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
+  -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
+  -v "$PWD/state:/var/lib/rust-panosmcp" \
+  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  --device-mapping /etc/rust-panosmcp/devices.json \
+  --transport streamable-http --host 0.0.0.0 --port 30031 \
+  --tokens-file /etc/rust-panosmcp/tokens.json \
+  --allow-insecure-bind \
+  --allowed-host 127.0.0.1:30041 --allowed-host localhost:30041 \
+  --allowed-origin http://127.0.0.1:30041 --allowed-origin http://localhost:30041 \
+  --lab-mode
+```
+
+**Note the port asymmetry, because it catches people.** The server always
+listens on `30031` *inside* the container; `-p 30041:30031` publishes it as
+30041 on the host. But `--allowed-host` and `--allowed-origin` are matched
+against the `Host` and `Origin` headers the **client** sends, and the client is
+talking to 30041. So those flags carry the *published* port, not the internal
+one. Get this wrong and the server starts cleanly and then refuses every request
+with `421`.
+
+Give each mode its own state directory if you run them against the same devices;
+the change-set lifecycle state is shared, and two servers pointed at one state
+file are two servers that can disagree about what a change set's status is.
+
+## 5. Verify
+
+```bash
+docker ps --filter name=panos- --format '{{.Names}} {{.Status}}'
+
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:30031/mcp \
+     -H 'content-type: application/json' -d '{}'    # 401
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:30041/mcp \
+     -H 'content-type: application/json' -d '{}'    # 401
+```
+
+**`401` is the success case**: the transport is up and authentication is being
+enforced. `000` means nothing is listening — check `docker logs`. A `421` means
+the allow-lists do not match the address the client used.
+
+Confirm the mode is what you intended:
+
+```bash
+docker logs panos-labmode 2>&1 | grep -i 'lab mode'
+```
+
+The server logs its rate limits at startup:
+
+```
+rate limits: max_requests_per_second_per_ip=120, per_token=240
+```
+
+These ship enabled by default. rust-junosmcp ships them disabled (`0`) for the
+same shared transport, so operators comparing the two logs should expect this
+difference.
+
+## 6. Stop
+
+```bash
+docker stop panos-twoperson panos-labmode
+docker rm panos-twoperson panos-labmode
+```
+
+`docker stop` sends SIGTERM and waits, which lets the server finish in-flight
+work and flush its state. Avoid `docker kill` for anything holding change-set
+state: a process killed mid-write leaves an operation non-terminal, and the next
+caller finds the device blocked.
+
+## Troubleshooting
+
+All three of these were hit while writing this document.
+
+**`Error: Core(Inventory("failed to read inventory: Permission denied (os error 13)"))`**
+You forgot `--device-mapping /etc/rust-panosmcp/devices.json`. The server fell
+back to its working directory, which it cannot write. See [The headline gotcha
+for this image](#the-headline-gotcha-for-this-image).
+
+**`421` on every request, but the server started cleanly**
+The `--allowed-host` and `--allowed-origin` lists do not match the address the
+client is using. These are matched against the `Host` and `Origin` headers, so
+they must carry the **published** port (the one in `-p`), not the internal one.
+If you published the server on 30041 but allowed only 30031, every request fails
+with `421`. The server logs the rejected request with the mismatched header
+value — check `docker logs`.
+
+**Permission denied reading the inventory or writing state**
+The container process is UID 65532 and does not own your files. Either
+`chown -R 65532:65532` them, or run with `--user "$(id -u):$(id -g)"` as shown
+above.
