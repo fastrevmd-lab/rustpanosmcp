@@ -286,7 +286,7 @@ this again for the next one.
 The drop-in directory does not exist yet. `install.sh` does not create it,
 because a drop-in is a site decision. `mkdir -p` it first.
 
-**Service fails immediately with `non-loopback bind '0.0.0.0:30031' requires at least one --allowed-origin`** —
+**Service fails immediately with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`** —
 The drop-in has no origin allowlist. An off-loopback listener must supply both
 `--allowed-host` and `--allowed-origin`, with the origin including the scheme
 (`http://` or `https://`) and port (e.g., `--allowed-origin http://192.0.2.10:30031`).
