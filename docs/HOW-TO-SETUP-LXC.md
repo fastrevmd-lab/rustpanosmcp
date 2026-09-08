@@ -171,19 +171,25 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --state-file /var/lib/rust-panosmcp/mutation-state.json \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
-    --allowed-origin http://192.0.2.10:30031 \
     --allowed-host test-twoperson-panos:30031 \
-    --allowed-origin http://test-twoperson-panos:30031
+    --allowed-origin https://console.example.org
 ```
 
 The empty `ExecStart=` is required: it clears the shipped one before setting a
 new one.
 
 **Lab mode is the same file with `--lab-mode` appended.** That single flag is
-the whole difference. Point `--allowed-host` at that rig's own address, and
-`--allowed-origin` must be updated in lockstep — an off-loopback listener requires
-both or the service refuses to start. Both must track whatever clients actually
-dial, or requests are refused with 421.
+the whole difference.
+
+`--allowed-host` lists the server authorities clients dial (the HTTP Host header);
+`--allowed-origin` lists the trusted browser application origins that call this
+server (the Origin header). They are configured independently and are usually
+different values. For example, a browser console at `https://console.example.org`
+calling this server at `192.0.2.10:30031` sends `Origin: https://console.example.org`,
+so the allowlist must contain that origin. An off-loopback listener requires at
+least one `--allowed-origin` or the service refuses to start — replace the example
+value with your actual client origin. Clients which send no Origin header (curl,
+non-browser MCP clients) are unaffected by the origin allowlist.
 
 Then:
 
@@ -287,9 +293,17 @@ The drop-in directory does not exist yet. `install.sh` does not create it,
 because a drop-in is a site decision. `mkdir -p` it first.
 
 **Service fails immediately with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`** —
-The drop-in has no origin allowlist. An off-loopback listener must supply both
-`--allowed-host` and `--allowed-origin`, with the origin including the scheme
-(`http://` or `https://`) and port (e.g., `--allowed-origin http://192.0.2.10:30031`).
+The drop-in has no origin allowlist. An off-loopback listener must supply at
+least one `--allowed-origin` value. This is the trusted browser application
+origin (the Origin header), including the scheme (`http://` or `https://`) and
+port (e.g., `--allowed-origin https://console.example.org`).
 
-**Service active but every call returns 421** — `--allowed-host` does not match
-the address clients dial. Add the exact host and port they use.
+**Service active but every call returns 421 `Host '<host>' is not allowed`** —
+`--allowed-host` does not match the address clients dial (the HTTP Host header).
+Add the exact host and port they use.
+
+**Service active but every call returns 403 `Origin '<origin>' is not allowed`** —
+`--allowed-origin` does not match the browser application origin sending the
+request (the Origin header). Add the origin of the calling page, including scheme
+and port. Non-browser clients (curl, CLI MCP clients) send no Origin header and
+are unaffected by this allowlist.
