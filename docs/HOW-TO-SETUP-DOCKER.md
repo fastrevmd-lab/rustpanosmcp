@@ -106,17 +106,31 @@ files stay owned by you and nothing needs `sudo`:
 
 Both are shown below. The second is what the examples here were verified with.
 
-## 3. Run it — two-person mode
+## 3. Pin to an immutable digest
+
+`RepoDigests` is empty if the image has not been pulled, so `docker pull` comes
+first:
+
+```bash
+docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1
+image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+    --format '{{index .RepoDigests 0}}')
+```
+
+The resolved digest identifies the exact bytes — record it wherever the
+deployment is tracked.
+
+## 4. Run it — two-person mode
 
 ```bash
 docker run -d --name panos-twoperson \
   --user "$(id -u):$(id -g)" \
-  -p 30031:30031 \
+  -p 127.0.0.1:30031:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  "$image" \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
@@ -129,7 +143,11 @@ Configuration and tokens are mounted read-only; only the state directory is
 writable. It holds the change-set lifecycle state at `mutation-state.json` —
 do not delete that file while a server is running.
 
-## 4. Run it — lab mode
+The `--allowed-origin http://127.0.0.1:30031` values are a working local default
+for non-browser clients. A browser-based MCP client served from a different port
+needs its own origin added (e.g., `--allowed-origin http://localhost:6274`).
+
+## 5. Run it — lab mode
 
 Identical but for `--lab-mode`, and a different published port so both can run
 side by side:
@@ -137,12 +155,12 @@ side by side:
 ```bash
 docker run -d --name panos-labmode \
   --user "$(id -u):$(id -g)" \
-  -p 30041:30031 \
+  -p 127.0.0.1:30041:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  "$image" \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
@@ -153,18 +171,20 @@ docker run -d --name panos-labmode \
 ```
 
 **Note the port asymmetry, because it catches people.** The server always
-listens on `30031` *inside* the container; `-p 30041:30031` publishes it as
-30041 on the host. But `--allowed-host` and `--allowed-origin` are matched
-against the `Host` and `Origin` headers the **client** sends, and the client is
-talking to 30041. So those flags carry the *published* port, not the internal
-one. Get this wrong and the server starts cleanly and then refuses every request
-with `421`.
+listens on `30031` *inside* the container; `-p 127.0.0.1:30041:30031` publishes
+it as 30041 on the host, bound to loopback only. But `--allowed-host` and
+`--allowed-origin` are matched against the `Host` and `Origin` headers the
+**client** sends, and the client is talking to 30041. So those flags carry the
+*published* port, not the internal one. Get this wrong and the server starts
+cleanly and then refuses every request with `421`. The loopback bind restricts
+access to localhost; reaching the server from another host requires TLS rather
+than a wider publish.
 
 Give each mode its own state directory if you run them against the same devices;
 the change-set lifecycle state is shared, and two servers pointed at one state
 file are two servers that can disagree about what a change set's status is.
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 docker ps --filter name=panos- --format '{{.Names}} {{.Status}}'
@@ -195,7 +215,7 @@ These ship enabled by default. rust-junosmcp ships them disabled (`0`) for the
 same shared transport, so operators comparing the two logs should expect this
 difference.
 
-## 6. Stop
+## 7. Stop
 
 ```bash
 docker stop panos-twoperson panos-labmode
@@ -216,13 +236,19 @@ You forgot `--device-mapping /etc/rust-panosmcp/devices.json`. The server fell
 back to its working directory, which it cannot write. See [The headline gotcha
 for this image](#the-headline-gotcha-for-this-image).
 
-**`421` on every request, but the server started cleanly**
-The `--allowed-host` and `--allowed-origin` lists do not match the address the
-client is using. These are matched against the `Host` and `Origin` headers, so
-they must carry the **published** port (the one in `-p`), not the internal one.
-If you published the server on 30041 but allowed only 30031, every request fails
-with `421`. The server logs the rejected request with the mismatched header
-value — check `docker logs`.
+**Service returns 421 `Host '<host>' is not allowed`**
+`--allowed-host` does not match the address the client dials (the HTTP Host
+header). The list must carry the **published** port (the one in `-p`), not the
+internal one. If you published the server on 30041 but allowed only 30031,
+every request fails with `421`. The server logs the rejected request with the
+mismatched header value — check `docker logs`.
+
+**Service returns 403 `Origin '<origin>' is not allowed`**
+`--allowed-origin` does not match the browser application origin sending the
+request (the Origin header). Add the origin of the calling page, including
+scheme and port (e.g., `--allowed-origin http://localhost:6274` for a
+browser-based MCP client served on that port). Clients which send no Origin
+header (curl, non-browser MCP clients) are unaffected by this allowlist.
 
 **Permission denied reading the inventory or writing state**
 The container process is UID 65532 and does not own your files. Either
