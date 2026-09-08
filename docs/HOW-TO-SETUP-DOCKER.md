@@ -106,16 +106,23 @@ files stay owned by you and nothing needs `sudo`:
 
 Both are shown below. The second is what the examples here were verified with.
 
-## 3. Run it — two-person mode
+## 3. Pin to an immutable digest
 
-Pin to an immutable digest. `RepoDigests` is empty if the image has not been
-pulled, so `docker pull` comes first:
+`RepoDigests` is empty if the image has not been pulled, so `docker pull` comes
+first:
 
 ```bash
 docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1
 image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
     --format '{{index .RepoDigests 0}}')
+```
 
+The resolved digest identifies the exact bytes — record it wherever the
+deployment is tracked.
+
+## 4. Run it — two-person mode
+
+```bash
 docker run -d --name panos-twoperson \
   --user "$(id -u):$(id -g)" \
   -p 127.0.0.1:30031:30031 \
@@ -132,9 +139,6 @@ docker run -d --name panos-twoperson \
   --allowed-origin http://127.0.0.1:30031 --allowed-origin http://localhost:30031
 ```
 
-The resolved digest identifies the exact bytes — record it wherever the
-deployment is tracked.
-
 Configuration and tokens are mounted read-only; only the state directory is
 writable. It holds the change-set lifecycle state at `mutation-state.json` —
 do not delete that file while a server is running.
@@ -143,7 +147,7 @@ The `--allowed-origin http://127.0.0.1:30031` values are a working local default
 for non-browser clients. A browser-based MCP client served from a different port
 needs its own origin added (e.g., `--allowed-origin http://localhost:6274`).
 
-## 4. Run it — lab mode
+## 5. Run it — lab mode
 
 Identical but for `--lab-mode`, and a different published port so both can run
 side by side:
@@ -180,7 +184,7 @@ Give each mode its own state directory if you run them against the same devices;
 the change-set lifecycle state is shared, and two servers pointed at one state
 file are two servers that can disagree about what a change set's status is.
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 docker ps --filter name=panos- --format '{{.Names}} {{.Status}}'
@@ -211,7 +215,7 @@ These ship enabled by default. rust-junosmcp ships them disabled (`0`) for the
 same shared transport, so operators comparing the two logs should expect this
 difference.
 
-## 6. Stop
+## 7. Stop
 
 ```bash
 docker stop panos-twoperson panos-labmode

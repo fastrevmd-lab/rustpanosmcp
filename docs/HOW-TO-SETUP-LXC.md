@@ -178,8 +178,9 @@ ExecStart=/usr/local/bin/rust-panosmcp \
 The empty `ExecStart=` is required: it clears the shipped one before setting a
 new one.
 
-**Lab mode is the same file with `--lab-mode` appended.** That single flag is
-the whole difference.
+**Lab mode is the same file with `--lab-mode` appended and the two `--allowed-host`
+values changed to the lab rig's own authority** (e.g., `192.0.2.11` and
+`test-labmode-panos:30031`).
 
 `--allowed-host` lists the server authorities clients dial (the HTTP Host header);
 `--allowed-origin` lists the trusted browser application origins that call this
@@ -292,11 +293,12 @@ this again for the next one.
 The drop-in directory does not exist yet. `install.sh` does not create it,
 because a drop-in is a site decision. `mkdir -p` it first.
 
-**Service fails immediately with `non-loopback bind '0.0.0.0' requires at least one --allowed-origin`** —
+**Service fails immediately with `Error: AllowedOriginRequired`** —
 The drop-in has no origin allowlist. An off-loopback listener must supply at
 least one `--allowed-origin` value. This is the trusted browser application
 origin (the Origin header), including the scheme (`http://` or `https://`) and
-port (e.g., `--allowed-origin https://console.example.org`).
+port (e.g., `--allowed-origin https://console.example.org`). The terse error
+format is tracked as fastrevmd-lab/mecmcp#358.
 
 **Service active but every call returns 421 `Host '<host>' is not allowed`** —
 `--allowed-host` does not match the address clients dial (the HTTP Host header).
