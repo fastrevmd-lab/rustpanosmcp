@@ -108,15 +108,24 @@ Both are shown below. The second is what the examples here were verified with.
 
 ## 3. Run it — two-person mode
 
+Obtain the immutable digest:
+
+```bash
+docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 --format '{{index .RepoDigests 0}}'
+```
+
+Then run:
+
 ```bash
 docker run -d --name panos-twoperson \
   --user "$(id -u):$(id -g)" \
-  -p 30031:30031 \
+  -p 127.0.0.1:30031:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  ghcr.io/fastrevmd-lab/rust-panosmcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  `# 0.13.1` \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
@@ -137,12 +146,13 @@ side by side:
 ```bash
 docker run -d --name panos-labmode \
   --user "$(id -u):$(id -g)" \
-  -p 30041:30031 \
+  -p 127.0.0.1:30041:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+  ghcr.io/fastrevmd-lab/rust-panosmcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  `# 0.13.1` \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
@@ -153,12 +163,14 @@ docker run -d --name panos-labmode \
 ```
 
 **Note the port asymmetry, because it catches people.** The server always
-listens on `30031` *inside* the container; `-p 30041:30031` publishes it as
-30041 on the host. But `--allowed-host` and `--allowed-origin` are matched
-against the `Host` and `Origin` headers the **client** sends, and the client is
-talking to 30041. So those flags carry the *published* port, not the internal
-one. Get this wrong and the server starts cleanly and then refuses every request
-with `421`.
+listens on `30031` *inside* the container; `-p 127.0.0.1:30041:30031` publishes
+it as 30041 on the host, bound to loopback only. But `--allowed-host` and
+`--allowed-origin` are matched against the `Host` and `Origin` headers the
+**client** sends, and the client is talking to 30041. So those flags carry the
+*published* port, not the internal one. Get this wrong and the server starts
+cleanly and then refuses every request with `421`. The loopback bind restricts
+access to localhost; reaching the server from another host requires TLS rather
+than a wider publish.
 
 Give each mode its own state directory if you run them against the same devices;
 the change-set lifecycle state is shared, and two servers pointed at one state
