@@ -171,15 +171,19 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --state-file /var/lib/rust-panosmcp/mutation-state.json \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
-    --allowed-host test-twoperson-panos:30031
+    --allowed-origin http://192.0.2.10:30031 \
+    --allowed-host test-twoperson-panos:30031 \
+    --allowed-origin http://test-twoperson-panos:30031
 ```
 
 The empty `ExecStart=` is required: it clears the shipped one before setting a
 new one.
 
 **Lab mode is the same file with `--lab-mode` appended.** That single flag is
-the whole difference. Point `--allowed-host` at that rig's own address — it must
-track whatever clients actually dial, or requests are refused with 421.
+the whole difference. Point `--allowed-host` at that rig's own address, and
+`--allowed-origin` must be updated in lockstep — an off-loopback listener requires
+both or the service refuses to start. Both must track whatever clients actually
+dial, or requests are refused with 421.
 
 Then:
 
@@ -281,6 +285,11 @@ this again for the next one.
 **`failed to create file: /etc/systemd/system/rust-panosmcp.service.d/override.conf: No such file or directory`**
 The drop-in directory does not exist yet. `install.sh` does not create it,
 because a drop-in is a site decision. `mkdir -p` it first.
+
+**Service fails immediately with `non-loopback bind '0.0.0.0:30031' requires at least one --allowed-origin`** —
+The drop-in has no origin allowlist. An off-loopback listener must supply both
+`--allowed-host` and `--allowed-origin`, with the origin including the scheme
+(`http://` or `https://`) and port (e.g., `--allowed-origin http://192.0.2.10:30031`).
 
 **Service active but every call returns 421** — `--allowed-host` does not match
 the address clients dial. Add the exact host and port they use.
