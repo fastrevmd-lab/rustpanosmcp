@@ -108,15 +108,14 @@ Both are shown below. The second is what the examples here were verified with.
 
 ## 3. Run it — two-person mode
 
-Obtain the immutable digest:
+Pin to an immutable digest. `RepoDigests` is empty if the image has not been
+pulled, so `docker pull` comes first:
 
 ```bash
-docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 --format '{{index .RepoDigests 0}}'
-```
+docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1
+image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+    --format '{{index .RepoDigests 0}}')
 
-Then run:
-
-```bash
 docker run -d --name panos-twoperson \
   --user "$(id -u):$(id -g)" \
   -p 127.0.0.1:30031:30031 \
@@ -124,8 +123,7 @@ docker run -d --name panos-twoperson \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  `# 0.13.1` \
+  "$image" \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
@@ -133,6 +131,9 @@ docker run -d --name panos-twoperson \
   --allowed-host 127.0.0.1:30031 --allowed-host localhost:30031 \
   --allowed-origin http://127.0.0.1:30031 --allowed-origin http://localhost:30031
 ```
+
+The resolved digest identifies the exact bytes — record it wherever the
+deployment is tracked.
 
 Configuration and tokens are mounted read-only; only the state directory is
 writable. It holds the change-set lifecycle state at `mutation-state.json` —
@@ -151,8 +152,7 @@ docker run -d --name panos-labmode \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  `# 0.13.1` \
+  "$image" \
   --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
