@@ -139,6 +139,10 @@ Configuration and tokens are mounted read-only; only the state directory is
 writable. It holds the change-set lifecycle state at `mutation-state.json` —
 do not delete that file while a server is running.
 
+The `--allowed-origin http://127.0.0.1:30031` values are a working local default
+for non-browser clients. A browser-based MCP client served from a different port
+needs its own origin added (e.g., `--allowed-origin http://localhost:6274`).
+
 ## 4. Run it — lab mode
 
 Identical but for `--lab-mode`, and a different published port so both can run
@@ -228,13 +232,19 @@ You forgot `--device-mapping /etc/rust-panosmcp/devices.json`. The server fell
 back to its working directory, which it cannot write. See [The headline gotcha
 for this image](#the-headline-gotcha-for-this-image).
 
-**`421` on every request, but the server started cleanly**
-The `--allowed-host` and `--allowed-origin` lists do not match the address the
-client is using. These are matched against the `Host` and `Origin` headers, so
-they must carry the **published** port (the one in `-p`), not the internal one.
-If you published the server on 30041 but allowed only 30031, every request fails
-with `421`. The server logs the rejected request with the mismatched header
-value — check `docker logs`.
+**Service returns 421 `Host '<host>' is not allowed`**
+`--allowed-host` does not match the address the client dials (the HTTP Host
+header). The list must carry the **published** port (the one in `-p`), not the
+internal one. If you published the server on 30041 but allowed only 30031,
+every request fails with `421`. The server logs the rejected request with the
+mismatched header value — check `docker logs`.
+
+**Service returns 403 `Origin '<origin>' is not allowed`**
+`--allowed-origin` does not match the browser application origin sending the
+request (the Origin header). Add the origin of the calling page, including
+scheme and port (e.g., `--allowed-origin http://localhost:6274` for a
+browser-based MCP client served on that port). Clients which send no Origin
+header (curl, non-browser MCP clients) are unaffected by this allowlist.
 
 **Permission denied reading the inventory or writing state**
 The container process is UID 65532 and does not own your files. Either
