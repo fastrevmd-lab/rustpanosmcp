@@ -172,7 +172,7 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-panos:30031 \
-    --allowed-origin https://console.example.org
+    --allowed-origin http://console.example.org
 ```
 
 The empty `ExecStart=` is required: it clears the shipped one before setting a
@@ -185,12 +185,15 @@ values changed to the lab rig's own authority** (e.g., `192.0.2.11` and
 `--allowed-host` lists the server authorities clients dial (the HTTP Host header);
 `--allowed-origin` lists the trusted browser application origins that call this
 server (the Origin header). They are configured independently and are usually
-different values. For example, a browser console at `https://console.example.org`
-calling this server at `192.0.2.10:30031` sends `Origin: https://console.example.org`,
+different values. For example, a browser console at `http://console.example.org`
+calling this server at `192.0.2.10:30031` sends `Origin: http://console.example.org`,
 so the allowlist must contain that origin. An off-loopback listener requires at
 least one `--allowed-origin` or the service refuses to start — replace the example
-value with your actual client origin. Clients which send no Origin header (curl,
-non-browser MCP clients) are unaffected by the origin allowlist.
+value with your actual client origin. The origin scheme must match the server's
+TLS configuration: this plaintext lab drop-in (`--allow-insecure-bind`) takes
+`http://` origins; an HTTPS console origin requires `--tls-cert` and `--tls-key`
+on the listener. Clients which send no Origin header (curl, non-browser MCP
+clients) are unaffected by the origin allowlist.
 
 Then:
 
@@ -297,7 +300,7 @@ because a drop-in is a site decision. `mkdir -p` it first.
 The drop-in has no origin allowlist. An off-loopback listener must supply at
 least one `--allowed-origin` value. This is the trusted browser application
 origin (the Origin header), including the scheme (`http://` or `https://`) and
-port (e.g., `--allowed-origin https://console.example.org`). The terse error
+port (e.g., `--allowed-origin http://console.example.org`). The terse error
 format is tracked as fastrevmd-lab/mecmcp#358.
 
 **Service active but every call returns 421 `Host '<host>' is not allowed`** —
