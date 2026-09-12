@@ -13,9 +13,11 @@ services:
       - ./state:/var/lib/rust-panosmcp:rw
     ports:
       - "30031:30031"
+    # --device-mapping is baked into the image's ENTRYPOINT — do not repeat it
+    # here. `command:` is appended to ENTRYPOINT (not merged with CMD), so
+    # passing it again duplicates the flag and rust-panosmcp refuses to start
+    # with a clap "cannot be used multiple times" error.
     command:
-      - --device-mapping
-      - /etc/rust-panosmcp/devices.json
       - --transport
       - streamable-http
       - --host
