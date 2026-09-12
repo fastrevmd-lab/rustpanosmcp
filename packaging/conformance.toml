@@ -1,0 +1,16 @@
+binary     = "bin/rust-panosmcp"
+installer  = "packaging/lxc/install.sh"
+service    = "rust-panosmcp"
+config_dir = "/etc/rust-panosmcp"
+tokens     = "/var/lib/rust-panosmcp/tokens.json"
+
+# No supported skip-build path yet, so no honest BUILD-INFO is possible.
+# R3 warns until both change together. See mecmcp's spec, "Provenance ordering".
+build_info     = false
+skip_build_env = false
+
+units = ["packaging/systemd/rust-panosmcp.service"]
+
+# The inventory path must survive an operator override. It currently lives in
+# CMD, which Docker replaces wholesale -- mecmcp#357. Fixed in this PR.
+must_survive_override = ["--device-mapping"]

@@ -111,6 +111,48 @@ jobs:
           cargo deny check licenses bans sources
           cargo deny --manifest-path fuzz/Cargo.toml --config fuzz/deny.toml check licenses bans sources
 
+  conformance:
+    name: Package conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the release binary
+        run: cargo build --release --locked --bin rust-panosmcp
+
+      - name: Stage the package
+        run: |
+          set -euo pipefail
+          mkdir -p staging/bin
+          cp target/release/rust-panosmcp staging/bin/
+          cp -r packaging staging/packaging
+          cp packaging/conformance.toml staging/
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: rust-panosmcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Conformance
+        uses: fastrevmd-lab/mecmcp/packaging/conformance@85498b26398ff408e6d24aebb30af92cec878237
+        with:
+          staging: staging
+          manifest: staging/conformance.toml
+          image: rust-panosmcp:ci
+
   release-candidate:
     name: Release candidate packaging
     runs-on: ubuntu-24.04
