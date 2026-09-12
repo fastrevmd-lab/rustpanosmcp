@@ -21,24 +21,26 @@ If you see that line and did not intend it, stop and fix the flag.
 
 ## The headline gotcha for this image
 
-The Dockerfile is `ENTRYPOINT ["/usr/local/bin/rust-panosmcp"]` with
-`CMD ["--device-mapping", "/etc/rust-panosmcp/devices.json"]`.
+The Dockerfile is
+`ENTRYPOINT ["/usr/local/bin/rust-panosmcp", "--device-mapping", "/etc/rust-panosmcp/devices.json"]`
+with `CMD []`.
 
-Docker **replaces CMD entirely** when the caller supplies arguments. So the
-moment you pass anything — and you must, to set the bind address —
-`--device-mapping` disappears and the server falls back to looking for
-`devices.json` in its working directory.
+`--device-mapping` is baked into ENTRYPOINT precisely so it survives when you
+pass other arguments — Docker **appends** caller arguments to ENTRYPOINT but
+**replaces CMD entirely**, so a flag reachable only through CMD used to vanish
+the moment you set the bind address or anything else.
 
-Observed failure:
+**Do not pass `--device-mapping` yourself on `docker run` / `command:`.**
+Doing so duplicates the flag (once from ENTRYPOINT, once from your argument),
+and the server refuses to start:
 
 ```
-Error: Core(Inventory("failed to read inventory: Permission denied (os error 13)"))
+error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times
 ```
 
-That message does not mention the flag you lost. **Always pass `--device-mapping`
-explicitly.** Note the contrast: rust-junosmcp puts its config paths in
-ENTRYPOINT, where they survive; copying a junos command line here silently loses
-the inventory.
+If you need a different inventory path than `/etc/rust-panosmcp/devices.json`,
+mount your file at that path rather than passing the flag — the path is fixed
+in the image, only the file backing it changes.
 
 ## 1. Prepare host paths
 
@@ -131,7 +133,6 @@ docker run -d --name panos-twoperson \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
   "$image" \
-  --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
   --allow-insecure-bind \
@@ -161,7 +162,6 @@ docker run -d --name panos-labmode \
   -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
   "$image" \
-  --device-mapping /etc/rust-panosmcp/devices.json \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
   --tokens-file /etc/rust-panosmcp/tokens.json \
   --allow-insecure-bind \
@@ -231,10 +231,12 @@ caller finds the device blocked.
 
 All three of these were hit while writing this document.
 
-**`Error: Core(Inventory("failed to read inventory: Permission denied (os error 13)"))`**
-You forgot `--device-mapping /etc/rust-panosmcp/devices.json`. The server fell
-back to its working directory, which it cannot write. See [The headline gotcha
-for this image](#the-headline-gotcha-for-this-image).
+**`error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times`**
+You passed `--device-mapping` explicitly. It is already baked into the image's
+ENTRYPOINT, so a caller-supplied copy duplicates it. Drop it from your `docker
+run` arguments or compose `command:` — mount your inventory file at
+`/etc/rust-panosmcp/devices.json` instead. See [The headline gotcha for this
+image](#the-headline-gotcha-for-this-image).
 
 **Service returns 421 `Host '<host>' is not allowed`**
 `--allowed-host` does not match the address the client dials (the HTTP Host
