@@ -16,7 +16,7 @@ fi
 cat "$diagnostics" >&2
 
 grep -Eq '^USER 65532:65532$' Dockerfile
-grep -Eq '^ENTRYPOINT \["/usr/local/bin/rust-panosmcp"\]$' Dockerfile
+grep -Eq '^ENTRYPOINT \["/usr/local/bin/rust-panosmcp", "--device-mapping", "/etc/rust-panosmcp/devices.json"\]$' Dockerfile
 grep -Eq '^FROM rust:.*@sha256:[0-9a-f]{64} AS builder$' Dockerfile
 # Pins the approved runtime base. This must move whenever the Dockerfile's base
 # moves — it is the check that stops the base drifting silently, so it is
