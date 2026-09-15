@@ -10,7 +10,7 @@ use rmcp::{
     ServerHandler,
     handler::server::wrapper::Parameters,
     model::{
-        CallToolResult, ContentBlock, Extensions, Implementation, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Extensions, Implementation, ServerCapabilities, ServerConfig,
     },
     tool, tool_handler, tool_router,
 };
@@ -787,8 +787,8 @@ impl PanosMcpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PanosMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 "rust-panosmcp",
                 env!("CARGO_PKG_VERSION"),
