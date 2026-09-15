@@ -180,7 +180,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    cli_validate::validate(&cli)?;
+    // Report the refusal with `Display`, not `Debug`.
+    //
+    // `main` returns `Box<dyn Error>`, and Rust's default reporter prints the
+    // `Debug` form. A bare `?` therefore printed `Error: AllowedOriginRequired`
+    // — the enum variant, not the flag the operator has to add, and a string
+    // that appears nowhere in the documentation because no message was ever
+    // written to say it. Boxing `e.to_string()` instead is no better: `String`
+    // Debug-prints with quotes.
+    //
+    // Every `CliRefusal` already carries an `#[error(...)]` naming the flag.
+    // Printing it here is what actually puts it on stderr. Validation runs
+    // before the inventory, secrets, sockets and TLS are loaded, so there is
+    // nothing to unwind; exiting 1 matches what returning `Err` from `main`
+    // already did. See mecmcp#358.
+    if let Err(refusal) = cli_validate::validate(&cli) {
+        eprintln!("Error: {refusal}");
+        std::process::exit(1);
+    }
 
     // Lab mode removes two-person control, so say so where an operator will
     // actually see it. Reading it off flags typed weeks ago is not visibility.
