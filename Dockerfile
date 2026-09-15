@@ -45,5 +45,5 @@ ENV RUST_LOG=info
 EXPOSE 30031
 USER 65532:65532
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/rust-panosmcp"]
-CMD ["--device-mapping", "/etc/rust-panosmcp/devices.json"]
+ENTRYPOINT ["/usr/local/bin/rust-panosmcp", "--device-mapping", "/etc/rust-panosmcp/devices.json"]
+CMD []
