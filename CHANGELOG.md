@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-16
+
+### Security
+
+- **Moved `rustls` from 0.23.44 to 0.23.45**, closing RUSTSEC-2026-0285 (#168).
+  The advisory describes a TLS 1.3 handshake vulnerability where messages could
+  be accepted across encryption-level boundaries (CVSS 5.3 Medium). This
+  security fix is the primary reason for the 0.14.0 release.
+
+### Fixed
+
+- **The startup refusal now prints its message, not the enum variant** (#171).
+  An off-loopback bind missing `--allowed-origin` printed `Error:
+  AllowedOriginRequired`, which forced operators to read the source to
+  understand the fix. The server now prints the sentence naming the flag:
+  "Binding to a non-loopback address requires --allowed-origin to be set."
+
+### Changed
+
+- **`--device-mapping` moved into `ENTRYPOINT`** (#166). The flag previously
+  lived in the Dockerfile's `CMD`, which Docker replaces wholesale when an
+  operator passes any override (e.g. `--host 0.0.0.0`). This silently dropped
+  the inventory path and reverted to no device mapping. The flag now lives in
+  `ENTRYPOINT`, which Docker appends to rather than replaces, preserving the
+  inventory path across operator overrides. **This changes how container
+  operators pass arguments**: documented `docker run` and `compose` examples
+  that explicitly passed `--device-mapping` would now duplicate it and cause
+  clap to refuse startup with "cannot be used multiple times". The updated
+  docs reflect the new image contract. This closes mecmcp#357's rustpanosmcp
+  case, the same defect class already fixed in rustmistmcp#78 and
+  rustproxmoxmcp#85.
+- Adopted the mecmcp packaging conformance check (#166), which mechanically
+  gates R1 (installer is executable in git's index), R5 (uninstalled commands
+  are not copied into the guest), and R6 (Dockerfile arguments cannot silently
+  drop a runtime flag). The LXC installer was made executable to satisfy R1.
+- Moved `rmcp` from 3.2.0 to 3.4.0 (#169). Upstream replaces the deprecated
+  `ServerInfo` type with `ServerConfig`, which splits protocol metadata from
+  server identity. No wire-format change. The `ServerInfo` type was deprecated
+  in rmcp 3.3.0 and removed in 3.4.0; this server now uses `ServerConfig`.
+- Moved `reqwest` from 0.13.4 to 0.13.5 (#165). Upstream fixes a bug in
+  HTTP/2 window size handling and updates transitive dependencies. The crate
+  is used for PAN-OS API requests.
+- Updated the distroless/cc-debian13:nonroot base image digest (#170),
+  picking up upstream security patches and glibc fixes.
+- Documentation fixes: added the missing `--allowed-origin` flag in the LXC
+  systemd drop-in example (#163), and added a complete how-to for building a
+  rust-panosmcp LXC from scratch (#162).
+
 ## [0.13.1] - 2026-09-06
 
 ### Changed

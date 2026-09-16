@@ -114,8 +114,8 @@ Both are shown below. The second is what the examples here were verified with.
 first:
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1
-image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.13.1 \
+docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0
+image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0 \
     --format '{{index .RepoDigests 0}}')
 ```
 
