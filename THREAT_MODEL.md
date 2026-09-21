@@ -251,7 +251,7 @@ retention and integrity remain the operator's logging responsibility.
   date, deterministic metadata/compression, checksums, and a two-build
   byte-identity gate. Builder and runtime container indexes are pinned by
   digest and tracked by Dependabot.
-- CI separately enforces Rust 1.88, warning-free build/test/docs, fuzz-target
+- CI separately enforces Rust 1.89, warning-free build/test/docs, fuzz-target
   compilation, RustSec advisories, license/bans/sources policy, packaging
   invariants, container construction, and a non-root read-only smoke run.
 - Bounded libFuzzer runs cover bearer/digest parsing, token-store JSON, PAN-OS

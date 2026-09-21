@@ -69,16 +69,16 @@ jobs:
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
   msrv:
-    name: Minimum supported Rust 1.88
+    name: Minimum supported Rust 1.89
     runs-on: ubuntu-24.04
     env:
-      RUSTUP_TOOLCHAIN: 1.88.0
+      RUSTUP_TOOLCHAIN: 1.89.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89.0
 
       - name: Check workspace at MSRV
         run: |
@@ -157,13 +157,13 @@ jobs:
     name: Release candidate packaging
     runs-on: ubuntu-24.04
     env:
-      RUSTUP_TOOLCHAIN: 1.88.0
+      RUSTUP_TOOLCHAIN: 1.89.0
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89.0
 
       - name: Verify packaging policy
         run: |

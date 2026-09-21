@@ -131,7 +131,7 @@ A `compose.example.yaml` is included in the repository.
 
 #### Build from source
 
-Requires Rust 1.88 or newer (MSRV).
+Requires Rust 1.89 or newer (MSRV).
 
 ```bash
 git clone https://github.com/fastrevmd-lab/rustpanosmcp.git
