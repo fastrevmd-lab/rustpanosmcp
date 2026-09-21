@@ -69,7 +69,7 @@ jobs:
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
   msrv:
-    name: Minimum supported Rust 1.89
+    name: Minimum supported Rust
     runs-on: ubuntu-24.04
     env:
       RUSTUP_TOOLCHAIN: 1.89.0
