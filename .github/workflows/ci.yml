@@ -191,6 +191,19 @@ jobs:
           docker run --rm --read-only --cap-drop=ALL \
             --security-opt=no-new-privileges rust-panosmcp:ci --version
 
+          # Regression test for mecmcp#357: config paths must survive operator overrides.
+          # Docker replaces CMD entirely when the caller supplies args, but ENTRYPOINT
+          # is appended to. Security-relevant flags (device-mapping, tokens-file,
+          # state-file) must live in ENTRYPOINT so they cannot be lost.
+          container_id=$(docker create rust-panosmcp:ci --host 0.0.0.0)
+          argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
+          docker rm "$container_id" > /dev/null
+
+          echo "$argv" | grep -q -- '--tokens-file' || { echo "FAIL: --tokens-file missing from argv with --host override"; exit 1; }
+          echo "$argv" | grep -q -- '--state-file' || { echo "FAIL: --state-file missing from argv with --host override"; exit 1; }
+          echo "$argv" | grep -q -- '--device-mapping' || { echo "FAIL: --device-mapping missing from argv with --host override"; exit 1; }
+          echo "PASS: config paths survive --host override"
+
       - name: Upload release candidate
         uses: actions/upload-artifact@v7
         with:

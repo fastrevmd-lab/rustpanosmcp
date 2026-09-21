@@ -45,5 +45,15 @@ ENV RUST_LOG=info
 EXPOSE 30031
 USER 65532:65532
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/rust-panosmcp", "--device-mapping", "/etc/rust-panosmcp/devices.json"]
-CMD []
+
+# ENTRYPOINT carries what must always hold: config paths and anything security-
+# relevant. CMD carries only what an operator is expected to replace: bind
+# address, port, and mode flags. Docker replaces CMD when the caller supplies
+# arguments, so security-relevant defaults must stay in ENTRYPOINT.
+ENTRYPOINT ["/usr/local/bin/rust-panosmcp", \
+    "--device-mapping", "/etc/rust-panosmcp/devices.json", \
+    "--tokens-file", "/var/lib/rust-panosmcp/tokens.json", \
+    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json"]
+CMD ["--transport", "streamable-http", \
+    "--host", "127.0.0.1", \
+    "--port", "30031"]
