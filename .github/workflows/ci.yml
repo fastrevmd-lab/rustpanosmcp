@@ -147,7 +147,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Conformance
-        uses: fastrevmd-lab/mecmcp/packaging/conformance@05c5abe33c735662a8818bb30973ed36ee3a91e3
+        uses: fastrevmd-lab/mecmcp/packaging/conformance@029d1f5ee877145e8f5456d2f5d063f0581c6af0
         with:
           staging: staging
           manifest: staging/conformance.toml
