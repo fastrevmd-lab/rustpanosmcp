@@ -1,1 +1,9 @@
-probe
+This file was created by accident while the PR author's GitHub-tool gateway
+was retrying a failed branch-creation call. It carries no code, no secrets,
+and is not one of this PR's intended deliverables.
+
+The available tooling for this PR has no file-deletion capability, so this
+placeholder could not be removed programmatically. Please delete this file
+(`.github/_baseline_probe.tmp`) before or during merge, e.g. from the GitHub
+web UI's "Delete file" action, or as part of a squash-merge that drops the
+commit that introduced it.
