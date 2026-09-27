@@ -468,6 +468,23 @@ Expected output:
 Aug 15 12:34:56 host rust-panosmcp[1234]: lab mode enabled: change sets are approved on creation with no second principal. Records carry approval_waiver=lab-mode. Do not run this against production devices.
 ```
 
+### `--allow-direct-commit`
+
+`commit_panos_candidate` on an operation created by `stage_config` directly — not via `create_panos_change_set` / `approve_panos_change_set` / `apply_panos_change_set` — stages, validates, and commits in one lifecycle, with no independent second-principal review at all: there is no change set to point one at. **Off by default**: without this flag, that commit is refused before the firewall is ever touched, identically over stdio and HTTP (stdio carries no caller context at all, so it cannot be treated any more leniently than an authenticated session).
+
+**Residual risk.** `--allow-direct-commit` is an escape hatch, not a fix. An operator who sets it has decided that running this specific path with no independent review is an acceptable risk for this deployment. That decision is:
+
+- **Logged loudly at startup**, same as `--lab-mode` above.
+- **Audited on every call.** A `commit_panos_candidate` call that ran under the flag carries `direct_commit_allowed=true` in its audit record; a refusal is audited too, as `result=error` naming `allow-direct-commit`.
+
+It does not add a second-principal review; it only makes running without one visible. Prefer the change-set flow (`create_panos_change_set` → `approve_panos_change_set` → `apply_panos_change_set`) wherever your workflow can use it, and reserve this flag for operations that genuinely cannot fit that shape.
+
+Enable it the same way as `--lab-mode`: append `--allow-direct-commit` to the service unit's `ExecStart` via a systemd drop-in, copying the shipped command in full. Confirm it took effect — unlike the lab-mode banner, this one is deliberately **not** grouped with the audit stream's per-call schema, so grep the plain startup message:
+
+```console
+sudo journalctl -u rust-panosmcp --since='5 minutes ago' | grep -i "allow-direct-commit is enabled"
+```
+
 ## Validate
 
 ```bash

@@ -76,6 +76,30 @@ pub struct Cli {
     #[arg(long = "allow-plane-owned-writes")]
     pub allow_plane_owned_writes: bool,
 
+    /// Allow committing an operation with no change-set approval at all.
+    ///
+    /// `commit_panos_candidate` on an operation created by `stage_config`
+    /// directly (not via `create_panos_change_set` /
+    /// `approve_panos_change_set` / `apply_panos_change_set`) stages,
+    /// validates, and commits in one lifecycle, with no independent
+    /// second-principal review -- there is no change set to route it through.
+    ///
+    /// This applies identically over stdio and HTTP: the gate is a
+    /// process-level setting and never reads caller context, so a stdio
+    /// session (which carries none at all) is refused on exactly the same
+    /// terms as an authenticated HTTP one.
+    ///
+    /// **Residual risk**: an operator can set this flag. Doing so is logged
+    /// loudly at startup and every direct-commit call is recorded in the audit
+    /// trail (`direct_commit_allowed=true`), but the second-principal review
+    /// the change-set flow provides does not happen. Prefer routing writes
+    /// through `create_panos_change_set` / `approve_panos_change_set` /
+    /// `apply_panos_change_set` wherever the workflow allows it.
+    ///
+    /// Defaults to false (refuse). Spelled identically on every mecmcp server.
+    #[arg(long = "allow-direct-commit")]
+    pub allow_direct_commit: bool,
+
     /// Absolute PEM certificate path; requires `--tls-key`.
     #[arg(long)]
     pub tls_cert: Option<PathBuf>,

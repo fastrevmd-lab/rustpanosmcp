@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--allow-direct-commit`, off by default.** `commit_panos_candidate` on an
+  operation with no `change_set_id` (created by `stage_config` directly, not
+  through `create_panos_change_set` / `approve_panos_change_set` /
+  `apply_panos_change_set`) commits with no second-principal review at all.
+  Without the flag, that commit is refused before the firewall is touched,
+  identically over stdio and HTTP. With it, the server logs loudly at startup
+  and every such call is audited (`direct_commit_allowed=true`; a refusal is
+  audited too). See `--allow-direct-commit` in the README.
+
 ### Changed
 
+- **`approve_panos_change_set` now requires a human approver.** The mecmcp
+  dependency's `ChangesetCoordinator::approve_change_set` gained an
+  `approver_actor_type` argument and refuses anything but
+  `mecmcp_audit::ActorType::Human` — an agent or an unattributed caller could
+  already never propose and approve the same change set, but nothing
+  previously stopped it from standing in as the second principal.
 - Raised Rust MSRV from 1.88 to 1.89.
 
 ## [0.14.0] - 2026-09-16

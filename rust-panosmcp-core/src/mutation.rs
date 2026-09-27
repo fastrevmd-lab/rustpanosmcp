@@ -645,6 +645,16 @@ impl PanosService {
         audit.meta("change_set_id", input.change_set_id.clone());
         audit.meta("digest", input.expected_digest.clone());
 
+        // rust_panosmcp_auth::ActorType (the caller-context type, re-exported
+        // from mecmcp_auth) is a distinct enum from mecmcp_audit::ActorType
+        // (what the coordinator gate checks against) -- converted explicitly
+        // rather than assumed identical.
+        let actor_type = match ctx.map(|c| c.actor_type) {
+            Some(rust_panosmcp_auth::ActorType::Human) => mecmcp_audit::ActorType::Human,
+            Some(rust_panosmcp_auth::ActorType::Agent) => mecmcp_audit::ActorType::Agent,
+            Some(rust_panosmcp_auth::ActorType::Unknown) | None => mecmcp_audit::ActorType::Unknown,
+        };
+
         let result = async {
             // Use shared coordinator's approve_change_set which handles all validation
             let output = self
@@ -654,6 +664,7 @@ impl PanosService {
                     input.device.clone(),
                     approver.to_owned(),
                     input.expected_digest,
+                    actor_type,
                 )
                 .await
                 .map_err(coord_error)?;
@@ -1378,6 +1389,18 @@ impl PanosService {
                 "operation_id",
                 "operation must validate successfully before commit",
             ));
+        }
+
+        // An operation with no change_set_id came from stage_config directly,
+        // not from create_change_set / approve_change_set / apply_change_set --
+        // there is no second-principal approval to point to. Refused unless
+        // the operator has accepted that risk with --allow-direct-commit.
+        // Applies identically over stdio and HTTP: the policy is a
+        // process-level setting and never reads `ctx`.
+        if record.change_set_id.is_none()
+            && let Err(e) = self.direct_commit.check(&mut audit)
+        {
+            return Err(policy("operation_id", &e.to_string()));
         }
         let client = self.client(&input.device)?;
 

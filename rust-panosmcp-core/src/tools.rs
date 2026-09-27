@@ -43,6 +43,10 @@ pub struct PanosService {
     pub(crate) evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     policy: Option<Arc<Policy<Action>>>,
     pub(crate) allow_plane_owned_writes: bool,
+    /// Gate for `commit_candidate` calls with no change_set_id -- committed
+    /// with no second-principal approval at all. Refused by default; set via
+    /// --allow-direct-commit.
+    pub(crate) direct_commit: mecmcp_audit::DirectCommitPolicy,
 }
 
 impl PanosService {
@@ -60,16 +64,18 @@ impl PanosService {
         state_path: Option<&Path>,
         lab_mode: bool,
     ) -> Result<Self> {
-        Self::new_with_options(inventory, state_path, lab_mode, None, false, None)
+        Self::new_with_options(inventory, state_path, lab_mode, None, false, false, None)
     }
 
     /// As [`new_with_state`](Self::new_with_state), with an approval TTL override.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_options(
         inventory: Inventory,
         state_path: Option<&Path>,
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
         allow_plane_owned_writes: bool,
+        allow_direct_commit: bool,
         evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self> {
         let limits = mecmcp_changeset::OperationLimits {
@@ -109,7 +115,13 @@ impl PanosService {
         }
         let coordinator = Arc::new(coordinator);
 
-        Self::build(inventory, coordinator, evidence, allow_plane_owned_writes)
+        Self::build(
+            inventory,
+            coordinator,
+            evidence,
+            allow_plane_owned_writes,
+            allow_direct_commit,
+        )
     }
 
     /// Rebuild clients while retaining in-flight mutation state across atomic reload.
@@ -121,6 +133,7 @@ impl PanosService {
             // start a second chain for one writer.
             previous.evidence.clone(),
             previous.allow_plane_owned_writes,
+            previous.direct_commit.is_allowed(),
         )
     }
 
@@ -129,6 +142,7 @@ impl PanosService {
         mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
         allow_plane_owned_writes: bool,
+        allow_direct_commit: bool,
     ) -> Result<Self> {
         let mut clients = BTreeMap::new();
         for device in inventory.entries() {
@@ -146,6 +160,7 @@ impl PanosService {
             evidence,
             policy: policy.map(Arc::new),
             allow_plane_owned_writes,
+            direct_commit: mecmcp_audit::DirectCommitPolicy::new(allow_direct_commit),
         })
     }
 

@@ -264,6 +264,24 @@ async fn all_tools_emit_audit_events() {
         .await
         .expect("create_change_set");
 
+    // Approval now requires a human principal (mecmcp's house rule: a human
+    // approves), so this needs a real caller context rather than the stdio
+    // `None` used elsewhere in this test -- stdio's implicit `ActorType::Unknown`
+    // would be refused.
+    let approver_ctx = rust_panosmcp_auth::CallerContext {
+        token_name: "approver".to_owned(),
+        devices: rust_panosmcp_auth::ScopeSet::Wildcard,
+        tools: rust_panosmcp_auth::ScopeSet::Wildcard,
+        grant: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: rust_panosmcp_auth::ActorType::Human,
+        client_name: None,
+        model_id: None,
+        session_id: None,
+        request_id: uuid::Uuid::new_v4(),
+    };
     let _ = service
         .approve_change_set(
             ApproveChangeSetInput {
@@ -271,7 +289,7 @@ async fn all_tools_emit_audit_events() {
                 change_set_id: change_set.change_set_id.clone(),
                 expected_digest: change_set.digest.clone(),
             },
-            None,
+            Some(&approver_ctx),
             "approver",
         )
         .await;
