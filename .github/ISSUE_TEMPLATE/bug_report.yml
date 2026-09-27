@@ -51,7 +51,7 @@ body:
     id: logs
     attributes:
       label: Relevant log output
-      description: Sanitized audit/tracing output or error text, if any
+      description: Sanitized audit/tracing output or error text, if any. Debug/trace logs can contain bearer tokens or PAN-OS API keys — redact before pasting.
       render: shell
     validations:
       required: false
