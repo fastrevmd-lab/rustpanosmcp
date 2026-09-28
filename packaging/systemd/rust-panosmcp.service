@@ -72,7 +72,7 @@ SystemCallErrorNumber=EPERM
 # IP address restrictions: deny link-local and cloud metadata ranges.
 # The server must reach:
 # - PAN-OS devices (per /etc/rust-panosmcp/devices.json inventory)
-# - SSDF audit endpoint at 192.168.1.151:8443 (when configured via drop-in)
+# - SSDF audit endpoint at 203.0.113.10:8443 (when configured via drop-in)
 # Link-local (169.254.0.0/16, fe80::/10) and AWS metadata (fd00:ec2::254/128)
 # are not used by any supported target.
 #

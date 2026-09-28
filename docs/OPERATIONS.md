@@ -109,10 +109,10 @@ Test issuance and deployment separately:
 ```bash
 certbot renew --dry-run
 RUST_PANOSMCP_LAB_VMID=<vmid> \
-RUST_PANOSMCP_CERT_HOST=rust-panosmcp.mechub.org \
-RENEWED_LINEAGE=/etc/letsencrypt/live/rust-panosmcp.mechub.org \
+RUST_PANOSMCP_CERT_HOST=rust-panosmcp.example.net \
+RENEWED_LINEAGE=/etc/letsencrypt/live/rust-panosmcp.example.net \
   /etc/letsencrypt/renewal-hooks/deploy/rust-panosmcp-lxc
-curl --fail-with-body https://rust-panosmcp.mechub.org:30031/mcp
+curl --fail-with-body https://rust-panosmcp.example.net:30031/mcp
 ```
 
 The unauthenticated MCP request is expected to return HTTP 401 after TLS
