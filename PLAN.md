@@ -26,7 +26,7 @@ environment token, or synchronous request handling.
 Keep v0.2.1 limited to the two findings from the v0.2.0 lab rollout:
 
 - [x] Replace the local-CA certificate at
-  `https://rust-panosmcp.mechub.org:30031` with a certificate chain trusted by
+  `https://rust-panosmcp.example.net:30031` with a certificate chain trusted by
   default client and system trust stores. Prefer ACME/public trust when the
   endpoint is eligible; otherwise formally distribute the private CA through
   each host's trust store. Acceptance: hostname, SAN, chain, and expiry
