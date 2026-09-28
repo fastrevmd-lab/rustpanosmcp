@@ -1378,6 +1378,10 @@ impl PanosService {
             ),
         };
         audit.meta("operation_id", input.operation_id.clone());
+        // Set when the direct-commit gate refuses: DirectCommitPolicy::check
+        // has already marked the scope Denied(direct_commit_disabled), and the
+        // generic `audit.fail(e)` below must not overwrite that (Percy F2).
+        let mut direct_commit_refused = false;
         let result = async {
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
         let mut record = self
@@ -1400,6 +1404,7 @@ impl PanosService {
         if record.change_set_id.is_none()
             && let Err(e) = self.direct_commit.check(&mut audit)
         {
+            direct_commit_refused = true;
             return Err(policy("operation_id", &e.to_string()));
         }
         let client = self.client(&input.device)?;
@@ -1497,6 +1502,8 @@ impl PanosService {
         .await;
         match &result {
             Ok(_) => audit.succeed(),
+            // Keep the Denied(direct_commit_disabled) outcome already recorded.
+            Err(_) if direct_commit_refused => {}
             Err(e) => audit.fail(e),
         }
         result

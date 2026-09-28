@@ -53,6 +53,8 @@ struct MockState {
     locks_removed: usize,
     commit_fails: bool,
     lock_release_fails: bool,
+    /// Commit requests the mock device received (Percy F4, MEC-352).
+    commit_requests: usize,
 }
 
 async fn api(
@@ -97,6 +99,7 @@ async fn api(
         return success("<result><job>101</job></result>");
     }
     if request_type == Some("commit") && action == Some("partial") {
+        state.lock().expect("state").commit_requests += 1;
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         return success("<result><job>102</job></result>");
     }
@@ -173,6 +176,7 @@ async fn fixture_with_direct_commit(
         locks_removed: 0,
         commit_fails,
         lock_release_fails,
+        commit_requests: 0,
     }));
     let app = Router::new()
         .route("/api/", post(api))
@@ -847,11 +851,16 @@ async fn commit_candidate_without_change_set_is_refused_without_the_flag() {
         );
     }
 
-    // Matches the existing convention for every other commit_candidate
-    // refusal in this file (e.g. plane-owned-writes): the policy error's text
-    // lands in the audit record's `error=` field via the generic
-    // `audit.fail(e)` at the end of the function, rather than a separate
-    // `authorization=denied` tag.
+    // The gate refused before the device was touched: the mock firewall must
+    // have received zero commit requests (Percy F4, MEC-352).
+    assert_eq!(
+        fixture.state.lock().expect("state").commit_requests,
+        0,
+        "a refused direct commit must never reach the device"
+    );
+
+    // The refusal is audited as an authorization denial naming the reason,
+    // not overwritten into a generic `result=error` (Percy F2, MEC-352).
     let audit_output = {
         let bytes = cap.0.lock().expect("lock audit capture").clone();
         String::from_utf8(bytes).expect("valid UTF-8 audit output")
@@ -867,8 +876,12 @@ async fn commit_candidate_without_change_set_is_refused_without_the_flag() {
     );
     for line in commit_audits {
         assert!(
-            line.contains("result=error") && line.contains("allow-direct-commit"),
-            "the refusal must be audited: {line}"
+            line.contains("authorization=denied") && line.contains("direct_commit_disabled"),
+            "the refusal must be audited as a denial naming the reason: {line}"
+        );
+        assert!(
+            !line.contains("result=error"),
+            "the denial must not be overwritten by the generic error path: {line}"
         );
     }
 }

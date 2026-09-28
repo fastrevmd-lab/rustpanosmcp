@@ -7,7 +7,9 @@ use crate::{
     observability::AuditScope,
     xml::{DeviceFacts, parse_device_facts, validate_read_only_op_command, validate_read_xpath},
 };
-use mecmcp_policy::{DomainRules, Policy, RuleSource, compile_rules};
+use mecmcp_policy::{
+    CommandAllowlist, CommandDomain, CommandMode, DomainRules, Policy, RuleSource, compile_rules,
+};
 use rust_panosmcp_auth::CallerContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -220,10 +222,20 @@ impl PanosService {
         }
 
         if has_any_rules {
+            // Blocklist mode keeps this server's existing semantics (commands
+            // are allowed unless a rule denies them). mecmcp >= 0.24 made the
+            // mode explicit and defaults to Allowlist, so it must be passed.
             Ok(Some(Policy::new(
-                commands_domain,
+                CommandMode::Blocklist,
+                CommandDomain {
+                    blocklist: commands_domain,
+                    allowlist: CommandAllowlist::default(),
+                },
                 config_domain,
-                pfe_commands_domain,
+                CommandDomain {
+                    blocklist: pfe_commands_domain,
+                    allowlist: CommandAllowlist::default(),
+                },
             )))
         } else {
             Ok(None)
@@ -320,6 +332,15 @@ impl PanosService {
                                 source.as_str(),
                                 rule.pattern
                             ),
+                        });
+                    }
+                    // Must deny (Percy F1, MEC-352): never a wildcard or allow.
+                    // Unreachable in Blocklist mode today, but a future mode
+                    // change must fail closed rather than silently allow.
+                    Decision::DenyAllowlist { reason, .. } => {
+                        return Err(PanosMcpError::Policy {
+                            field: "command",
+                            reason: format!("blocked by command allowlist: {reason:?}"),
                         });
                     }
                 }

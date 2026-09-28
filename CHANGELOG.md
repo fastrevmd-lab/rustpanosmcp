@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mecmcp_audit::ActorType::Human` — an agent or an unattributed caller could
   already never propose and approve the same change set, but nothing
   previously stopped it from standing in as the second principal.
+- **Upgrade note — approver tokens must be `human`.** Approval now checks the
+  approving token's `actor_type`. Tokens issued without `--actor-type` are
+  `unknown` and are refused as approvers, as are `agent` tokens. Before
+  upgrading, re-issue every token your operators use to approve change sets
+  with `rust-panosmcp token add ... --actor-type human`. **stdio sessions
+  cannot approve**: they carry no caller identity, so approve over
+  authenticated HTTP.
+- **Direct-commit refusals are audited as denials.** A `commit_panos_candidate`
+  refused by the `--allow-direct-commit` gate is now recorded as
+  `authorization=denied` with `reason=direct_commit_disabled`, instead of a
+  generic `result=error`.
+- Pinned the `mecmcp-*` crates to the released `v0.24.0` tag instead of an
+  unreleased commit.
 - Raised Rust MSRV from 1.88 to 1.89.
 
 ## [0.14.0] - 2026-09-16

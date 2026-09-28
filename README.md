@@ -468,6 +468,10 @@ Expected output:
 Aug 15 12:34:56 host rust-panosmcp[1234]: lab mode enabled: change sets are approved on creation with no second principal. Records carry approval_waiver=lab-mode. Do not run this against production devices.
 ```
 
+### Approver tokens must be `human`
+
+`approve_panos_change_set` only accepts a second principal whose token is marked `actor_type: human`. Tokens issued without `--actor-type` are `unknown`, and they are refused as approvers, as are `agent` tokens. Issue approver tokens with `rust-panosmcp token add ... --actor-type human`. stdio sessions carry no caller identity and **cannot approve**; approvals go over authenticated HTTP.
+
 ### `--allow-direct-commit`
 
 `commit_panos_candidate` on an operation created by `stage_config` directly — not via `create_panos_change_set` / `approve_panos_change_set` / `apply_panos_change_set` — stages, validates, and commits in one lifecycle, with no independent second-principal review at all: there is no change set to point one at. **Off by default**: without this flag, that commit is refused before the firewall is ever touched, identically over stdio and HTTP (stdio carries no caller context at all, so it cannot be treated any more leniently than an authenticated session).
@@ -475,7 +479,7 @@ Aug 15 12:34:56 host rust-panosmcp[1234]: lab mode enabled: change sets are appr
 **Residual risk.** `--allow-direct-commit` is an escape hatch, not a fix. An operator who sets it has decided that running this specific path with no independent review is an acceptable risk for this deployment. That decision is:
 
 - **Logged loudly at startup**, same as `--lab-mode` above.
-- **Audited on every call.** A `commit_panos_candidate` call that ran under the flag carries `direct_commit_allowed=true` in its audit record; a refusal is audited too, as `result=error` naming `allow-direct-commit`.
+- **Audited on every call.** A `commit_panos_candidate` call that ran under the flag carries `direct_commit_allowed=true` in its audit record; a refusal is audited too, as `authorization=denied` with `reason=direct_commit_disabled`.
 
 It does not add a second-principal review; it only makes running without one visible. Prefer the change-set flow (`create_panos_change_set` → `approve_panos_change_set` → `apply_panos_change_set`) wherever your workflow can use it, and reserve this flag for operations that genuinely cannot fit that shape.
 
