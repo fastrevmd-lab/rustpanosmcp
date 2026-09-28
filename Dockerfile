@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-# Builder version is taken from rust-toolchain.toml (currently 1.97.0). The two
+# Builder version is taken from rust-toolchain.toml (currently 1.98.1). The two
 # must stay in sync. Both image indexes are pinned and Dependabot proposes
 # digest refreshes; the explicit Debian generation prevents an unplanned ABI jump.
-# Full patch version, deliberately. `rust:1.97-slim-bookworm` is a floating
-# tag: it already points at 1.97.1 while rust-toolchain.toml declares 1.97.0,
+# Full patch version, deliberately. `rust:1.98-slim-bookworm` is a floating
+# tag: it already points at 1.98.2 while rust-toolchain.toml declares 1.98.1,
 # so a digest-only Dependabot refresh moves the compiler across a point
 # release while the CI sync check still reports a match. Digest resolved from
 # the registry 2026-08-24.
