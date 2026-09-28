@@ -279,6 +279,20 @@ pub fn validate_read_xpath(xpath: &str) -> Result<()> {
             reason: "quotes or predicate brackets are unbalanced".to_owned(),
         });
     }
+    // The character allowlist above permits `:` (for `[@attr=...]`-adjacent
+    // syntax) and lets brackets balance in pairs, which is not tight enough
+    // to reject XPath axis steps (`parent::`, `ancestor::`, ...) or
+    // predicates that are not a single attribute equality. Both pass the
+    // checks above as plain text while addressing a different node once an
+    // XPath engine evaluates them -- shared with `validate_write_xpath` and
+    // `MutationGrant::allows_xpath` so none of the three can disagree about
+    // what an xpath addresses (MEC-528 F1).
+    if !rust_panosmcp_auth::is_strict_xpath_shape(xpath) {
+        return Err(PanosMcpError::Policy {
+            field: "xpath",
+            reason: "value contains unsupported XPath syntax".to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -1073,6 +1087,57 @@ mod tests {
         assert!(validate_read_xpath("/config/../mgt-config").is_err());
         assert!(validate_read_xpath("/op/commands").is_err());
         assert!(validate_read_xpath("/config/*").is_err());
+    }
+
+    /// MEC-528 F1: an XPath axis step (`name::`, including axes that move
+    /// *up* the tree, such as `parent::` or `ancestor::`) passed the old
+    /// character-allowlist-plus-prefix check as plain text while addressing
+    /// a node outside the path the string appears to name. `mgt-config` is
+    /// otherwise blocked by device role restriction and the xpath
+    /// blocklist -- an axis step must not be a way around either.
+    #[test]
+    fn rejects_axis_steps_on_read() {
+        for xpath in [
+            "/config/devices/parent::node()",
+            "/config/shared/address/entry[@name='x']/ancestor::config",
+            "/config/shared/address/entry[@name='x']/following-sibling::entry",
+        ] {
+            assert!(
+                validate_read_xpath(xpath).is_err(),
+                "axis syntax must be rejected: {xpath}"
+            );
+        }
+    }
+
+    /// MEC-528 F1: a predicate that is not a single `@attr='literal'`
+    /// equality -- an attribute existence test, or comparing one attribute
+    /// to another -- matches every sibling under a step, not the one entry
+    /// the granted root's own predicate names.
+    #[test]
+    fn rejects_non_equality_predicates_on_read() {
+        for xpath in [
+            "/config/shared/address/entry[@name]",
+            "/config/shared/address/entry[@name=@other]",
+            "/config/shared/address/entry[position()=1]",
+        ] {
+            assert!(
+                validate_read_xpath(xpath).is_err(),
+                "a non-equality predicate must be rejected: {xpath}"
+            );
+        }
+    }
+
+    /// The same axis escape must be refused on the write path, even when the
+    /// axis step appears after every character of an operator's granted
+    /// root -- a text-prefix match alone cannot see that the axis moves the
+    /// evaluated node outside that root (MEC-528 F1).
+    #[test]
+    fn rejects_axis_escape_on_write() {
+        let roots = vec![
+            "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book".to_owned(),
+        ];
+        let escape = "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book/entry[@name='x']/parent::node()/entry[@name='y']";
+        assert!(validate_write_xpath(escape, &roots).is_err());
     }
 
     #[test]

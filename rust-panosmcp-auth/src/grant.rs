@@ -89,6 +89,88 @@ fn rewrite_predicate(rest: &str) -> Option<(String, usize)> {
     Some((format!("[@{attr}='{value}']"), consumed))
 }
 
+/// Whether every `/`-delimited step of `xpath` matches the one shape every
+/// read/write/grant xpath check is allowed to accept: a bare name, or
+/// `name[@attr='literal']`/`name[@attr="literal"]` with exactly one equality
+/// predicate.
+///
+/// This exists because a naive prefix-and-character check (what
+/// `validate_read_xpath`, `validate_write_xpath` and `allows_xpath` each did
+/// independently before) accepts XPath axis syntax (`parent::`,
+/// `ancestor::`, ...), a bare `.`/`..` step, and predicates that are not a
+/// single attribute equality (an existence test `[@name]`, or a
+/// cross-attribute compare). All of those pass a "starts with the granted
+/// root, next char is `/`" test as plain text while addressing a different
+/// node once an XPath engine evaluates the axis or predicate -- the string
+/// looks like a descendant of the root, but is not one (MEC-528 F1). Calling
+/// this from all three checks means they cannot disagree about what an
+/// xpath addresses.
+#[must_use]
+pub fn is_strict_xpath_shape(xpath: &str) -> bool {
+    if xpath.contains("::") {
+        return false;
+    }
+    xpath.split('/').skip(1).all(is_strict_xpath_step)
+}
+
+fn is_strict_xpath_step(step: &str) -> bool {
+    if step.is_empty() || step == "." || step == ".." {
+        return false;
+    }
+    let (name, predicate) = match step.find('[') {
+        Some(index) => (&step[..index], Some(&step[index..])),
+        None => (step, None),
+    };
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return false;
+    }
+    predicate.is_none_or(is_strict_xpath_predicate)
+}
+
+/// Whether `predicate` is exactly one `[@attr='literal']` (or `"..."`)
+/// equality, with nothing before, inside, or after it that could change what
+/// it matches.
+fn is_strict_xpath_predicate(predicate: &str) -> bool {
+    let Some(rest) = predicate.strip_prefix("[@") else {
+        return false;
+    };
+    let Some(equals) = rest.find('=') else {
+        return false;
+    };
+    let attr = &rest[..equals];
+    if attr.is_empty()
+        || !attr
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return false;
+    }
+    let value_part = &rest[equals + 1..];
+    let Some(quote) = value_part.chars().next() else {
+        return false;
+    };
+    if quote != '\'' && quote != '"' {
+        return false;
+    }
+    let value_start = quote.len_utf8();
+    let Some(relative_end) = value_part[value_start..].find(quote) else {
+        return false;
+    };
+    let value_end = value_start + relative_end;
+    let value = &value_part[value_start..value_end];
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii() && !byte.is_ascii_control() && byte != b'\\')
+    {
+        return false;
+    }
+    &value_part[value_end + quote.len_utf8()..] == "]"
+}
+
 /// Token-specific write authority, intersected with the inventory policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +185,13 @@ impl MutationGrant {
     /// Whether the XPath is equal to or below a granted root.
     #[must_use]
     pub fn allows_xpath(&self, xpath: &str) -> bool {
+        // Reject axis syntax and non-equality predicates before comparing
+        // roots at all: a text prefix match cannot see that `parent::`,
+        // `[@name]`, or `[@a=@b]` address a different node than the
+        // characters after the granted root suggest (MEC-528 F1).
+        if !is_strict_xpath_shape(xpath) {
+            return false;
+        }
         // Compared after canonicalising quote style, so a grant written with
         // double quotes and a request written with single quotes match — they
         // are the same XPath (rustpanosmcp#82).
@@ -242,6 +331,44 @@ mod xpath_quote_tests {
             "a value with an apostrophe must pass through unchanged"
         );
         assert!(grant(awkward).allows_xpath(awkward));
+    }
+
+    /// MEC-528 F1: axis syntax (including axes that move *up* the tree) must
+    /// not let a granted write escape its root. Before `is_strict_xpath_shape`
+    /// gated `allows_xpath`, this passed as "starts with the granted root,
+    /// next char is `/`" even though an XPath engine evaluating `parent::`
+    /// addresses a node the granted root does not cover.
+    #[test]
+    fn axis_syntax_does_not_escape_the_granted_root() {
+        let root = "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book";
+        for escape in [
+            format!("{root}/entry[@name='x']/parent::node()/entry[@name='y']"),
+            format!("{root}/entry[@name='x']/ancestor::config"),
+            format!("{root}/following-sibling::vsys"),
+        ] {
+            assert!(
+                !grant(root).allows_xpath(&escape),
+                "axis syntax must not be granted: {escape}"
+            );
+        }
+    }
+
+    /// MEC-528 F1: a predicate that is not a single attribute equality --
+    /// an existence test, or comparing one attribute to another -- matches
+    /// every sibling under a step, which is broader than the one entry a
+    /// grant's own predicate names.
+    #[test]
+    fn non_equality_predicates_do_not_widen_the_granted_root() {
+        let root = "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book";
+        for candidate in [
+            format!("{root}/entry[@name]"),
+            format!("{root}/entry[@name=@other]"),
+        ] {
+            assert!(
+                !grant(root).allows_xpath(&candidate),
+                "a non-equality predicate must not be granted: {candidate}"
+            );
+        }
     }
 
     /// Anything that is not a complete, well-formed predicate is left alone, so
