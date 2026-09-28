@@ -48,7 +48,7 @@ async fn guarded_add_commit_delete_commit_round_trip() {
         action: StageAction::Set,
         xpath: root.clone(),
         element: Some(format!(
-            "<entry name=\"{PROBE_NAME}\"><ip-netmask>192.0.2.203</ip-netmask><description>reversible rust-panosmcp Phase 3 lab probe</description></entry>"
+            "<entry name=\"{PROBE_NAME}\"><ip-netmask>192.0.2.3</ip-netmask><description>reversible rust-panosmcp Phase 3 lab probe</description></entry>"
         )),
         destructive_confirmation: None,
     };

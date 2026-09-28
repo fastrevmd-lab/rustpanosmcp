@@ -27,7 +27,7 @@ ExecStart=/usr/local/bin/rust-panosmcp \
     --audit-journald \
     --audit-redact devices=hmac \
     --audit-hmac-key-file /etc/rust-panosmcp/audit-hmac.key \
-    --ssdf-audit-endpoint https://192.168.1.151:8443 \
+    --ssdf-audit-endpoint https://203.0.113.10:8443 \
     --ssdf-audit-server-id prod-labmode-panos \
     --ssdf-audit-password-file /etc/rust-panosmcp/ssdf-audit.pw \
     --ssdf-audit-verify-password-file /etc/rust-panosmcp/ssdf-audit-verify.pw \

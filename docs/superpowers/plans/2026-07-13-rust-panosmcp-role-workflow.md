@@ -485,7 +485,7 @@ Expected: README prints the new routing sentence and every link target exists.
 Run:
 
 ```bash
-if rg -n 'panosvm|rust-panosmcp\\.mechub\\.org|Authorization: Bearer|PANOSVM_API_KEY|lab-change-(writer|reviewer)' docs/MCP_ROLE_WORKFLOW.md; then
+if rg -n 'panosvm|rust-panosmcp\\.example\\.net|Authorization: Bearer|PANOSVM_API_KEY|lab-change-(writer|reviewer)' docs/MCP_ROLE_WORKFLOW.md; then
   echo 'unexpected environment-specific or secret material found' >&2
   exit 1
 fi
