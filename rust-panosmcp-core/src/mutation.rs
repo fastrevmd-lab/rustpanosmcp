@@ -1078,10 +1078,18 @@ impl PanosService {
     }
 
     /// Stage one fingerprint-guarded candidate mutation.
+    ///
+    /// `grant`, when the caller's token carries one, narrows the device-wide
+    /// `allowed_xpath_roots`/action policy to that token's own scope -- the
+    /// same enforcement `create_panos_change_set`/`apply_panos_change_set`
+    /// apply. Without this, a token holding a mutation grant narrower than
+    /// the device policy (e.g. one vsys) could still write anywhere in the
+    /// device's full policy through this v0.1 tool (MEC-528 class 2).
     pub async fn stage_config(
         &self,
         input: StageConfigInput,
         owner: &str,
+        grant: Option<&MutationGrant>,
         ctx: Option<&CallerContext>,
         cancellation: CancellationToken,
     ) -> Result<StageConfigOutput> {
@@ -1099,6 +1107,18 @@ impl PanosService {
         validate_fingerprint(&input.expected_candidate_fingerprint)?;
         validate_write_xpath(&input.xpath, &policy.allowed_xpath_roots)?;
         validate_stage_payload(&input, policy.allow_delete)?;
+        if let Some(grant) = grant {
+            if !grant.allows_action(input.action.into()) {
+                let error = self::policy("action", "action is outside this token's mutation grant");
+                audit.fail(&error);
+                return Err(error);
+            }
+            if !grant.allows_xpath(&input.xpath) {
+                let error = self::policy("xpath", "XPath is outside this token's mutation grant");
+                audit.fail(&error);
+                return Err(error);
+            }
+        }
         let _guard = self
             .mutations
             .device_guard(&client.mutation_lock_key(), &cancellation)

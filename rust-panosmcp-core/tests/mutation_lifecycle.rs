@@ -599,6 +599,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await;
@@ -618,6 +619,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )
@@ -722,6 +724,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -787,6 +790,7 @@ async fn commit_candidate_without_change_set_is_refused_without_the_flag() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )
@@ -916,6 +920,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -992,6 +997,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -1067,6 +1073,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )

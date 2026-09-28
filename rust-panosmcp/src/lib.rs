@@ -546,9 +546,10 @@ impl PanosMcpServer {
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
+        let grant = caller.as_ref().and_then(|caller| caller.grant.as_ref());
         Self::to_call_result(
             service
-                .stage_config(input, &principal, caller.as_ref(), cancellation)
+                .stage_config(input, &principal, grant, caller.as_ref(), cancellation)
                 .await,
         )
     }
