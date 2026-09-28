@@ -209,14 +209,32 @@ impl PanosService {
                     // class 3), then escape the glob metacharacters an XPath
                     // predicate is made of but does not mean as wildcards
                     // (see `escape_xpath_glob_metacharacters`).
-                    let rules: Vec<(Action, String)> = blocklist
-                        .xpath
-                        .iter()
-                        .map(|pattern| {
-                            let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(pattern);
-                            (Action::Deny, escape_xpath_glob_metacharacters(&canonical))
-                        })
-                        .collect();
+                    let mut rules: Vec<(Action, String)> =
+                        Vec::with_capacity(blocklist.xpath.len());
+                    for pattern in &blocklist.xpath {
+                        // MEC-528 F2: `escape_xpath_glob_metacharacters` also
+                        // escapes a literal `\` (globset's own escape
+                        // character) so it cannot combine with an adjacent
+                        // `[`/`]`/`?` it did not intend to escape. That is
+                        // correct for a pattern with no `\` in it, but it
+                        // silently mangles a pattern an operator hand-escaped
+                        // themselves (`\[` meant as a literal bracket):
+                        // double-escaping turns it into something that
+                        // matches a different, narrower or wider, set of
+                        // xpaths than either the operator or this function
+                        // intended -- a blocklist rule that fails open with
+                        // no error at load time. Reject it instead: `\` has
+                        // no meaning in an XPath predicate, so a rule cannot
+                        // legitimately need one.
+                        if pattern.contains('\\') {
+                            return Err(PanosMcpError::Inventory(format!(
+                                "device '{}' blocklist xpath pattern '{pattern}' must not contain '\\'",
+                                device.metadata.name
+                            )));
+                        }
+                        let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(pattern);
+                        rules.push((Action::Deny, escape_xpath_glob_metacharacters(&canonical)));
+                    }
                     let compiled = compile_rules(
                         &rules,
                         &device.metadata.name,
