@@ -6,6 +6,12 @@
 //! the device's full `allowed_xpath_roots`, because `stage_config` only
 //! checked the device policy and never consulted `caller.grant` -- unlike
 //! `create_panos_change_set`/`apply_panos_change_set`, which do.
+//!
+//! MEC-528 F4: separately, an HTTP token permitted to call
+//! `stage_panos_config` but whose entry carries *no* grant at all used to
+//! reach `stage_config` with `grant = None`, which only checks the
+//! device-wide policy -- unlike the v0.2 change-set tools, which already
+//! refuse a grantless HTTP caller via `mutation_identity`.
 
 use axum::{
     body::Body,
@@ -30,6 +36,9 @@ const GRANT_ROOT: &str =
 const OUTSIDE_GRANT: &str = "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys2']/address/entry[@name='probe']";
 
 const GRANT_DENIAL: &str = "outside this token's mutation grant";
+/// The refusal F4 exists to keep from coming back: an HTTP token with no
+/// grant at all must not reach the device-policy-only check in `stage_config`.
+const NO_GRANT: &str = "require a token-specific mutation grant";
 
 struct Fixture {
     _directory: TempDir,
@@ -37,7 +46,7 @@ struct Fixture {
     secret: String,
 }
 
-fn fixture() -> Fixture {
+fn fixture(grant: Option<MutationGrant>) -> Fixture {
     let directory = tempfile::tempdir().expect("temporary directory");
     let key_path = directory.path().join("panos-api-key");
     fs::write(&key_path, "not-a-live-key").expect("API key fixture");
@@ -63,17 +72,13 @@ fn fixture() -> Fixture {
         devices: Some(&known_devices),
         tools: rust_panosmcp_auth::KNOWN_TOOLS,
     };
-    let grant = MutationGrant {
-        allowed_xpath_roots: vec![GRANT_ROOT.to_owned()],
-        actions: vec![MutationAction::Set],
-    };
     let secret = TokenStoreFile::add_with_options(
         &token_path,
         "narrow-writer",
         ScopeSet::Allowlist(vec!["lab-fw".to_owned()]),
         ScopeSet::Allowlist(vec!["stage_panos_config".to_owned()]),
         None,
-        Some(grant),
+        grant,
         None,
         None,
         None,
@@ -150,11 +155,18 @@ async fn body_of(runtime: &RuntimeState, request: Request<Body>) -> String {
     text
 }
 
+fn narrow_grant() -> MutationGrant {
+    MutationGrant {
+        allowed_xpath_roots: vec![GRANT_ROOT.to_owned()],
+        actions: vec![MutationAction::Set],
+    }
+}
+
 /// The defect this test exists to keep from coming back: a token's narrow
 /// grant did not survive `stage_panos_config`, only the device-wide policy.
 #[tokio::test]
 async fn a_narrowly_granted_token_cannot_stage_outside_its_grant_via_v01_tool() {
-    let fixture = fixture();
+    let fixture = fixture(Some(narrow_grant()));
     let bearer = format!("Bearer {}", fixture.secret);
 
     let body = body_of(&fixture.runtime, stage_config(&bearer, OUTSIDE_GRANT)).await;
@@ -171,7 +183,7 @@ async fn a_narrowly_granted_token_cannot_stage_outside_its_grant_via_v01_tool() 
 /// this fixture points at no real firewall).
 #[tokio::test]
 async fn a_narrowly_granted_token_may_stage_inside_its_grant() {
-    let fixture = fixture();
+    let fixture = fixture(Some(narrow_grant()));
     let bearer = format!("Bearer {}", fixture.secret);
 
     let body = body_of(
@@ -186,5 +198,23 @@ async fn a_narrowly_granted_token_may_stage_inside_its_grant() {
     assert!(
         !body.contains(GRANT_DENIAL),
         "a write inside the token's own grant was refused as ungranted: {body}"
+    );
+}
+
+/// MEC-528 F4: an HTTP token that is permitted to call `stage_panos_config`
+/// but whose entry carries no grant at all must be refused before
+/// `stage_config`, the same way `create_panos_change_set` already refuses a
+/// grantless HTTP caller -- not silently fall through to the device-wide
+/// policy alone.
+#[tokio::test]
+async fn a_grantless_http_token_may_not_stage_via_v01_tool() {
+    let fixture = fixture(None);
+    let bearer = format!("Bearer {}", fixture.secret);
+
+    let body = body_of(&fixture.runtime, stage_config(&bearer, GRANT_ROOT)).await;
+
+    assert!(
+        body.contains(NO_GRANT),
+        "a grantless HTTP token was allowed to reach stage_config: {body}"
     );
 }
