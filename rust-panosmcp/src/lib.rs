@@ -56,10 +56,20 @@ impl RuntimeState {
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
     ) -> Result<Self, RuntimeLoadError> {
-        Self::load_with_state(inventory_path, token_path, None, false, None, false, None)
+        Self::load_with_state(
+            inventory_path,
+            token_path,
+            None,
+            false,
+            None,
+            false,
+            false,
+            None,
+        )
     }
 
     /// Load runtime with an optional persistent private mutation-state file.
+    #[allow(clippy::too_many_arguments)]
     pub fn load_with_state(
         inventory_path: impl AsRef<Path>,
         token_path: Option<&Path>,
@@ -67,6 +77,7 @@ impl RuntimeState {
         lab_mode: bool,
         approval_timeout_secs: Option<u64>,
         allow_plane_owned_writes: bool,
+        allow_direct_commit: bool,
         evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self, RuntimeLoadError> {
         let inventory_path = inventory_path.as_ref().to_path_buf();
@@ -80,6 +91,7 @@ impl RuntimeState {
                 lab_mode,
                 approval_timeout_secs,
                 allow_plane_owned_writes,
+                allow_direct_commit,
                 evidence,
             },
         )?;
@@ -157,6 +169,7 @@ struct SnapshotOptions {
     lab_mode: bool,
     approval_timeout_secs: Option<u64>,
     allow_plane_owned_writes: bool,
+    allow_direct_commit: bool,
     evidence: Option<std::sync::Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
 }
 
@@ -171,6 +184,7 @@ fn load_snapshot(
         lab_mode,
         approval_timeout_secs,
         allow_plane_owned_writes,
+        allow_direct_commit,
         evidence,
     } = options;
     let state_path = state_path.as_deref();
@@ -183,6 +197,7 @@ fn load_snapshot(
             lab_mode,
             approval_timeout_secs,
             allow_plane_owned_writes,
+            allow_direct_commit,
             evidence,
         )?,
     });

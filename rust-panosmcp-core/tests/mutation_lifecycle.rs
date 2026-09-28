@@ -53,6 +53,8 @@ struct MockState {
     locks_removed: usize,
     commit_fails: bool,
     lock_release_fails: bool,
+    /// Commit requests the mock device received (Percy F4, MEC-352).
+    commit_requests: usize,
 }
 
 async fn api(
@@ -97,6 +99,7 @@ async fn api(
         return success("<result><job>101</job></result>");
     }
     if request_type == Some("commit") && action == Some("partial") {
+        state.lock().expect("state").commit_requests += 1;
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         return success("<result><job>102</job></result>");
     }
@@ -145,6 +148,14 @@ impl Drop for Fixture {
 }
 
 async fn fixture(commit_fails: bool, lock_release_fails: bool) -> Fixture {
+    fixture_with_direct_commit(commit_fails, lock_release_fails, true).await
+}
+
+async fn fixture_with_direct_commit(
+    commit_fails: bool,
+    lock_release_fails: bool,
+    allow_direct_commit: bool,
+) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");
     let issued = generate_simple_self_signed(vec!["localhost".to_owned()]).expect("certificate");
     let cert_path = directory.path().join("ca.pem");
@@ -165,6 +176,7 @@ async fn fixture(commit_fails: bool, lock_release_fails: bool) -> Fixture {
         locks_removed: 0,
         commit_fails,
         lock_release_fails,
+        commit_requests: 0,
     }));
     let app = Router::new()
         .route("/api/", post(api))
@@ -194,8 +206,16 @@ async fn fixture(commit_fails: bool, lock_release_fails: bool) -> Fixture {
     let inventory = Inventory::load_with_environment(&inventory_path, &TestEnvironment)
         .expect("mutation inventory");
     let state_path = directory.path().join("mutation-state.json");
-    let service =
-        PanosService::new_with_state(inventory, Some(&state_path), false).expect("service");
+    let service = PanosService::new_with_options(
+        inventory,
+        Some(&state_path),
+        false,
+        None,
+        false,
+        allow_direct_commit,
+        None,
+    )
+    .expect("service");
     Fixture {
         _directory: directory,
         inventory_path,
@@ -217,8 +237,16 @@ fn persisted_operation(fixture: &Fixture, operation_id: &str) -> serde_json::Val
 fn recovered_service(fixture: &Fixture) -> PanosService {
     let inventory = Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
         .expect("recovered inventory");
-    PanosService::new_with_state(inventory, Some(&fixture.state_path), false)
-        .expect("recover persistent mutation state")
+    PanosService::new_with_options(
+        inventory,
+        Some(&fixture.state_path),
+        false,
+        None,
+        false,
+        true,
+        None,
+    )
+    .expect("recover persistent mutation state")
 }
 
 #[tokio::test]
@@ -305,10 +333,27 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
             .is_err(),
         "digest mismatch must fail"
     );
-    // Perform the approval - audit events will be captured
+    // Perform the approval - audit events will be captured. A human
+    // principal is required (mecmcp's house rule: a human approves); stdio's
+    // implicit ActorType::Unknown, used above where the calls must fail
+    // anyway, would be refused here too.
+    let reviewer_ctx = rust_panosmcp_auth::CallerContext {
+        token_name: "reviewer".to_owned(),
+        devices: rust_panosmcp_auth::ScopeSet::Wildcard,
+        tools: rust_panosmcp_auth::ScopeSet::Wildcard,
+        grant: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: rust_panosmcp_auth::ActorType::Human,
+        client_name: None,
+        model_id: None,
+        session_id: None,
+        request_id: uuid::Uuid::new_v4(),
+    };
     let approved = fixture
         .service
-        .approve_change_set(approval, None, "reviewer")
+        .approve_change_set(approval, Some(&reviewer_ctx), "reviewer")
         .await
         .expect("independent approval");
 
@@ -441,6 +486,86 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
             .expect("discard status after restart")
             .state,
         "discarded"
+    );
+}
+
+/// House rule: a human approves. An agent principal -- distinct from the
+/// owner, so separation of duties alone would let this through -- must still
+/// be refused as the second approver.
+#[tokio::test]
+async fn approve_change_set_by_agent_actor_is_refused() {
+    let _serial = AUDIT_SERIAL.lock().await;
+    let fixture = fixture(false, false).await;
+    let initial = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+    let grant = MutationGrant {
+        allowed_xpath_roots: vec!["/config/shared/address".to_owned()],
+        actions: vec![MutationAction::Set, MutationAction::Delete],
+    };
+    let planned = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: initial.candidate_fingerprint,
+                actions: vec![ChangeSetAction {
+                    action: StageAction::Set,
+                    xpath: "/config/shared/address".to_owned(),
+                    element: Some(
+                        "<entry name=\"test\"><ip-netmask>192.0.2.1</ip-netmask></entry>"
+                            .to_owned(),
+                    ),
+                    destructive_confirmation: None,
+                }],
+            },
+            None,
+            "writer",
+            Some(&grant),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("plan");
+
+    let agent_ctx = rust_panosmcp_auth::CallerContext {
+        token_name: "agent-reviewer".to_owned(),
+        devices: rust_panosmcp_auth::ScopeSet::Wildcard,
+        tools: rust_panosmcp_auth::ScopeSet::Wildcard,
+        grant: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: rust_panosmcp_auth::ActorType::Agent,
+        client_name: None,
+        model_id: None,
+        session_id: None,
+        request_id: uuid::Uuid::new_v4(),
+    };
+    let result = fixture
+        .service
+        .approve_change_set(
+            ApproveChangeSetInput {
+                device: "mock-fw".to_owned(),
+                change_set_id: planned.change_set_id,
+                expected_digest: planned.digest,
+            },
+            Some(&agent_ctx),
+            "agent-reviewer",
+        )
+        .await;
+
+    let err = result.expect_err("an agent actor must not be able to approve");
+    assert!(
+        err.to_string().contains("must be a human principal"),
+        "got: {err}"
     );
 }
 
@@ -622,6 +747,143 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
     let state = fixture.state.lock().expect("state");
     assert_eq!(state.candidate, state.running);
     assert_eq!(state.locks_added, state.locks_removed);
+}
+
+/// `commit_candidate` on an operation with no `change_set_id` came from
+/// `stage_config` directly -- there is no second-principal approval to point
+/// to. Without `--allow-direct-commit`, it must be refused before the device
+/// is ever touched, identically whether the caller is a stdio session (no
+/// context at all) or an authenticated one, and the refusal must be audited.
+#[tokio::test]
+async fn commit_candidate_without_change_set_is_refused_without_the_flag() {
+    let _serial = AUDIT_SERIAL.lock().await;
+    use mecmcp_audit::testutil::CapturingWriter;
+    let cap = CapturingWriter::default();
+    let _guard = common::install_audit_capture(cap.clone());
+
+    let fixture = fixture_with_direct_commit(false, false, false).await;
+    let initial = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+    let staged = fixture
+        .service
+        .stage_config(
+            StageConfigInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: initial.candidate_fingerprint,
+                action: StageAction::Set,
+                xpath: "/config/shared/address".to_owned(),
+                element: Some(
+                    "<entry name=\"gate\"><ip-netmask>192.0.2.9</ip-netmask></entry>".to_owned(),
+                ),
+                destructive_confirmation: None,
+            },
+            "token-a",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stage");
+    let operation = OperationInput {
+        device: "mock-fw".to_owned(),
+        operation_id: staged.operation_id.clone(),
+        expected_candidate_fingerprint: staged.candidate_fingerprint.clone(),
+    };
+    fixture
+        .service
+        .diff_candidate(operation.clone(), "token-a", None, CancellationToken::new())
+        .await
+        .expect("diff");
+    fixture
+        .service
+        .validate_candidate(operation.clone(), "token-a", None, CancellationToken::new())
+        .await
+        .expect("validate");
+
+    let authenticated_ctx = rust_panosmcp_auth::CallerContext {
+        token_name: "writer".to_owned(),
+        devices: rust_panosmcp_auth::ScopeSet::Wildcard,
+        tools: rust_panosmcp_auth::ScopeSet::Wildcard,
+        grant: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: rust_panosmcp_auth::ActorType::Human,
+        client_name: None,
+        model_id: None,
+        session_id: None,
+        request_id: uuid::Uuid::new_v4(),
+    };
+
+    // stdio: no caller context at all.
+    let stdio_result = fixture
+        .service
+        .commit_candidate(operation.clone(), "token-a", None, CancellationToken::new())
+        .await;
+    // "HTTP": an authenticated caller, full scope, human actor -- none of
+    // which the gate reads, so it must be refused on the same terms.
+    let http_result = fixture
+        .service
+        .commit_candidate(
+            operation,
+            "token-a",
+            Some(&authenticated_ctx),
+            CancellationToken::new(),
+        )
+        .await;
+
+    for (label, result) in [("stdio", &stdio_result), ("http", &http_result)] {
+        let err = result
+            .as_ref()
+            .err()
+            .unwrap_or_else(|| panic!("{label}: direct-commit must be refused without the flag"));
+        assert!(
+            err.to_string().contains("allow-direct-commit"),
+            "{label}: refusal must name the flag: {err}"
+        );
+    }
+
+    // The gate refused before the device was touched: the mock firewall must
+    // have received zero commit requests (Percy F4, MEC-352).
+    assert_eq!(
+        fixture.state.lock().expect("state").commit_requests,
+        0,
+        "a refused direct commit must never reach the device"
+    );
+
+    // The refusal is audited as an authorization denial naming the reason,
+    // not overwritten into a generic `result=error` (Percy F2, MEC-352).
+    let audit_output = {
+        let bytes = cap.0.lock().expect("lock audit capture").clone();
+        String::from_utf8(bytes).expect("valid UTF-8 audit output")
+    };
+    let commit_audits: Vec<&str> = audit_output
+        .lines()
+        .filter(|line| line.contains("tool=commit_panos_candidate"))
+        .collect();
+    assert_eq!(
+        commit_audits.len(),
+        2,
+        "both the stdio and http commit attempts must be audited: {audit_output}"
+    );
+    for line in commit_audits {
+        assert!(
+            line.contains("authorization=denied") && line.contains("direct_commit_disabled"),
+            "the refusal must be audited as a denial naming the reason: {line}"
+        );
+        assert!(
+            !line.contains("result=error"),
+            "the denial must not be overwritten by the generic error path: {line}"
+        );
+    }
 }
 
 #[tokio::test]

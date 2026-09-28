@@ -226,6 +226,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              on devices whose config_authority is not local or unknown"
         );
     }
+
+    // commit_candidate on an operation with no change_set_id came from
+    // stage_config directly, never through create/approve/apply_change_set --
+    // there is no second-principal approval by construction. Refused by
+    // default, identically over stdio and HTTP; --allow-direct-commit is the
+    // break-glass override.
+    let direct_commit = mecmcp_audit::DirectCommitPolicy::new(cli.allow_direct_commit);
+    direct_commit.log_startup("rust-panosmcp");
+    if !cli.allow_direct_commit {
+        tracing::info!(
+            "direct-commit tools disabled: commit_panos_candidate refuses an operation with no \
+             change_set_id on stdio and HTTP alike. Use --allow-direct-commit to enable it."
+        );
+    }
+
     let tokens = (cli.transport == Transport::StreamableHttp)
         .then_some(cli.tokens_file.as_deref())
         .flatten();
@@ -261,6 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.lab_mode,
         Some(cli.approval_timeout_secs),
         cli.allow_plane_owned_writes,
+        cli.allow_direct_commit,
         evidence
             .as_ref()
             .map(mecmcp_audit::EvidenceService::recorder),
