@@ -225,6 +225,58 @@ async fn blocklist_denies_matching_xpath() {
     assert!(err.to_string().contains("blocklist rule"));
 }
 
+/// MEC-528 class 3: a blocklist rule written with single-quote predicates
+/// (as PAN-OS commonly emits, and as the earlier test above uses) must still
+/// catch a read request whose xpath spells the same predicate with double
+/// quotes -- `'` and `"` are the same XPath to PAN-OS. Before canonicalizing
+/// both sides to the same quote style, this request's normalized form never
+/// matched the rule's glob and the restricted read was silently allowed
+/// through (fail-open blocklist semantics treating "didn't match" the same
+/// as "not blocked").
+#[tokio::test]
+async fn blocklist_denies_matching_xpath_spelled_with_a_different_quote_style() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                "blocklist": {
+                    "xpath": ["*/address/entry[@name='secret-object']*"]
+                }
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let service = PanosService::new(inventory).expect("build service");
+
+    let input = GetPanosConfigInput {
+        device: "fw".to_string(),
+        source: ConfigSource::Running,
+        // Same xpath as the blocked rule, but with double quotes instead of
+        // the single quotes the rule was written with.
+        xpath: Some(
+            "/config/devices/entry[@name=\"localhost.localdomain\"]/vsys/entry[@name=\"vsys1\"]/address/entry[@name=\"secret-object\"]"
+                .to_string(),
+        ),
+        max_bytes: None,
+        max_lines: None,
+    };
+
+    let result = service
+        .get_panos_config(input, None, CancellationToken::new())
+        .await;
+    let err = result.expect_err("a different quote style must not bypass the blocklist");
+    assert!(err.to_string().contains("blocked by"));
+    assert!(err.to_string().contains("blocklist rule"));
+}
+
 /// The engine is fail-open: a command matching no rule is allowed.
 #[tokio::test]
 async fn fail_open_allows_unmatched_commands() {

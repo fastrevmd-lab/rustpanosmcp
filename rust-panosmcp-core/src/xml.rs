@@ -395,6 +395,86 @@ pub fn parse_job_status(response: &PanosResponse) -> Result<JobStatus> {
     })
 }
 
+/// Redact PAN-OS secret material that would otherwise be echoed back
+/// verbatim in a read tool's output.
+///
+/// The intended control is that this server's PAN-OS admin role cannot read
+/// `<mgt-config>` (admin password hashes) or certificate private keys at
+/// all. This is defense in depth for the case where that role restriction is
+/// missing or an xpath/op-command blocklist has not been configured to cover
+/// them: `<show><config><running/></config></show>` and `get_panos_config`
+/// on `/config/mgt-config` or a certificate xpath both return this material
+/// verbatim otherwise (MEC-528 class 1).
+#[must_use]
+pub fn redact_secret_material(input: &str) -> String {
+    redact_type_hashes(&redact_pem_private_keys(input))
+}
+
+/// Redact PAN-OS type-8/type-9 password hash tokens (`$8$...`/`$9$...`).
+fn redact_type_hashes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(dollar_at) = rest.find('$') {
+        out.push_str(&rest[..dollar_at]);
+        let candidate = &rest[dollar_at..];
+        let is_hash_prefix = candidate
+            .as_bytes()
+            .get(1)
+            .is_some_and(|b| *b == b'8' || *b == b'9')
+            && candidate.as_bytes().get(2) == Some(&b'$');
+        if is_hash_prefix {
+            let token_body = &candidate[3..];
+            let token_end = token_body
+                .find(|c: char| c == '<' || c == '>' || c == '"' || c.is_whitespace())
+                .unwrap_or(token_body.len());
+            out.push_str("[REDACTED-HASH]");
+            rest = &token_body[token_end..];
+        } else {
+            out.push('$');
+            rest = &candidate[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Redact PEM `-----BEGIN ... PRIVATE KEY-----` blocks in their entirety.
+fn redact_pem_private_keys(input: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const DASHES: &str = "-----";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(begin_at) = rest.find(BEGIN) {
+        let after_begin = &rest[begin_at + BEGIN.len()..];
+        let Some(dashes_at) = after_begin.find(DASHES) else {
+            out.push_str(&rest[..begin_at + BEGIN.len()]);
+            rest = after_begin;
+            continue;
+        };
+        let label = &after_begin[..dashes_at];
+        if !label.ends_with("PRIVATE KEY") {
+            let consumed = dashes_at + DASHES.len();
+            out.push_str(&rest[..begin_at + BEGIN.len() + consumed]);
+            rest = &after_begin[consumed..];
+            continue;
+        }
+        out.push_str(&rest[..begin_at]);
+        let body = &after_begin[dashes_at + DASHES.len()..];
+        let end_marker = format!("-----END {label}-----");
+        if let Some(end_at) = body.find(&end_marker) {
+            out.push_str("[REDACTED-PRIVATE-KEY]");
+            rest = &body[end_at + end_marker.len()..];
+        } else {
+            // No matching END found within this response; redact to the end
+            // rather than risk leaking a truncated key (fail closed).
+            out.push_str("[REDACTED-PRIVATE-KEY]");
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Stable name for the documented PAN-OS XML API response code.
 #[must_use]
 pub const fn panos_api_code_name(code: i32) -> &'static str {
@@ -1012,6 +1092,13 @@ mod tests {
         let job = parse_job_status(&response).expect("job");
         assert!(job.succeeded());
     }
+
+    // `redact_secret_material` unit tests live in
+    // `tests/xml_redact_secret_material.rs`, not here: they need
+    // secret-shaped fixture strings (fake PAN-OS phashes, a fake PEM private
+    // key block) that are gitleaks-allowlisted for that dedicated fixture
+    // file. Keeping them out of this file means the rest of `xml.rs` -- real
+    // XML-handling code -- stays under full gitleaks coverage.
 }
 
 #[cfg(test)]
