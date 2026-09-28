@@ -419,25 +419,49 @@ pub fn parse_job_status(response: &PanosResponse) -> Result<JobStatus> {
 /// them: `<show><config><running/></config></show>` and `get_panos_config`
 /// on `/config/mgt-config` or a certificate xpath both return this material
 /// verbatim otherwise (MEC-528 class 1).
+///
+/// Three layers, in order: two value-shape passes catch PAN-OS's actual
+/// on-wire secret formats (a PEM private-key block; a `$<id>$...` crypt-style
+/// hash such as an admin `<phash>` -- `$1$`/`$5$`/`$6$` on newer releases, not
+/// only the `$8$`/`$9$` Junos/Cisco shapes this used to match; a master-key
+/// blob starting `-AQ==`, PAN-OS's format for a stored IKE PSK, bind
+/// password, or SNMPv3 key), then a structural pass blanks the text of a
+/// fixed set of secret element names outright, regardless of value shape --
+/// catching a secret pasted as free text, which no shape pattern can (MEC-528
+/// F3).
 #[must_use]
 pub fn redact_secret_material(input: &str) -> String {
-    redact_type_hashes(&redact_pem_private_keys(input))
+    // Structural first: once a named secret element's text is blanked, the
+    // shape passes below find nothing left inside it to match, so every
+    // value under a known secret element name gets one consistent marker
+    // regardless of what it happened to contain. The shape passes then
+    // cover the same secret formats wherever they appear *outside* a named
+    // secret element (an op-command diagnostic line, an element name this
+    // list doesn't happen to enumerate, ...).
+    let structural = redact_structural_secret_elements(input);
+    redact_master_key_blobs(&redact_crypt_hashes(&redact_pem_private_keys(&structural)))
 }
 
-/// Redact PAN-OS type-8/type-9 password hash tokens (`$8$...`/`$9$...`).
-fn redact_type_hashes(input: &str) -> String {
+/// Redact PAN-OS crypt-style password hash tokens: `$<id>$...`, where `id`
+/// is the short alphanumeric algorithm tag crypt(3) and PAN-OS both use --
+/// `1` (MD5), `5`/`6` (SHA-256/512, newer PAN-OS releases), `8`/`9`
+/// (Junos/Cisco type-8/9, kept for compatibility with earlier fixtures).
+fn redact_crypt_hashes(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(dollar_at) = rest.find('$') {
         out.push_str(&rest[..dollar_at]);
-        let candidate = &rest[dollar_at..];
-        let is_hash_prefix = candidate
-            .as_bytes()
-            .get(1)
-            .is_some_and(|b| *b == b'8' || *b == b'9')
-            && candidate.as_bytes().get(2) == Some(&b'$');
-        if is_hash_prefix {
-            let token_body = &candidate[3..];
+        let after_dollar = &rest[dollar_at + 1..];
+        let id_end = after_dollar
+            .find(|c: char| c == '$' || c == '<' || c == '>' || c == '"' || c.is_whitespace())
+            .unwrap_or(after_dollar.len());
+        let id = &after_dollar[..id_end];
+        let is_crypt_prefix = !id.is_empty()
+            && id.len() <= 8
+            && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && after_dollar.as_bytes().get(id_end) == Some(&b'$');
+        if is_crypt_prefix {
+            let token_body = &after_dollar[id_end + 1..];
             let token_end = token_body
                 .find(|c: char| c == '<' || c == '>' || c == '"' || c.is_whitespace())
                 .unwrap_or(token_body.len());
@@ -445,10 +469,112 @@ fn redact_type_hashes(input: &str) -> String {
             rest = &token_body[token_end..];
         } else {
             out.push('$');
-            rest = &candidate[1..];
+            rest = after_dollar;
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Redact a PAN-OS master-key-encrypted secret blob (a stored IKE PSK, bind
+/// password, or SNMPv3 key): a base64-shaped token starting `-AQ==`.
+fn redact_master_key_blobs(input: &str) -> String {
+    const MARKER: &str = "-AQ==";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(marker_at) = rest.find(MARKER) {
+        out.push_str(&rest[..marker_at]);
+        let after_marker = &rest[marker_at + MARKER.len()..];
+        let token_end = after_marker
+            .find(|c: char| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+            })
+            .unwrap_or(after_marker.len());
+        out.push_str("[REDACTED-SECRET]");
+        rest = &after_marker[token_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// PAN-OS/mecmcp element names whose text is blanked outright, whatever the
+/// value looks like -- the shape-based passes above only catch a value in a
+/// format they recognise; a secret pasted as free text (an SNMP community
+/// string, a PSK typed directly into a VPN gateway config) has no fixed
+/// shape, but its element name is a stable signal.
+const SECRET_ELEMENT_NAMES: &[&[u8]] = &[
+    b"phash",
+    b"password",
+    b"private-key",
+    b"key",
+    b"secret",
+    b"bind-password",
+    b"auth-password",
+    b"priv-password",
+    b"passphrase",
+    b"community",
+];
+
+fn is_secret_element_name(name: &[u8]) -> bool {
+    SECRET_ELEMENT_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+/// Blank the text of any element named in [`SECRET_ELEMENT_NAMES`], whatever
+/// the value looks like (MEC-528 F3).
+///
+/// This is a text transform, not a security gate: if the input is not
+/// well-formed XML at some point, the unparsed remainder is copied through
+/// unchanged rather than dropped or panicking. Malformed input reaching here
+/// has already passed the caller's own XML validation in every real path;
+/// this fallback exists so a redaction bug can never turn into a data-loss
+/// or availability bug.
+fn redact_structural_secret_elements(input: &str) -> String {
+    let mut reader = Reader::from_reader(input.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut out = String::with_capacity(input.len());
+    let mut depth = 0usize;
+    let mut secret_depth: Option<usize> = None;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(_) => {
+                out.push_str(&input[start.min(input.len())..]);
+                break;
+            }
+        };
+        let end = reader.buffer_position() as usize;
+        match event {
+            Event::Eof => {
+                out.push_str(&input[start..end.min(input.len())]);
+                break;
+            }
+            Event::Start(element) => {
+                depth += 1;
+                if secret_depth.is_none()
+                    && is_secret_element_name(element.name().as_ref().as_bytes())
+                {
+                    secret_depth = Some(depth);
+                }
+                out.push_str(&input[start..end]);
+            }
+            Event::End(_) => {
+                if secret_depth == Some(depth) {
+                    secret_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+                out.push_str(&input[start..end]);
+            }
+            Event::Text(_) | Event::CData(_) if secret_depth.is_some() => {
+                out.push_str("[REDACTED-SECRET]");
+            }
+            _ => {
+                out.push_str(&input[start..end]);
+            }
+        }
+    }
     out
 }
 

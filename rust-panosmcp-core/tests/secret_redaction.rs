@@ -117,7 +117,7 @@ async fn get_panos_config_redacts_admin_password_hash() {
         output.output.content
     );
     assert!(
-        output.output.content.contains("[REDACTED-HASH]"),
+        output.output.content.contains("[REDACTED-SECRET]"),
         "expected redaction marker in output: {}",
         output.output.content
     );
@@ -146,7 +146,7 @@ async fn execute_panos_op_redacts_private_key_material() {
         output.output.content
     );
     assert!(
-        output.output.content.contains("[REDACTED-PRIVATE-KEY]"),
+        output.output.content.contains("[REDACTED-SECRET]"),
         "expected redaction marker in output: {}",
         output.output.content
     );
