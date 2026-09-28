@@ -516,7 +516,7 @@ No token needs to be reissued and no client needs a new credential.
 
 ### Changed
 
-- Lab deployment now uses Let's Encrypt public TLS certificate chain for `https://rust-panosmcp.mechub.org:30031`, trusted by default in system and client trust stores. Previous self-signed local-CA certificate required per-call `--insecure` or custom CA distribution.
+- Lab deployment now uses Let's Encrypt public TLS certificate chain for `https://rust-panosmcp.example.net:30031`, trusted by default in system and client trust stores. Previous self-signed local-CA certificate required per-call `--insecure` or custom CA distribution.
 
 ### Security
 

@@ -1,0 +1,4 @@
+title = "rustpanosmcp gitleaks config"
+
+[extend]
+path = ".gitleaks-vendor.toml"
