@@ -1234,6 +1234,7 @@ async fn dirty_candidate_with_foreign_pending_changes_is_refused() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -1325,6 +1326,7 @@ async fn foreign_pending_change_outside_allowed_roots_is_refused() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )
