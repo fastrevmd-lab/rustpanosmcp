@@ -120,6 +120,28 @@ verification succeeds. Never use `--insecure` as a health check. Rotate a DNS
 API token immediately if its plaintext reaches logs, terminal capture, or an
 unapproved secret store.
 
+## Audit log rotation
+
+When `--audit-log-file` is set, the server keeps the `AuditFileSink` handle
+`init_tracing` returns and reopens it by path — alongside the existing
+`devices.json`/`tokens.json` hot reload — whenever it receives `SIGHUP`
+(`spawn_reload_handler` in `rust-panosmcp/src/main.rs`). A failed reopen (bad
+path, permissions) `warn`-logs and keeps the previous sink; it does not stop
+the server or block the inventory/token reload.
+
+Install the shipped fragment for rename-mode rotation, not `copytruncate`:
+logrotate renames the file, then signals the process through `postrotate`, and
+every write after that lands in a fresh inode at the same path. Nothing
+written before the rename is truncated and nothing written after it is lost —
+`copytruncate` copies the file and then truncates it in place, dropping
+whatever is written in the gap between those two steps.
+
+```bash
+install -o root -g root -m 0644 packaging/logrotate/rustpanosmcp-audit \
+  /etc/logrotate.d/rustpanosmcp-audit
+logrotate -d -f /etc/logrotate.d/rustpanosmcp-audit   # dry run
+```
+
 ## Container installation
 
 The final image is distroless: it has no shell or package manager and runs as
