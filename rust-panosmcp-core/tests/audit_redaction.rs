@@ -210,6 +210,8 @@ async fn redaction_applies_to_newly_audited_tools() {
                         .to_owned(),
                 ),
                 destructive_confirmation: None,
+                move_position: None,
+                move_destination: None,
             },
             "test-owner",
             None,
