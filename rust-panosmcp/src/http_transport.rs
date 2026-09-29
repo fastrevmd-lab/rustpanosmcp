@@ -5,8 +5,8 @@ use mecmcp_auth::{BearerSyntax, CallerCtx};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy, HttpServeError,
     HttpTransportBuildError, HttpTransportConfig, LimitsConfig, MalformedArgumentsPolicy,
-    ServePlan, TargetField, ToolScopePreflight, TransportIdentity, build_streamable_http_router,
-    loopback_origins, serve_router,
+    ReadinessCheck, ServePlan, TargetField, ToolScopePreflight, TransportIdentity,
+    build_streamable_http_router, loopback_origins, serve_router,
 };
 use rust_panosmcp_auth::{MUTATION_TOOLS, MutationGrant};
 use std::{net::SocketAddr, sync::Arc};
@@ -139,6 +139,14 @@ pub fn build_router(
     } else {
         config
     };
+
+    // `/readyz` flips to failing the first poll after PAN-OS rejects the
+    // configured API key (unauthorized or session-timed-out) on any device,
+    // rather than staying green while every tool call is silently refused.
+    let auth_check_runtime = runtime.clone();
+    let config = config.with_readiness_check(ReadinessCheck::new("panos_auth", move || {
+        auth_check_runtime.snapshot().service.auth_health_check()
+    }));
     drop(snapshot);
 
     let service_factory = move || {

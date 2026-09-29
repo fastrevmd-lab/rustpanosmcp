@@ -17,12 +17,27 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 const API_PATH: &str = "api/";
 const JOB_ID_MAX_BYTES: usize = 32;
+
+/// PAN-OS XML API codes that mean the configured key stopped authenticating,
+/// as opposed to a transient transport failure or an unrelated API error.
+///
+/// `16` is "unauthorized" (bad or revoked key); `22` is "session timed out",
+/// which the XML API also raises for an expired API key. See
+/// [`crate::xml::panos_api_code_name`].
+const AUTH_FAILURE_CODES: [i32; 2] = [16, 22];
 
 /// Pooled PAN-OS API client for exactly one validated inventory device.
 #[derive(Clone)]
@@ -31,6 +46,11 @@ pub struct PanosClient {
     client: Client,
     api_url: reqwest::Url,
     concurrency: Arc<Semaphore>,
+    /// Set to `false` on the most recent request's PAN-OS auth failure
+    /// (unauthorized key or expired session), `true` on any successful
+    /// response. Other errors (timeout, transport, non-auth API error)
+    /// leave it unchanged -- they say nothing about the key's validity.
+    auth_healthy: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PanosClient {
@@ -57,6 +77,7 @@ impl PanosClient {
             config,
             client,
             api_url,
+            auth_healthy: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -64,6 +85,15 @@ impl PanosClient {
     #[must_use]
     pub fn device_name(&self) -> &str {
         &self.config.metadata.name
+    }
+
+    /// Whether the most recent request against this device authenticated.
+    ///
+    /// Starts `true`: an unreached device has not yet proven its key is bad,
+    /// and `/readyz` should not fail before the first request goes out.
+    #[must_use]
+    pub fn is_auth_healthy(&self) -> bool {
+        self.auth_healthy.load(Ordering::Relaxed)
     }
 
     /// Explicit candidate-mutation policy, if the operator enabled writes.
@@ -238,7 +268,7 @@ impl PanosClient {
             .ensure_success(self.device_name())
         };
 
-        tokio::select! {
+        let outcome = tokio::select! {
             () = cancellation.cancelled() => Err(PanosMcpError::Cancelled),
             result = time::timeout(self.config.request_timeout, operation) => {
                 match result {
@@ -246,6 +276,19 @@ impl PanosClient {
                     Err(_) => Err(PanosMcpError::Timeout { operation: "panos_api" }),
                 }
             }
+        };
+        self.record_auth_result(&outcome);
+        outcome
+    }
+
+    /// Update `auth_healthy` from a completed request's outcome.
+    fn record_auth_result(&self, outcome: &Result<PanosResponse>) {
+        match outcome {
+            Ok(_) => self.auth_healthy.store(true, Ordering::Relaxed),
+            Err(PanosMcpError::Api { code, .. }) if AUTH_FAILURE_CODES.contains(code) => {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            Err(_) => {}
         }
     }
 }

@@ -196,6 +196,9 @@ async fn api(
     if command.contains("<error") {
         return "<response status=\"error\" code=\"7\"><msg><line>Object is not present</line></msg></response>".to_owned();
     }
+    if command.contains("<unauthorized") {
+        return "<response status=\"error\" code=\"16\"><msg><line>Invalid credential</line></msg></response>".to_owned();
+    }
     if command.contains("<jobs>") {
         if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
             return "<response status=\"success\" code=\"19\"><result><job><status>ACT</status><progress>25</progress></job></result></response>".to_owned();
@@ -353,6 +356,54 @@ async fn asynchronous_job_polling_reaches_terminal_state() {
         .expect("job polling");
     assert!(job.succeeded());
     assert!(mock.state.jobs.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn auth_health_flips_on_unauthorized_and_recovers_on_success() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+    assert!(
+        client.is_auth_healthy(),
+        "starts healthy before any request"
+    );
+
+    let error = client
+        .operational("<show><unauthorized/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock unauthorized response");
+    assert!(matches!(error, PanosMcpError::Api { code: 16, .. }));
+    assert!(
+        !client.is_auth_healthy(),
+        "an unauthorized response must flip auth_healthy"
+    );
+
+    client
+        .operational(
+            "<show><system><info/></system></show>",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("subsequent healthy read");
+    assert!(
+        client.is_auth_healthy(),
+        "a later success must clear the auth failure"
+    );
+}
+
+#[tokio::test]
+async fn auth_health_is_unaffected_by_non_auth_errors() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+
+    let error = client
+        .operational("<show><error/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock generic API error");
+    assert!(matches!(error, PanosMcpError::Api { code: 7, .. }));
+    assert!(
+        client.is_auth_healthy(),
+        "a non-auth API error must not flip readiness"
+    );
 }
 
 #[tokio::test]
