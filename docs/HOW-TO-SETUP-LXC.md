@@ -301,7 +301,7 @@ The drop-in has no origin allowlist. An off-loopback listener must supply at
 least one `--allowed-origin` value. This is the trusted browser application
 origin (the Origin header), including the scheme (`http://` or `https://`) and
 port (e.g., `--allowed-origin http://console.example.org`). The terse error
-format is tracked as fastrevmd-lab/mecmcp#358.
+format is tracked as mechubsec/mecmcp#358.
 
 **Service active but every call returns 421 `Host '<host>' is not allowed`** —
 `--allowed-host` does not match the address clients dial (the HTTP Host header).
