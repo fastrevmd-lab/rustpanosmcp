@@ -1119,70 +1119,121 @@ fn parse_grouped_entries(
     Ok(results)
 }
 
-/// Parse the `<job><devices><entry name="serial">...</entry></devices></job>`
+/// Parse the `<job><devices><entry><serial-no>...</serial-no>...</entry></devices></job>`
 /// per-target-firewall breakdown PAN-OS attaches to a push (`CommitAll`) job.
+///
+/// The serial is a `<serial-no>` *child* element, not a `name` attribute on
+/// `<entry>` -- pan-os-python's own job-result parser
+/// (`panos/base.py::_parse_job_results`) reads `device["serial-no"]`, and a
+/// live Panorama response was not available to double-check this locally.
+/// Falling back to the `name` attribute (which some other PAN-OS list
+/// responses do use) covers the case where a future PAN-OS version reports it
+/// that way instead; refusing when neither is present, rather than defaulting
+/// to an empty serial, keeps a per-device result readable instead of blank.
 fn parse_push_devices(input: &[u8]) -> Result<Vec<PushDeviceStatus>> {
     // Unlike a device-group/template's `<entry><container><entry/></container></entry>`
     // nesting, `<devices>` entries under a job are the container's *direct*
     // children -- there is no extra wrapper level to skip.
-    let names = list_child_entry_names(input, b"devices")?;
-    // Each device entry's status/result/progress/details live as its own
-    // children. Slicing out that entry's own XML and re-running the already
-    // depth-correct `first_element_text`/`first_child_text` over the slice
-    // reuses their tested handling of entities and nested `<line>` children in
-    // `details` instead of re-deriving it here.
-    let mut devices = Vec::with_capacity(names.len());
-    for name in names {
-        let slice = extract_entry_slice(input, b"devices", &name)?.unwrap_or_default();
-        let progress = first_element_text(&slice, b"progress")?
+    let entries = list_child_entries(input, b"devices")?;
+    // Each device entry's serial/devicename/status/result/progress/details
+    // live as its own direct children. Read them with `first_child_text`
+    // (depth-aware) rather than `first_element_text`, which is not depth-aware
+    // and would take a `<status>`/`<result>` nested inside `<details>` as the
+    // device's own value.
+    let mut devices = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let slice = entry.xml.as_slice();
+        let serial = first_child_text(slice, b"entry", b"serial-no")?
+            .filter(|value| !value.is_empty())
+            .or(entry.name_attr)
+            .ok_or_else(|| {
+                PanosMcpError::Xml(
+                    "push device entry has neither a 'serial-no' child nor a 'name' attribute"
+                        .to_owned(),
+                )
+            })?;
+        let progress = first_child_text(slice, b"entry", b"progress")?
             .map(|value| value.parse::<u8>())
             .transpose()
             .map_err(|_| PanosMcpError::Xml("push device progress is not an integer".to_owned()))?;
         devices.push(PushDeviceStatus {
-            serial: name,
-            device_name: first_element_text(&slice, b"devicename")?,
-            status: first_element_text(&slice, b"status")?,
-            result: first_element_text(&slice, b"result")?,
+            serial,
+            device_name: first_child_text(slice, b"entry", b"devicename")?,
+            status: first_child_text(slice, b"entry", b"status")?,
+            result: first_child_text(slice, b"entry", b"result")?,
             progress,
-            details: first_child_text(&slice, b"entry", b"details")?,
+            details: first_child_text(slice, b"entry", b"details")?,
         });
     }
     Ok(devices)
 }
 
-/// Return the `name` attributes of `<entry>` elements that are direct
-/// children of `parent`, in document order.
-fn list_child_entry_names(input: &[u8], parent: &[u8]) -> Result<Vec<String>> {
-    let mut reader = Reader::from_reader(input);
-    reader.config_mut().trim_text(true);
-    let mut stack: Vec<Vec<u8>> = Vec::new();
-    let mut names = Vec::new();
+/// One `<entry>` that is a direct child of some container, with its raw XML
+/// (for parsing its own children) and its `name` attribute, if any.
+struct ChildEntry {
+    name_attr: Option<String>,
+    xml: Vec<u8>,
+}
 
-    let record = |stack: &[Vec<u8>],
-                  element: &quick_xml::events::BytesStart<'_>,
-                  names: &mut Vec<String>|
-     -> Result<()> {
-        if element.name().as_ref().as_bytes() == b"entry" && stack_ends_with(stack, &[parent]) {
-            if names.len() >= MAX_LIST_ENTRIES {
-                return Err(PanosMcpError::Xml(format!(
-                    "response contains more than {MAX_LIST_ENTRIES} entries"
-                )));
-            }
-            names.push(entry_name_attribute(element)?.unwrap_or_default());
-        }
-        Ok(())
-    };
+/// Return every `<entry>` that is a direct child of `parent`, in document
+/// order. Unlike this function's predecessor, which looked entries up by
+/// `name` attribute, this returns entries regardless of whether they have
+/// one -- keying by `name` broke on duplicate or absent names, exactly the
+/// shape a push job's `<devices>` entries have.
+fn list_child_entries(input: &[u8], parent: &[u8]) -> Result<Vec<ChildEntry>> {
+    let mut reader = Reader::from_reader(input);
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut entries: Vec<ChildEntry> = Vec::new();
+    let mut entry_depth: Option<usize> = None;
+    let mut start = 0_u64;
+    let mut pending_name: Option<String> = None;
 
     loop {
+        let position_before = reader.buffer_position();
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                record(&stack, &element, &mut names)?;
-                stack.push(element.name().as_ref().as_bytes().to_vec());
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if entry_depth.is_none() && name == b"entry" && stack_ends_with(&stack, &[parent]) {
+                    if entries.len() >= MAX_LIST_ENTRIES {
+                        return Err(PanosMcpError::Xml(format!(
+                            "response contains more than {MAX_LIST_ENTRIES} entries"
+                        )));
+                    }
+                    pending_name = entry_name_attribute(&element)?;
+                    start = position_before;
+                    stack.push(name);
+                    entry_depth = Some(stack.len());
+                    continue;
+                }
+                stack.push(name);
             }
             Ok(Event::Empty(element)) => {
-                record(&stack, &element, &mut names)?;
+                if entry_depth.is_none()
+                    && element.name().as_ref().as_bytes() == b"entry"
+                    && stack_ends_with(&stack, &[parent])
+                {
+                    if entries.len() >= MAX_LIST_ENTRIES {
+                        return Err(PanosMcpError::Xml(format!(
+                            "response contains more than {MAX_LIST_ENTRIES} entries"
+                        )));
+                    }
+                    let end = reader.buffer_position();
+                    entries.push(ChildEntry {
+                        name_attr: entry_name_attribute(&element)?,
+                        xml: input[position_before as usize..end as usize].to_vec(),
+                    });
+                }
             }
             Ok(Event::End(_)) => {
+                if entry_depth == Some(stack.len()) {
+                    let end = reader.buffer_position();
+                    entries.push(ChildEntry {
+                        name_attr: pending_name.take(),
+                        xml: input[start as usize..end as usize].to_vec(),
+                    });
+                    entry_depth = None;
+                }
                 stack.pop();
             }
             Ok(Event::DocType(_)) => {
@@ -1195,67 +1246,7 @@ fn list_child_entry_names(input: &[u8], parent: &[u8]) -> Result<Vec<String>> {
             Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
         }
     }
-    Ok(names)
-}
-
-/// Return the raw XML bytes of the `<entry name="entry_name">...</entry>`
-/// (or self-closing `<entry .../>`) that is a direct child of `container`,
-/// or `None` when no such entry is present.
-fn extract_entry_slice(
-    input: &[u8],
-    container: &[u8],
-    entry_name: &str,
-) -> Result<Option<Vec<u8>>> {
-    let mut reader = Reader::from_reader(input);
-    reader.config_mut().trim_text(false);
-    let mut stack: Vec<Vec<u8>> = Vec::new();
-    let mut entry_depth: Option<usize> = None;
-    let mut start = 0_u64;
-
-    loop {
-        let position_before = reader.buffer_position();
-        match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                let name = element.name().as_ref().as_bytes().to_vec();
-                if entry_depth.is_none()
-                    && name == b"entry"
-                    && stack_ends_with(&stack, &[container])
-                    && entry_name_attribute(&element)?.as_deref() == Some(entry_name)
-                {
-                    start = position_before;
-                    stack.push(name);
-                    entry_depth = Some(stack.len());
-                    continue;
-                }
-                stack.push(name);
-            }
-            Ok(Event::Empty(element)) => {
-                if entry_depth.is_none()
-                    && element.name().as_ref().as_bytes() == b"entry"
-                    && stack_ends_with(&stack, &[container])
-                    && entry_name_attribute(&element)?.as_deref() == Some(entry_name)
-                {
-                    let end = reader.buffer_position();
-                    return Ok(Some(input[position_before as usize..end as usize].to_vec()));
-                }
-            }
-            Ok(Event::End(_)) => {
-                if entry_depth == Some(stack.len()) {
-                    let end = reader.buffer_position();
-                    return Ok(Some(input[start as usize..end as usize].to_vec()));
-                }
-                stack.pop();
-            }
-            Ok(Event::DocType(_)) => {
-                return Err(PanosMcpError::Xml(
-                    "DOCTYPE declarations are forbidden".to_owned(),
-                ));
-            }
-            Ok(Event::Eof) => return Ok(None),
-            Ok(_) => {}
-            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
-        }
-    }
+    Ok(entries)
 }
 
 /// Stable name for the documented PAN-OS XML API response code.
@@ -2502,6 +2493,10 @@ mod panorama_tests {
 
     #[test]
     fn parses_push_job_status_with_overall_and_per_device_state() {
+        // Real PAN-OS reports the per-device serial as a `<serial-no>` child,
+        // not a `name` attribute on `<entry>` -- see `parse_push_devices`.
+        // A fixture using `name="..."` instead would pass without proving
+        // anything about the actual wire shape.
         let response = response(
             r#"<response status="success"><result><job>
                 <id>10</id>
@@ -2511,14 +2506,16 @@ mod panorama_tests {
                 <progress>100</progress>
                 <details><line>Configuration committed successfully</line></details>
                 <devices>
-                    <entry name="0011C1">
+                    <entry>
+                        <serial-no>0011C1</serial-no>
                         <devicename>fw-01</devicename>
                         <status>FIN</status>
                         <result>OK</result>
                         <progress>100</progress>
                         <details><line>commit succeeded</line></details>
                     </entry>
-                    <entry name="0011C2">
+                    <entry>
+                        <serial-no>0011C2</serial-no>
                         <devicename>fw-02</devicename>
                         <status>ACT</status>
                         <result></result>
@@ -2555,6 +2552,64 @@ mod panorama_tests {
     }
 
     #[test]
+    fn push_device_details_with_nested_errors_are_not_read_as_the_devices_status() {
+        // `<details><msg><errors><line>` nests its own text a few levels
+        // inside the device entry. A depth-unaware reader for `status`/
+        // `result` would find nothing of that shape here, but this guards
+        // against ever reintroducing one that walks into `<details>` and
+        // mistakes an unrelated descendant for the device's own field.
+        let response = response(
+            r#"<response status="success"><result><job>
+                <id>12</id><status>FIN</status>
+                <devices>
+                    <entry>
+                        <serial-no>0011C3</serial-no>
+                        <devicename>fw-03</devicename>
+                        <status>FIN</status>
+                        <result>FAIL</result>
+                        <details><msg><errors><line>commit failed: syntax error</line></errors></msg></details>
+                    </entry>
+                </devices>
+            </job></result></response>"#,
+        );
+        let status = parse_push_job_status(&response).expect("push status parses");
+        assert_eq!(
+            status.devices,
+            vec![PushDeviceStatus {
+                serial: "0011C3".to_owned(),
+                device_name: Some("fw-03".to_owned()),
+                status: Some("FIN".to_owned()),
+                result: Some("FAIL".to_owned()),
+                progress: None,
+                details: Some("commit failed: syntax error".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn push_device_falls_back_to_name_attribute_when_serial_no_is_absent() {
+        let response = response(
+            r#"<response status="success"><result><job><devices>
+                <entry name="0011C4"><devicename>fw-04</devicename></entry>
+            </devices></job></result></response>"#,
+        );
+        let status = parse_push_job_status(&response).expect("push status parses");
+        assert_eq!(status.devices[0].serial, "0011C4");
+    }
+
+    #[test]
+    fn push_device_with_neither_serial_no_nor_name_is_refused() {
+        let response = response(
+            r#"<response status="success"><result><job><devices>
+                <entry><devicename>fw-05</devicename></entry>
+            </devices></job></result></response>"#,
+        );
+        let error =
+            parse_push_job_status(&response).expect_err("device with no serial must be refused");
+        assert!(error.to_string().contains("serial-no"));
+    }
+
+    #[test]
     fn push_job_with_no_devices_yields_an_empty_device_list() {
         let response = response(
             r#"<response status="success"><result><job>
@@ -2570,7 +2625,7 @@ mod panorama_tests {
     fn rejects_a_non_numeric_push_device_progress() {
         let response = response(
             r#"<response status="success"><result><job><devices>
-                <entry name="0011C1"><progress>not-a-number</progress></entry>
+                <entry><serial-no>0011C1</serial-no><progress>not-a-number</progress></entry>
             </devices></job></result></response>"#,
         );
         let error = parse_push_job_status(&response).expect_err("bad progress must be refused");

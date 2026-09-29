@@ -209,7 +209,9 @@ async fn api(
     }
     if command.contains("<id>777</id>") {
         // A Panorama push (CommitAll) job: overall state plus a per-target-firewall breakdown.
-        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><id>777</id><type>CommitAll</type><status>FIN</status><result>OK</result><progress>100</progress><devices><entry name=\"0011C1\"><devicename>fw-01</devicename><status>FIN</status><result>OK</result><progress>100</progress></entry></devices></job></result></response>".to_owned());
+        // Real PAN-OS reports the per-device serial as a `<serial-no>` child
+        // element, not a `name` attribute on `<entry>` -- see `parse_push_devices`.
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><id>777</id><type>CommitAll</type><status>FIN</status><result>OK</result><progress>100</progress><devices><entry><serial-no>0011C1</serial-no><devicename>fw-01</devicename><status>FIN</status><result>OK</result><progress>100</progress></entry></devices></job></result></response>".to_owned());
     }
     if command.contains("<jobs>") {
         if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
