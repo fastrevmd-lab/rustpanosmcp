@@ -155,6 +155,35 @@ impl PanosClient {
         .await
     }
 
+    /// Like [`configuration`](Self::configuration), but for entry listing:
+    /// stops reading at `max_response_bytes` and returns the partial body
+    /// with a truncation flag rather than failing the call.
+    ///
+    /// The caller scans the returned bytes for complete top-level `<entry>`
+    /// elements rather than parsing them as one document, so a response cut
+    /// mid-stream is exactly as useful as a complete one, just missing
+    /// whatever came after the cut -- unlike every other PAN-OS reader here,
+    /// which needs a well-formed document and must keep failing closed on
+    /// one that got only partway downloaded.
+    pub(crate) async fn configuration_entries(
+        &self,
+        candidate: bool,
+        xpath: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(Vec<u8>, bool)> {
+        validate_read_xpath(xpath)?;
+        self.send(
+            vec![
+                ("type", "config".to_owned()),
+                ("action", if candidate { "get" } else { "show" }.to_owned()),
+                ("xpath", xpath.to_owned()),
+            ],
+            cancellation,
+            true,
+        )
+        .await
+    }
+
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.
     pub async fn poll_job(
         &self,
@@ -207,9 +236,35 @@ impl PanosClient {
 
     async fn post(
         &self,
-        mut fields: Vec<(&'static str, String)>,
+        fields: Vec<(&'static str, String)>,
         cancellation: CancellationToken,
     ) -> Result<PanosResponse> {
+        let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
+        parse_panos_response(
+            &bytes,
+            XmlLimits {
+                max_bytes: self.config.max_response_bytes,
+                max_depth: 64,
+            },
+        )?
+        .ensure_success(self.device_name())
+    }
+
+    /// Shared request/response plumbing behind [`post`](Self::post) and
+    /// [`configuration_entries`](Self::configuration_entries).
+    ///
+    /// `truncate = false` reproduces `post`'s original behavior exactly: a
+    /// response over `max_response_bytes` -- by header or by the stream
+    /// actually exceeding it -- is `ResponseTooLarge`, never partial data.
+    /// `truncate = true` instead stops at the limit and returns what was read
+    /// so far with the flag set; callers of that mode must not treat the
+    /// bytes as a complete document.
+    async fn send(
+        &self,
+        mut fields: Vec<(&'static str, String)>,
+        cancellation: CancellationToken,
+        truncate: bool,
+    ) -> Result<(Vec<u8>, bool)> {
         if let Some(vsys) = &self.config.metadata.vsys {
             fields.push(("vsys", vsys.clone()));
         }
@@ -243,9 +298,10 @@ impl PanosClient {
                     status: response.status().as_u16(),
                 });
             }
-            if response
-                .content_length()
-                .is_some_and(|length| length > self.config.max_response_bytes as u64)
+            if !truncate
+                && response
+                    .content_length()
+                    .is_some_and(|length| length > self.config.max_response_bytes as u64)
             {
                 return Err(PanosMcpError::ResponseTooLarge {
                     device: self.device_name().to_owned(),
@@ -254,10 +310,17 @@ impl PanosClient {
             }
 
             let mut bytes = Vec::new();
+            let mut truncated = false;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|error| classify_transport(error, self.device_name()))?;
                 if bytes.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
+                    if truncate {
+                        let remaining = self.config.max_response_bytes - bytes.len();
+                        bytes.extend_from_slice(&chunk[..remaining]);
+                        truncated = true;
+                        break;
+                    }
                     return Err(PanosMcpError::ResponseTooLarge {
                         device: self.device_name().to_owned(),
                         limit: self.config.max_response_bytes,
@@ -266,14 +329,7 @@ impl PanosClient {
                 bytes.extend_from_slice(&chunk);
             }
 
-            parse_panos_response(
-                &bytes,
-                XmlLimits {
-                    max_bytes: self.config.max_response_bytes,
-                    max_depth: 64,
-                },
-            )?
-            .ensure_success(self.device_name())
+            Ok((bytes, truncated))
         };
 
         let outcome = tokio::select! {

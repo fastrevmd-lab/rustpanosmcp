@@ -12,7 +12,7 @@
 
 > **Unofficial / community project.** This is an independent community project and does not claim affiliation with or endorsement by Palo Alto Networks. Product names and trademarks are used only to identify the systems with which the software interoperates.
 
-The repository contains the v0.4.0 release: a bearer-protected server with structured audit logging, guarded PAN-OS candidate configuration lifecycle, and hardened release packaging, with authentication and auditing provided by the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) and [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crates.
+The repository contains the v0.4.0 release: a bearer-protected server with structured audit logging, guarded PAN-OS candidate configuration lifecycle, and hardened release packaging, with authentication and auditing provided by the shared [`mecmcp-auth`](https://github.com/mechubsec/mecmcp) and [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crates.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -44,12 +44,12 @@ Choose one of three install paths:
 
 #### Release tarball (Linux x86_64)
 
-Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
+Download the latest release from [GitHub releases](https://github.com/mechubsec/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract
@@ -89,8 +89,8 @@ For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspa
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract and run the installer
@@ -134,7 +134,7 @@ A `compose.example.yaml` is included in the repository.
 Requires Rust 1.89 or newer (MSRV).
 
 ```bash
-git clone https://github.com/fastrevmd-lab/rustpanosmcp.git
+git clone https://github.com/mechubsec/rustpanosmcp.git
 cd rustpanosmcp
 cargo build --release --locked
 ./target/release/rust-panosmcp --version
@@ -224,7 +224,7 @@ interfaces. The published release and guarded lab rollout evidence is in
 Panorama work remains deferred.
 
 v0.3.0 moves authentication onto the shared
-[`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate, retiring this
+[`mecmcp-auth`](https://github.com/mechubsec/mecmcp) crate, retiring this
 repository's own token, store, and token-file implementations in favour of one
 shared, separately tested crate. The PAN-OS tool surface, authorization scopes,
 inventory, and mutation-state interfaces are unchanged. Two operator-visible
@@ -293,7 +293,7 @@ Inventory files never hold inline credentials: each device's `api_key` is a refe
 
 ## Audit logging
 
-v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
+v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
 
 Change-set lifecycle auditing provides independent evidence of approval: the `approve_panos_change_set` event carries both the change-set id and the fingerprint digest, proving that a second principal reviewed the exact digest later applied via `apply_panos_change_set`.
 
@@ -310,7 +310,7 @@ All audit targets are optional and can be combined. When no audit target is spec
 ### Forwarding to the event store
 
 The audit trail does not stay on this host. This server follows the family
-standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/fastrevmd-lab/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
+standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/mechubsec/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
 
 An audit record that only exists on the machine that produced it is not an audit
 trail: it is a log file on a box whose operator is the party the record is about.
@@ -330,7 +330,7 @@ server never truncates it.
 
 Records are written directly into SSDF's `ssdf.audit` as **hash-chained** rows,
 per SSDF's merged evidence contract, so that deleting or editing a row is
-detectable. Tracked in [mecmcp#292](https://github.com/fastrevmd-lab/mecmcp/issues/292).
+detectable. Tracked in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
 
 A cheaper syslog path was designed and rejected: it works, but the records are
 unchained, and every other link here is tamper-evident by construction — plan
