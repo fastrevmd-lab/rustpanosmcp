@@ -531,56 +531,7 @@ impl PanosService {
         };
         let result = async {
             validate_read_only_op_command(&input.command)?;
-
-            // Fail-closed allowlist (default) and fail-open blocklist
-            // (legacy, opt-in) resolve to a `Decision` differently -- the
-            // allowlist checks a tag-path derived from the command XML
-            // against a per-device merged CommandAllowlist (no per-device
-            // dispatch inside mecmcp_policy for that domain), the blocklist
-            // checks the normalized raw command against the shared deny-rule
-            // policy -- but from here on both are handled by one exhaustive
-            // match so neither path can silently allow a variant the other
-            // introduced (Percy F1, MEC-352).
-            let decision = match self.command_policy_mode {
-                CommandMode::Blocklist => self.policy.as_ref().map(|policy| {
-                    let normalized = normalize_input(&input.command);
-                    policy.check_command(&input.device, &normalized, Action::Deny)
-                }),
-                CommandMode::Allowlist => {
-                    let policy = self
-                        .command_allowlists
-                        .get(&input.device)
-                        .ok_or_else(|| PanosMcpError::UnknownDevice(input.device.clone()))?;
-                    let tag_path = op_command_tag_path(&input.command)?;
-                    Some(policy.check_command(&input.device, &tag_path, Action::Deny))
-                }
-            };
-            if let Some(decision) = decision {
-                match decision {
-                    Decision::Allow => {}
-                    Decision::Deny { rule, source, .. } => {
-                        return Err(PanosMcpError::Policy {
-                            field: "command",
-                            reason: format!(
-                                "blocked by {} blocklist rule '{}'",
-                                source.as_str(),
-                                rule.pattern
-                            ),
-                        });
-                    }
-                    Decision::DenyAllowlist {
-                        reason, normalized, ..
-                    } => {
-                        return Err(PanosMcpError::Policy {
-                            field: "command",
-                            reason: format!(
-                                "refused by allowlist ({}); normalized input: {normalized}",
-                                reason.as_str()
-                            ),
-                        });
-                    }
-                }
-            }
+            self.check_command_policy(&input.device, &input.command)?;
 
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
@@ -1197,32 +1148,12 @@ impl PanosService {
         let result = async {
             let command = build_security_policy_match_command(&input)?;
 
-            // Same fail-open command blocklist already applied to
-            // `execute_panos_op`, so a device- or global-scoped `<test>`
-            // blocklist rule (if ever configured) still applies here.
-            if let Some(policy) = &self.policy {
-                use mecmcp_policy::{Decision, normalize_input};
-                let normalized = normalize_input(&command);
-                match policy.check_command(&input.device, &normalized, Action::Deny) {
-                    Decision::Allow => {}
-                    Decision::Deny { rule, source, .. } => {
-                        return Err(PanosMcpError::Policy {
-                            field: "command",
-                            reason: format!(
-                                "blocked by {} blocklist rule '{}'",
-                                source.as_str(),
-                                rule.pattern
-                            ),
-                        });
-                    }
-                    Decision::DenyAllowlist { reason, .. } => {
-                        return Err(PanosMcpError::Policy {
-                            field: "command",
-                            reason: format!("blocked by command allowlist: {reason:?}"),
-                        });
-                    }
-                }
-            }
+            // Same mode-dispatched command policy already applied to
+            // `execute_panos_op`, so a device- or global-scoped blocklist
+            // rule (blocklist mode) or a missing `allow` entry (allowlist
+            // mode, the default) both refuse this the same way (Percy F1,
+            // MEC-935).
+            self.check_command_policy(&input.device, &command)?;
 
             let client = self.client(&input.device)?;
             let response = client
@@ -1423,6 +1354,63 @@ impl PanosService {
             Err(e) => audit.fail(e),
         }
         result
+    }
+
+    /// Mode-dispatched command-policy gate shared by every tool that sends
+    /// an op command built from a caller-controlled or caller-selected
+    /// shape (`execute_panos_op`'s `<show>` command,
+    /// `test_panos_security_policy_match`'s server-built `<test>` command).
+    ///
+    /// Fail-closed allowlist (default) and fail-open blocklist (legacy,
+    /// opt-in) resolve to a `Decision` differently -- the allowlist checks a
+    /// tag-path derived from the command XML against a per-device merged
+    /// `CommandAllowlist` (no per-device dispatch inside mecmcp_policy for
+    /// that domain), the blocklist checks the normalized raw command
+    /// against the shared deny-rule policy -- but from here on both are
+    /// handled by one exhaustive match so neither path can silently allow a
+    /// variant the other introduced (Percy F1, MEC-352, MEC-935).
+    fn check_command_policy(&self, device: &str, command_xml: &str) -> Result<()> {
+        let decision = match self.command_policy_mode {
+            CommandMode::Blocklist => self.policy.as_ref().map(|policy| {
+                let normalized = normalize_input(command_xml);
+                policy.check_command(device, &normalized, Action::Deny)
+            }),
+            CommandMode::Allowlist => {
+                let policy = self
+                    .command_allowlists
+                    .get(device)
+                    .ok_or_else(|| PanosMcpError::UnknownDevice(device.to_owned()))?;
+                let tag_path = op_command_tag_path(command_xml)?;
+                Some(policy.check_command(device, &tag_path, Action::Deny))
+            }
+        };
+        if let Some(decision) = decision {
+            match decision {
+                Decision::Allow => {}
+                Decision::Deny { rule, source, .. } => {
+                    return Err(PanosMcpError::Policy {
+                        field: "command",
+                        reason: format!(
+                            "blocked by {} blocklist rule '{}'",
+                            source.as_str(),
+                            rule.pattern
+                        ),
+                    });
+                }
+                Decision::DenyAllowlist {
+                    reason, normalized, ..
+                } => {
+                    return Err(PanosMcpError::Policy {
+                        field: "command",
+                        reason: format!(
+                            "refused by allowlist ({}); normalized input: {normalized}",
+                            reason.as_str()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Deny an xpath matched by a device or global config blocklist rule.

@@ -311,10 +311,12 @@ Three example files in [config/](config/) demonstrate the configuration surface:
 
 Inventory files never hold inline credentials: each device's `api_key` is a reference — `{"type": "env", "name": "VAR_NAME"}` for an environment variable or `{"type": "file", "path": "/protected/path"}` for a mode-restricted secret file.
 
-### `execute_panos_op` command policy
+### Command policy (`execute_panos_op`, `test_panos_security_policy_match`)
 
 A top-level `policy` key in the inventory file governs which operational
-commands `execute_panos_op` will run:
+commands `execute_panos_op` will run, and the same gate applies to the
+server-built `<test><security-policy-match>` command issued by
+`test_panos_security_policy_match`:
 
 - **`mode: "allowlist"`** (fail-closed, the default) — a command is refused
   unless it matches an entry in `allow` (or, for piped output, `allowed_pipes`).
@@ -330,7 +332,8 @@ commands `execute_panos_op` will run:
       "show interface all",
       "show routing route",
       "show running security-policy",
-      "show session info"
+      "show session info",
+      "test security-policy-match"
     ]
   }
   ```
@@ -338,7 +341,10 @@ commands `execute_panos_op` will run:
   Allowlist entries are matched as exact element-tag paths taken from the
   command's own XML structure, not CLI text — there is no abbreviation
   expansion, so a shortened form such as `sh sys info` is refused just like
-  any other command that isn't in `allow`.
+  any other command that isn't in `allow`. The `test security-policy-match`
+  entry is required for `test_panos_security_policy_match` to run at all in
+  allowlist mode — without it, every call is refused regardless of any other
+  configuration.
 
 - **`mode: "blocklist"`** (fail-open, legacy) — every command is allowed
   except one matching a deny rule under a device's `blocklist.commands`. An

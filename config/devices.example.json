@@ -7,7 +7,8 @@
       "show interface all",
       "show routing route",
       "show running security-policy",
-      "show session info"
+      "show session info",
+      "test security-policy-match"
     ]
   },
   "devices": [

@@ -185,7 +185,7 @@ async fn fixture() -> (PanosService, Arc<MockState>) {
     fs::write(
         &inventory_path,
         format!(
-            r#"{{"version":1,"devices":[{{"name":"test-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOS_TYPED_READS_TEST_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}}}}]}}"#,
+            r#"{{"version":1,"policy":{{"mode":"allowlist","allow":["test security-policy-match"]}},"devices":[{{"name":"test-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOS_TYPED_READS_TEST_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}}}}]}}"#,
             address.port(),
             cert_path.display()
         ),

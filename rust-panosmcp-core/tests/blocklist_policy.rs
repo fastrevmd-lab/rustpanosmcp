@@ -5,7 +5,10 @@ mod common;
 use mecmcp_audit::testutil::CapturingWriter;
 use rust_panosmcp_core::{
     inventory::{Environment, Inventory},
-    tools::{ConfigSource, ExecutePanosOpInput, GetPanosConfigInput, PanosService},
+    tools::{
+        ConfigSource, ExecutePanosOpInput, GetPanosConfigInput, IpProtocol, PanosService,
+        TestPanosSecurityPolicyMatchInput,
+    },
 };
 use std::fs;
 use tempfile::TempDir;
@@ -584,4 +587,146 @@ async fn blocklist_xpath_pattern_with_backslash_is_rejected_at_load_time() {
         error.to_string().contains('\\'),
         "error should name the offending character: {error}"
     );
+}
+
+fn security_policy_match_input(device: &str) -> TestPanosSecurityPolicyMatchInput {
+    TestPanosSecurityPolicyMatchInput {
+        device: device.to_string(),
+        source: "10.0.0.1".parse().expect("valid IP"),
+        destination: "10.0.0.2".parse().expect("valid IP"),
+        destination_port: Some(443),
+        protocol: IpProtocol::Tcp,
+        from_zone: None,
+        to_zone: None,
+        application: None,
+        source_user: None,
+        vsys: None,
+    }
+}
+
+/// Percy F1 (MEC-935) (a): in the default allowlist mode with no `allow`
+/// entry and no rules of any kind configured, `test_panos_security_policy_match`
+/// must still be refused by the policy gate. Before `check_command_policy`
+/// was shared, this case ran no check at all -- the tool consulted the
+/// shared blocklist-mode `self.policy`, which stays `None` when no device
+/// has any blocklist rule, so `if let Some(policy)` was skipped and the call
+/// reached the transport (a `Transport` error, not a `Policy` error).
+#[tokio::test]
+async fn security_policy_match_default_allowlist_with_no_allow_entry_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"}
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let service = PanosService::new(inventory).expect("build service");
+
+    let result = service
+        .test_panos_security_policy_match(
+            security_policy_match_input("fw"),
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    let err = result.expect_err("no allow entry must refuse the command");
+    assert!(
+        err.to_string().contains("policy rejected") || err.to_string().contains("refused by"),
+        "expected a policy refusal, got: {err}"
+    );
+}
+
+/// Percy F1 (MEC-935) (b): in allowlist mode, an explicit
+/// `allow: ["test security-policy-match"]` entry must let the call proceed
+/// past the policy gate (it then fails downstream on the unreachable test
+/// endpoint) -- even with an unrelated xpath rule configured. On e5ca4d8
+/// this failed closed with `ForbiddenMetachar` because the tool checked the
+/// shared blocklist-mode policy, whose `CommandAllowlist` is always empty in
+/// allowlist mode, ignoring `command_allowlists` entirely.
+#[tokio::test]
+async fn security_policy_match_allowlist_with_matching_allow_entry_proceeds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "policy": {
+                "mode": "allowlist",
+                "allow": ["test security-policy-match"]
+            },
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                "blocklist": {
+                    "xpath": ["*/hostname*"]
+                }
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let service = PanosService::new(inventory).expect("build service");
+
+    let result = service
+        .test_panos_security_policy_match(
+            security_policy_match_input("fw"),
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    let err = result.expect_err("no real device is reachable in this test");
+    let err_str = err.to_string();
+    assert!(
+        !err_str.contains("refused by allowlist") && !err_str.contains("ForbiddenMetachar"),
+        "an allowed command must reach the transport, not be refused by policy: {err_str}"
+    );
+}
+
+/// Percy F1 (MEC-935) (c): in legacy blocklist mode, a `commands` rule
+/// matching the server-built `<test>` command still refuses
+/// `test_panos_security_policy_match`, exactly as it does for
+/// `execute_panos_op`.
+#[tokio::test]
+async fn security_policy_match_blocklist_denies_matching_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "policy": {"mode": "blocklist"},
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                "blocklist": {
+                    "commands": ["*test*"]
+                }
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let service = PanosService::new(inventory).expect("build service");
+
+    let result = service
+        .test_panos_security_policy_match(
+            security_policy_match_input("fw"),
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    let err = result.expect_err("should be blocked");
+    assert!(err.to_string().contains("blocked by"));
+    assert!(err.to_string().contains("blocklist rule"));
 }
