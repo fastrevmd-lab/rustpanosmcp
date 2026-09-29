@@ -159,15 +159,63 @@ Prefer overlapping add/deploy/revoke over in-place rotate:
 when the client and server can change as one transaction. Wildcard tool scope
 never grants mutation tools.
 
-## PAN-OS API-key rotation
+## PAN-OS API-key lifetime and rotation
 
-Use a dedicated, unshared, least-privilege PAN-OS administrator. Generate a new
-key under change control, replace the protected key file atomically with owner
-and mode preserved, then reload. Run `gather_device_facts` before revoking the
-old credential when PAN-OS permits overlap; otherwise schedule the brief
-cutover. Inspect PAN-OS administrator logs and rust-panosmcp audit events. A
-reload validates files and policy but cannot prove a new key to the firewall
-until a request is made.
+A PAN-OS API key does not expire on its own; it stays valid until the issuing
+administrator account is disabled/deleted, its password changes (the key is
+derived from the account credential), an administrator explicitly revokes it
+(`request api-key-format`/`op` key revocation, PAN-OS-version-dependent), or
+the API Key Certificate switch below invalidates it. Treat "no built-in TTL"
+as a reason to rotate on a schedule yourself, not as a reason to skip
+rotation.
+
+**Prefer a file-based key over an environment-variable key.** Both
+`api_key.type` values (`file`, `env`) are supported in inventory (see
+`config/devices.example.json`). Only the file source rotates without a
+process restart: `spawn_reload_handler` in `rust-panosmcp/src/main.rs`
+answers `SIGHUP` by calling `RuntimeState::reload`, which re-reads the
+key file from disk and swaps in the new client atomically. An
+environment-variable value is fixed at process exec time — a running
+process cannot observe a change to its own environment, so rotating an
+`env`-sourced key requires a full restart (and the brief availability gap
+that implies), while rotating a `file`-sourced key is `write key,
+reload, verify` with no restart. Use `env` only where the deployment
+platform (e.g. a container orchestrator with its own atomic secret
+mount) already gives you restart-free rotation another way.
+
+Rotation procedure: use a dedicated, unshared, least-privilege PAN-OS
+administrator. Generate a new key under change control, replace the
+protected key file atomically with owner and mode preserved, then reload.
+Run `gather_device_facts` before revoking the old credential when PAN-OS
+permits overlap; otherwise schedule the brief cutover. Inspect PAN-OS
+administrator logs and rust-panosmcp audit events. A reload validates
+files and policy but cannot prove a new key to the firewall until a
+request is made — watch `GET /readyz`, which fails the check named
+`panos_auth` as soon as any device's most recent request comes back
+`unauthorized` or `session-timed-out` (PAN-OS XML API codes 16 and 22),
+and recovers on the next successful request. `/readyz` starts (and stays)
+healthy for a device that has made no request yet; it reports proven
+failure, not silence.
+
+### The API Key Certificate switch
+
+PAN-OS added an **API Key Certificate**-backed API key mode
+(Device > Setup > Management > Authentication Settings on modern
+releases). Two behaviors matter here:
+
+- **Enabling it invalidates every existing API key on the device** — the
+  switch is not additive. Rotating in the new mode is a full-cutover
+  operation: mint new keys under the new mode for every account this
+  server authenticates as, stage them to file-based inventory entries,
+  reload, and verify `/readyz` and `gather_device_facts` before removing
+  the old keys from the secret store.
+- **PAN-OS 13.0 disables legacy (non-certificate-backed) API keys
+  outright.** An inventory still pointing at a legacy key stops
+  authenticating the moment the device upgrades to 13.0, with no
+  gradual deprecation window from this server's point of view — the
+  first request after the upgrade returns `unauthorized` and flips
+  `/readyz`. Plan the switch to API Key Certificate mode as part of any
+  PAN-OS 13.0 upgrade, not after it.
 
 ## Backup and restore
 
@@ -208,9 +256,15 @@ the indeterminate-commit procedure in `PHASE3_OPERATIONS.md` first.
 
 Alert on repeated 401/403/429 responses, reload failures, PAN-OS API errors,
 validation/commit failures, indeterminate operations, stale config locks,
-unexpected token names, and loss of audit-log delivery. Request and mutation
-events intentionally omit credentials and payloads; preserve them in a durable,
-access-controlled sink.
+unexpected token names, loss of audit-log delivery, and `GET /readyz`
+reporting the `panos_auth` check failed (see
+[PAN-OS API-key lifetime and rotation](#pan-os-api-key-lifetime-and-rotation)).
+Request and mutation events intentionally omit credentials and payloads;
+preserve them in a durable, access-controlled sink.
+
+For the PAN-OS-side least-privilege administrator accounts and management-
+interface source-IP restriction this deployment should already have in
+place, see [PANOS_ADMIN_ROLES.md](PANOS_ADMIN_ROLES.md).
 
 For suspected credential exposure, follow `SECURITY.md`. For process loss during
 mutation, keep write clients disabled, inspect PAN-OS jobs/change summary/locks,
