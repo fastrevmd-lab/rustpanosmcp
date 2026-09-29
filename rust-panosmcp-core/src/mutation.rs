@@ -5,7 +5,7 @@ use crate::{
     client::PanosClient,
     observability::AuditScope,
     tools::PanosService,
-    xml::{parse_job_id, validate_config_element, validate_write_xpath},
+    xml::{parse_job_id, redact_secret_material, validate_config_element, validate_write_xpath},
 };
 use mecmcp_audit::Attribution;
 use mecmcp_changeset::DeviceTransaction as _;
@@ -1267,6 +1267,7 @@ impl PanosService {
                 )
                 .await?;
             let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
+            let change_summary = redact_secret_material(&change_summary);
             let action = extract_stage_action(&record.action)?;
             let xpath = extract_xpath(&record).ok_or_else(|| {
                 PanosMcpError::Configuration("operation record missing xpath".to_owned())
