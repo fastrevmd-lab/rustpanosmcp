@@ -196,7 +196,7 @@ async fn fixture() -> Fixture {
     fs::write(
         &inventory_path,
         format!(
-            r#"{{"version":1,"devices":[{{"name":"test-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOSMCP_REDACTION_TEST_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}},"mutation":{{"admin":"mcp-admin","allowed_xpath_roots":["/config/shared/address"],"allow_delete":true,"require_config_lock":false}}}}]}}"#,
+            r#"{{"version":1,"policy":{{"mode":"allowlist","allow":["show radius entry","show trigger-error"]}},"devices":[{{"name":"test-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOSMCP_REDACTION_TEST_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}},"mutation":{{"admin":"mcp-admin","allowed_xpath_roots":["/config/shared/address"],"allow_delete":true,"require_config_lock":false}}}}]}}"#,
             address.port(),
             cert_path.display()
         ),

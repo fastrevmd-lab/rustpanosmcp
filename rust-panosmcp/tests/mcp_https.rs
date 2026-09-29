@@ -124,7 +124,7 @@ async fn all_read_tools_reach_mock_https_and_mutating_op_is_refused() {
     fs::write(
         &inventory_path,
         format!(
-            r#"{{"version":1,"devices":[{{"name":"e2e-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOS_MCP_E2E_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}}}}]}}"#,
+            r#"{{"version":1,"policy":{{"mode":"allowlist","allow":["show system info"]}},"devices":[{{"name":"e2e-fw","endpoint":"https://localhost:{}","api_key":{{"type":"env","name":"PANOS_MCP_E2E_KEY"}},"tls":{{"type":"custom_ca","path":"{}"}}}}]}}"#,
             address.port(),
             ca_path.display()
         ),

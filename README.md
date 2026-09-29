@@ -311,6 +311,56 @@ Three example files in [config/](config/) demonstrate the configuration surface:
 
 Inventory files never hold inline credentials: each device's `api_key` is a reference — `{"type": "env", "name": "VAR_NAME"}` for an environment variable or `{"type": "file", "path": "/protected/path"}` for a mode-restricted secret file.
 
+### Command policy (`execute_panos_op`, `test_panos_security_policy_match`)
+
+A top-level `policy` key in the inventory file governs which operational
+commands `execute_panos_op` will run, and the same gate applies to the
+server-built `<test><security-policy-match>` command issued by
+`test_panos_security_policy_match`:
+
+- **`mode: "allowlist"`** (fail-closed, the default) — a command is refused
+  unless it matches an entry in `allow` (or, for piped output, `allowed_pipes`).
+  This is what a freshly generated inventory, or one with no `policy` section
+  at all, resolves to. [`config/devices.example.json`](config/devices.example.json)
+  ships a starter read-only set:
+
+  ```json
+  "policy": {
+    "mode": "allowlist",
+    "allow": [
+      "show system info",
+      "show interface all",
+      "show routing route",
+      "show running security-policy",
+      "show session info",
+      "test security-policy-match"
+    ]
+  }
+  ```
+
+  Allowlist entries are matched as exact element-tag paths taken from the
+  command's own XML structure, not CLI text — there is no abbreviation
+  expansion, so a shortened form such as `sh sys info` is refused just like
+  any other command that isn't in `allow`. The `test security-policy-match`
+  entry is required for `test_panos_security_policy_match` to run at all in
+  allowlist mode — without it, every call is refused regardless of any other
+  configuration.
+
+- **`mode: "blocklist"`** (fail-open, legacy) — every command is allowed
+  except one matching a deny rule under a device's `blocklist.commands`. An
+  inventory that has deny rules but no explicit `policy.mode` key loads in
+  this mode for backward compatibility, and the server logs one startup WARN
+  because fail-open blocklist mode has no allowlist to fall back on if a rule
+  is missing a case. New deployments should set `mode: "allowlist"` instead.
+
+Each device may extend the shared `policy.allow` / `policy.allowed_pipes`
+lists with device-specific entries via that device's own `blocklist.allow` /
+`blocklist.allowed_pipes` arrays, merged the same way `blocklist.commands`
+deny rules are merged today.
+
+Every refusal — either mode — is written to the audit log with the reason
+code from the underlying policy library.
+
 ## Audit logging
 
 v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
