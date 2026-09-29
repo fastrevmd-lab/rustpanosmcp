@@ -8,7 +8,6 @@ use crate::{
     xml::{parse_job_id, redact_secret_material, validate_config_element, validate_write_xpath},
 };
 use mecmcp_audit::Attribution;
-use mecmcp_changeset::DeviceTransaction as _;
 use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
 use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
@@ -429,19 +428,11 @@ pub struct OperationStatusInput {
 
 impl PanosService {
     /// Fingerprint every operator-authorized candidate subtree.
-    ///
-    /// `_cancellation` is accepted and unused. This now reads the fingerprint
-    /// through `DeviceTransaction::fingerprint`, whose signature takes no
-    /// cancellation token, so a long fingerprint read can no longer be
-    /// cancelled mid-flight the way the local helper allowed. The parameter is
-    /// kept so the public signature does not change under callers; removing it
-    /// is a separate decision, and adding cancellation to the shared trait is
-    /// another.
     pub async fn candidate_fingerprint(
         &self,
         input: CandidateFingerprintInput,
         ctx: Option<&CallerContext>,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<CandidateFingerprintOutput> {
         let mut audit = match ctx {
             Some(ctx) => AuditScope::from_caller(
@@ -459,7 +450,7 @@ impl PanosService {
         let result = async {
             let client = self.client(&input.device)?;
             require_policy(&client)?;
-            let candidate = client.fingerprint().await?;
+            let candidate = candidate_fingerprint(&client, cancellation).await?;
             Ok(CandidateFingerprintOutput {
                 device: input.device,
                 candidate_fingerprint: candidate,
@@ -501,8 +492,9 @@ impl PanosService {
             let client = self.client(&input.device)?;
             let policy = require_policy(&client)?;
             validate_change_set_actions(&input.actions, policy, grant)?;
-            let current = candidate_fingerprint(&client, cancellation).await?;
+            let current = candidate_fingerprint(&client, cancellation.clone()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
+            require_clean_candidate(&client, cancellation).await?;
             let now = now_unix()?;
             let id = new_operation_id()?;
 
@@ -906,6 +898,13 @@ impl PanosService {
             self.mutations.remove(&operation_id).await;
             return Err(error);
         }
+        if let Err(error) = require_clean_candidate(&client, CancellationToken::new()).await {
+            if config_lock_held {
+                release_config_lock_best_effort(&client).await;
+            }
+            self.mutations.remove(&operation_id).await;
+            return Err(error);
+        }
         // mecmcp 0.22.0 makes `claim_change_set_for_apply` the only legal
         // `Approved -> Applying` transition, and it does the read and the write
         // under one lock so two applies cannot both read `Approved` and both
@@ -1177,6 +1176,7 @@ impl PanosService {
         let result = async {
             let before = candidate_fingerprint(&client, CancellationToken::new()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &before)?;
+            require_clean_candidate(&client, CancellationToken::new()).await?;
             let mut fields = vec![
                 ("type", "config".to_owned()),
                 ("action", input.action.api_name().to_owned()),
@@ -2098,6 +2098,43 @@ pub(crate) async fn candidate_fingerprint(
         digest.update(response.xml.as_bytes());
     }
     Ok(format!("sha256:{}", bytes_hex(&digest.finalize())))
+}
+
+/// Refuse to build on a candidate that already diverges from the running
+/// configuration before this operation has staged anything of its own.
+///
+/// `expected_candidate_fingerprint` optimistic-concurrency checks
+/// ([`require_fingerprint`], [`require_operation_fingerprint`]) only catch a
+/// candidate that changes *after* the caller observed it -- they treat
+/// whatever was live at that moment as the trusted baseline. If the dedicated
+/// admin's candidate already held pending edits from outside this tool (a
+/// human in the GUI, a second concurrent operator, a stuck prior session),
+/// those edits become that baseline and ride along into the eventual partial
+/// commit, since PAN-OS scopes a partial commit by admin, not by xpath.
+///
+/// This asks PAN-OS directly via `check pending-changes` rather than
+/// comparing a candidate fingerprint against a running-config fingerprint:
+/// `get` (candidate) and `show` (running) return different response
+/// envelopes on a real device (the candidate response carries `code`/
+/// `total`/`count` attributes the running response does not), so hashing the
+/// full envelope of each -- as an earlier version of this check did -- can
+/// never match even on a byte-identical candidate. `check pending-changes` is
+/// also deliberately global rather than scoped to `allowed_xpath_roots`: a
+/// foreign edit sitting outside every root this tool manages still lands in
+/// the same partial commit and must still be refused.
+async fn require_clean_candidate(
+    client: &PanosClient,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    if client.check_pending_changes(cancellation).await? {
+        Err(policy(
+            "candidate",
+            "candidate configuration already has pending changes outside this operation; \
+             commit or discard them before staging a new change",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn require_fingerprint(expected: &str, actual: &str) -> Result<()> {

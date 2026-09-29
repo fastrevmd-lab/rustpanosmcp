@@ -5,6 +5,7 @@ use crate::{
     client::PanosClient,
     inventory::{DeviceMetadata, Inventory},
     observability::AuditScope,
+    state_lock::StateFileLock,
     xml::{
         ConfigEntry, DeviceFacts, collect_text_for_elements, panos_api_code_name,
         parse_device_facts, redact_secret_material, scan_config_entries,
@@ -61,6 +62,11 @@ pub struct PanosService {
     /// with no second-principal approval at all. Refused by default; set via
     /// --allow-direct-commit.
     pub(crate) direct_commit: mecmcp_audit::DirectCommitPolicy,
+    /// OS advisory lock on the persisted state file, held for the life of
+    /// this service so a second process cannot open the same state file and
+    /// race its atomic-rename writes. `None` when running with no persisted
+    /// state (`state_path: None`) -- there is no file to corrupt.
+    _state_lock: Option<Arc<StateFileLock>>,
 }
 
 impl PanosService {
@@ -108,6 +114,14 @@ impl PanosService {
             approval_timeout_secs.unwrap_or(crate::mutation::APPROVAL_TTL_SECS),
         );
 
+        // Locked before the state file is even read, so two processes racing
+        // on startup are serialized here rather than both recovering from
+        // and then both writing to the same file.
+        let state_lock = match state_path {
+            Some(path) => Some(Arc::new(StateFileLock::acquire(path)?)),
+            None => None,
+        };
+
         // PAN-OS keeps the candidate server-side and identifies it by operation
         // id, so a staged operation survives a restart intact — unlike Junos,
         // whose staged handle is a live NETCONF session. Declaring that here lets
@@ -135,6 +149,7 @@ impl PanosService {
             evidence,
             allow_plane_owned_writes,
             allow_direct_commit,
+            state_lock,
         )
     }
 
@@ -148,15 +163,22 @@ impl PanosService {
             previous.evidence.clone(),
             previous.allow_plane_owned_writes,
             previous.direct_commit.is_allowed(),
+            // The same lock the previous service acquired: a SIGHUP rebuild
+            // stays in this process, so re-acquiring would just contend with
+            // ourselves. Dropping the previous `Self` after this returns
+            // keeps exactly one strong reference alive throughout.
+            previous._state_lock.clone(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         inventory: Inventory,
         mutations: Arc<mecmcp_changeset::ChangesetCoordinator>,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
         allow_plane_owned_writes: bool,
         allow_direct_commit: bool,
+        state_lock: Option<Arc<StateFileLock>>,
     ) -> Result<Self> {
         let mut clients = BTreeMap::new();
         for device in inventory.entries() {
@@ -175,6 +197,7 @@ impl PanosService {
             policy: policy.map(Arc::new),
             allow_plane_owned_writes,
             direct_commit: mecmcp_audit::DirectCommitPolicy::new(allow_direct_commit),
+            _state_lock: state_lock,
         })
     }
 
