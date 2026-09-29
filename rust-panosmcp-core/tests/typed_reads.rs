@@ -104,7 +104,20 @@ async fn api(
         );
     }
     if request_type == "log" && action.is_empty() {
+        if form
+            .get("query")
+            .is_some_and(|query| query.contains("never-finishes"))
+        {
+            return success("<result><job>556</job></result>");
+        }
         return success("<result><job>555</job></result>");
+    }
+    if request_type == "log"
+        && action == "get"
+        && form.get("job-id").map(String::as_str) == Some("556")
+    {
+        // A job that never reaches FIN, so the caller has to give up on it.
+        return success("<result><job><status>ACT</status></job></result>");
     }
     if request_type == "log" && action == "get" {
         // Real PAN-OS nests a log job's terminal state under `<job>`, the
@@ -337,11 +350,12 @@ async fn security_policy_match_reports_a_deny_rules_action() {
     assert_eq!(denied.action.as_deref(), Some("deny"));
 }
 
-/// `destination_port` is optional for `icmp`, which has no port, and
-/// defaults to 0 rather than being rejected as missing.
+/// `destination_port` is optional for `icmp`, which has no port. It is
+/// omitted from the command rather than sent as a made-up port 0, which
+/// PAN-OS would either reject or match against as if it were real.
 #[tokio::test]
 async fn security_policy_match_allows_icmp_without_a_destination_port() {
-    let (service, _state) = fixture().await;
+    let (service, state) = fixture().await;
 
     let result = service
         .test_panos_security_policy_match(
@@ -362,6 +376,15 @@ async fn security_policy_match_allows_icmp_without_a_destination_port() {
         )
         .await;
     assert!(result.is_ok());
+    let commands = state.commands.lock().expect("commands").clone();
+    let probe = commands
+        .iter()
+        .find(|command| command.contains("<security-policy-match>"))
+        .expect("policy-match command");
+    assert!(
+        !probe.contains("<destination-port>"),
+        "icmp probe carried a destination port: {probe}"
+    );
 }
 
 /// A non-`icmp` probe without a `destination_port` must be rejected rather
@@ -643,4 +666,40 @@ async fn security_policy_match_rejects_an_entry_with_no_name() {
         )
         .await;
     assert!(matches!(result, Err(PanosMcpError::Xml(_))));
+}
+
+/// Cancelling a log query whose job has not finished must release the job
+/// on the device with a best-effort `action=finish`, so an abandoned query
+/// does not hold one of PAN-OS's few concurrent log-query slots (F5c).
+#[tokio::test]
+async fn log_query_finishes_an_abandoned_job_on_cancellation() {
+    let (service, state) = fixture().await;
+    let cancellation = CancellationToken::new();
+    let canceller = cancellation.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        canceller.cancel();
+    });
+
+    let result = service
+        .query_panos_logs(
+            QueryPanosLogsInput {
+                device: "test-fw".to_owned(),
+                log_type: PanosLogType::Traffic,
+                query: Some("(addr.src in never-finishes)".to_owned()),
+                max_logs: None,
+            },
+            None,
+            cancellation,
+        )
+        .await;
+
+    assert!(matches!(result, Err(PanosMcpError::Cancelled)));
+    let requests = state.requests.lock().expect("requests").clone();
+    assert!(
+        requests
+            .iter()
+            .any(|(kind, action)| kind == "log" && action == "finish"),
+        "abandoned log job was not finished: {requests:?}"
+    );
 }

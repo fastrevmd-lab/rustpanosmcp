@@ -1365,7 +1365,8 @@ pub struct TestPanosSecurityPolicyMatchInput {
     /// Simulated packet destination address.
     pub destination: IpAddr,
     /// Simulated packet destination port. Required unless `protocol` is
-    /// `icmp`, which has no port; if omitted for `icmp` this defaults to 0.
+    /// `icmp`, which has no port; if omitted for `icmp` the command carries
+    /// no `<destination-port>` element at all.
     #[serde(default)]
     pub destination_port: Option<u16>,
     /// Simulated packet IP protocol.
@@ -1436,8 +1437,8 @@ fn build_security_policy_match_command(
         validate_vsys_name(vsys)?;
     }
     let destination_port = match (input.protocol, input.destination_port) {
-        (IpProtocol::Icmp, port) => port.unwrap_or(0),
-        (_, Some(port)) => port,
+        (IpProtocol::Icmp, port) => port,
+        (_, Some(port)) => Some(port),
         (_, None) => {
             return Err(PanosMcpError::Policy {
                 field: "destination_port",
@@ -1455,9 +1456,9 @@ fn build_security_policy_match_command(
         "<destination>{}</destination>",
         escape(input.destination.to_string())
     ));
-    command.push_str(&format!(
-        "<destination-port>{destination_port}</destination-port>"
-    ));
+    if let Some(port) = destination_port {
+        command.push_str(&format!("<destination-port>{port}</destination-port>"));
+    }
     command.push_str(&format!(
         "<protocol>{}</protocol>",
         input.protocol.panos_number()
