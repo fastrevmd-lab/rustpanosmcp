@@ -216,10 +216,15 @@ async fn fixture() -> Fixture {
 /// case under test was built to exercise. A tool that leaks a *different*
 /// secret than the one its own mock response plants would otherwise pass.
 fn assert_no_secret_leak(tool_name: &str, rendered: &str) {
-    for secret in fixture_secrets() {
+    // Deliberately omit the secret value and the rendered output from the
+    // assertion message: printing them here would itself be the cleartext
+    // logging of sensitive data this test exists to catch (CodeQL flags it
+    // even though these are synthetic fixture values). The index is enough
+    // to find the offending entry in `fixture_secrets()` when debugging.
+    for (index, secret) in fixture_secrets().iter().enumerate() {
         assert!(
             !rendered.contains(secret),
-            "tool '{tool_name}' leaked fixture secret '{secret}' in its output: {rendered}"
+            "tool '{tool_name}' leaked fixture_secrets()[{index}] in its output"
         );
     }
 }
