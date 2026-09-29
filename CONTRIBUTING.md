@@ -2,7 +2,7 @@
 
 Thanks for considering a contribution. rustpanosmcp is an async Rust Model
 Context Protocol server for Palo Alto Networks PAN-OS firewalls — part of the
-[mechub](https://github.com/fastrevmd-lab) family of open-source, self-hosted
+[mechub](https://github.com/mechubsec) family of open-source, self-hosted
 network-security automation tooling. See [README.md](README.md) for what the
 server does, [PLAN.md](PLAN.md) for the architecture and delivery plan, and
 [THREAT_MODEL.md](THREAT_MODEL.md) for the security boundaries and

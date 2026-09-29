@@ -191,12 +191,16 @@ typed errors, timeouts, cancellation, output caps, and a per-device semaphore.
 Phase 2 added digest-only bearer tokens, exact device/tool scopes, atomic
 inventory/token reload, TLS Streamable HTTP, Host/Origin validation, bounded
 request bodies, IP/token rate limits, and audit-safe request tracing. Both
-transports share the same 17 tools described in [MCP tools
+transports share the same 27 tools described in [MCP tools
 reference](#mcp-tools-reference) below; wildcard `*` token scopes reach only
-the 6 read-only ones (`list_devices`, `gather_device_facts`,
+the 16 read-only ones (`list_devices`, `gather_device_facts`,
 `execute_panos_op`, `get_panos_config`, `list_panos_entries`,
-`get_panos_entry_digest`); the 11 lifecycle/change tools must be named
-explicitly.
+`get_panos_entry_digest`, `list_panorama_device_groups`,
+`list_panorama_templates`, `get_panorama_push_status`,
+`list_panos_rulebase_entries`, `get_panos_ha_state`, `get_panos_license_info`,
+`get_panos_content_status`, `get_panos_software_status`,
+`test_panos_security_policy_match`, `query_panos_logs`); the 11
+lifecycle/change tools must be named explicitly.
 
 Phase 3 adds opt-in candidate fingerprints, narrow XPath policy, PAN-OS config
 locks, per-device serialization, stage/diff/full validation, admin-scoped
@@ -257,7 +261,7 @@ bearer roles above), see
 
 ## MCP tools reference
 
-The server exposes 17 MCP tools, grouped by operation type:
+The server exposes 27 MCP tools, grouped by operation type:
 
 ### Read-only tools
 
@@ -265,8 +269,18 @@ The server exposes 17 MCP tools, grouped by operation type:
 - **`gather_device_facts`** — Gather hostname, model, serial, version, management IP, and uptime from an authorized device.
 - **`execute_panos_op`** — Execute a read-only PAN-OS XML command rooted at `<show>` on an authorized device, with output caps.
 - **`get_panos_config`** — Read running or candidate PAN-OS configuration at a validated `/config` XPath on an authorized device.
-- **`list_panos_entries`** — List `<entry>` children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked.
-- **`get_panos_entry_digest`** — Fetch and hash exactly one PAN-OS config entry by XPath, without reading the rest of the configuration.
+- **`list_panos_entries`** — Page through a rule or object list container's `<entry>` children as structured JSON, truncation-marked rather than erroring on a large rulebase.
+- **`get_panos_entry_digest`** — Fetch and hash exactly one PAN-OS config entry by XPath, for single-rule drift detection.
+- **`list_panorama_device_groups`** — List Panorama device groups and the serial numbers of their member firewalls.
+- **`list_panorama_templates`** — List Panorama templates and the names of their declared variables.
+- **`get_panorama_push_status`** — Read a Panorama commit-all/push job's overall and per-target-firewall status by job id.
+- **`list_panos_rulebase_entries`** — List security rules, NAT rules, address objects, or service objects for a vsys as structured JSON, paginated and truncation-marked.
+- **`get_panos_ha_state`** — Read PAN-OS high-availability state (enabled, mode, local and peer state) on an authorized device.
+- **`get_panos_license_info`** — Read PAN-OS license status (feature, serial, issued, expires, expired) on an authorized device.
+- **`get_panos_content_status`** — Read PAN-OS content version status (version, released, downloaded, current) on an authorized device.
+- **`get_panos_software_status`** — Read PAN-OS software version status (version, released, downloaded, current, latest) on an authorized device.
+- **`test_panos_security_policy_match`** — Test which PAN-OS security rule, if any, a simulated packet would match on an authorized device.
+- **`query_panos_logs`** — Fetch a bounded window of PAN-OS logs (traffic, threat, system, or config) on an authorized device; always capped, never unbounded.
 
 ### Candidate lifecycle tools (mutation)
 
