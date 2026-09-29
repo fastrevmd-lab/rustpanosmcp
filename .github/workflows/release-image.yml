@@ -11,7 +11,7 @@ on:
         required: true
 
 env:
-  IMAGE: ghcr.io/fastrevmd-lab/rust-panosmcp
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build-push:
