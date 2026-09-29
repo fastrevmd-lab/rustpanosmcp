@@ -118,3 +118,28 @@ pub enum PanosMcpError {
     #[error("operation cancelled")]
     Cancelled,
 }
+
+impl PanosMcpError {
+    /// Build an [`PanosMcpError::Api`], redacting `message` first.
+    ///
+    /// PAN-OS embeds the offending value in some of its own error text (a
+    /// rejected `pre-shared-key` or `phash` echoed back in a validation
+    /// failure, for example), so the same secret this server otherwise
+    /// works to keep out of tool output can reach a caller through an error
+    /// message instead unless every construction of this variant redacts
+    /// first. This is the one place that redaction happens, so no call site
+    /// can forget it.
+    pub(crate) fn api(
+        device: impl Into<String>,
+        code: i32,
+        name: &'static str,
+        message: impl AsRef<str>,
+    ) -> Self {
+        Self::Api {
+            device: device.into(),
+            code,
+            name,
+            message: mecmcp_redact::redact_text(message.as_ref()),
+        }
+    }
+}

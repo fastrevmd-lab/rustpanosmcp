@@ -5,10 +5,7 @@ use crate::{
     client::PanosClient,
     observability::AuditScope,
     tools::{LIST_CONTAINER_ENTRY_DEPTH, PanosService},
-    xml::{
-        parse_job_id, redact_secret_material, scan_config_entries, validate_config_element,
-        validate_write_xpath,
-    },
+    xml::{parse_job_id, scan_config_entries, validate_config_element, validate_write_xpath},
 };
 use mecmcp_audit::Attribution;
 use quick_xml::escape::escape;
@@ -1364,8 +1361,8 @@ impl PanosService {
                     cancellation,
                 )
                 .await?;
-            let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
-            let change_summary = redact_secret_material(&change_summary);
+            let redacted_xml = crate::redact::redact_device_xml(&response.xml);
+            let (change_summary, truncated) = truncate_utf8(redacted_xml, MAX_DIFF_BYTES);
             let action = extract_stage_action(&record.action)?;
             let xpath = extract_xpath(&record).ok_or_else(|| {
                 PanosMcpError::Configuration("operation record missing xpath".to_owned())

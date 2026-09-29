@@ -81,12 +81,12 @@ impl PanosResponse {
         } else {
             self.message.clone()
         };
-        Err(PanosMcpError::Api {
-            device: device.to_owned(),
+        Err(PanosMcpError::api(
+            device,
             code,
-            name: panos_api_code_name(code),
+            panos_api_code_name(code),
             message,
-        })
+        ))
     }
 }
 
@@ -737,7 +737,13 @@ pub fn parse_job_status(response: &PanosResponse) -> Result<JobStatus> {
         status: first_child_text(input, b"job", b"status")?,
         result: first_child_text(input, b"job", b"result")?,
         progress,
-        details: first_child_text(input, b"job", b"details")?,
+        // PAN-OS's own `<job><details>` text can embed the offending
+        // config fragment for a validation/commit failure (a duplicate
+        // object error naming its `pre-shared-key`, for example), so it is
+        // redacted the same as any other device-sourced text before it
+        // becomes part of a tool result (mecmcp-redact::redact_text).
+        details: first_child_text(input, b"job", b"details")?
+            .map(|details| mecmcp_redact::redact_text(&details)),
     })
 }
 

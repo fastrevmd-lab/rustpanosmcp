@@ -576,7 +576,7 @@ impl PanosMcpServer {
     /// Read a bounded PAN-OS running/candidate change summary.
     #[tool(
         name = "diff_panos_candidate",
-        description = "Return a bounded PAN-OS change summary for the exact staged candidate fingerprint"
+        description = "Return a bounded PAN-OS change summary for the exact staged candidate fingerprint. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields are redacted; structure and non-secret change text remain"
     )]
     async fn diff_panos_candidate(
         &self,
@@ -774,7 +774,7 @@ impl PanosMcpServer {
     /// Execute only a single `<show>` operational command.
     #[tool(
         name = "execute_panos_op",
-        description = "Execute a read-only PAN-OS XML command rooted at <show> on an authorized device, with output caps"
+        description = "Execute a read-only PAN-OS XML command rooted at <show> on an authorized device, with output caps. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields (RADIUS/LDAP server secrets, SNMP community strings, etc.) are redacted; structure and non-secret output remain"
     )]
     async fn execute_panos_op(
         &self,
@@ -798,7 +798,7 @@ impl PanosMcpServer {
     /// Read running or candidate configuration under `/config`.
     #[tool(
         name = "get_panos_config",
-        description = "Read running or candidate PAN-OS configuration at a validated /config XPath on an authorized device"
+        description = "Read running or candidate PAN-OS configuration at a validated /config XPath on an authorized device. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields (RADIUS/LDAP server secrets, SNMP community strings, etc.) are redacted; structure and non-secret configuration remain"
     )]
     async fn get_panos_config(
         &self,
@@ -822,7 +822,7 @@ impl PanosMcpServer {
     /// Page through a rule or object list container's entries.
     #[tool(
         name = "list_panos_entries",
-        description = "List <entry> children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked rather than erroring on a large rulebase"
+        description = "List <entry> children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked rather than erroring on a large rulebase. Each entry's XML is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields are redacted; structure and non-secret configuration remain. The per-entry digest is computed before redaction, so drift detection is unaffected"
     )]
     async fn list_panos_entries(
         &self,

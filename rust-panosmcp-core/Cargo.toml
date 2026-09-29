@@ -17,6 +17,7 @@ mecmcp-audit.workspace = true
 mecmcp-changeset.workspace = true
 mecmcp-inventory.workspace = true
 mecmcp-policy.workspace = true
+mecmcp-redact.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 rust-panosmcp-auth = { version = "0.15.0", path = "../rust-panosmcp-auth" }

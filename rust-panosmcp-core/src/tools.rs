@@ -12,8 +12,8 @@ use crate::{
         collect_text_for_elements, panos_api_code_name, parse_content_entries, parse_device_facts,
         parse_ha_state, parse_job_id, parse_license_entries, parse_log_entries,
         parse_panorama_device_groups_op, parse_panorama_templates_op, parse_push_job_status,
-        parse_security_policy_match, parse_software_entries, redact_secret_material,
-        scan_config_entries, validate_read_only_op_command, validate_read_xpath,
+        parse_security_policy_match, parse_software_entries, scan_config_entries,
+        validate_read_only_op_command, validate_read_xpath,
     },
 };
 use mecmcp_policy::{
@@ -475,12 +475,12 @@ impl PanosService {
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
             let response = client.operational(&input.command, cancellation).await?;
-            let redacted = redact_secret_material(&response.xml);
+            let redacted_xml = crate::redact::redact_device_xml(&response.xml);
             Ok(XmlToolOutput {
                 device: input.device,
                 status: response.status,
                 code: response.code,
-                output: bounded_text(&redacted, limits),
+                output: bounded_text(&redacted_xml, limits),
             })
         }
         .await;
@@ -521,14 +521,14 @@ impl PanosService {
                     cancellation,
                 )
                 .await?;
-            let redacted = redact_secret_material(&response.xml);
+            let redacted_xml = crate::redact::redact_device_xml(&response.xml);
             Ok(ConfigToolOutput {
                 device: input.device,
                 source: input.source,
                 xpath,
                 status: response.status,
                 code: response.code,
-                output: bounded_text(&redacted, limits),
+                output: bounded_text(&redacted_xml, limits),
             })
         }
         .await;
@@ -583,8 +583,16 @@ impl PanosService {
                     cancellation,
                 )
                 .await?;
-            let scan = scan_config_entries(&bytes, offset, limit, LIST_CONTAINER_ENTRY_DEPTH)?;
+            let mut scan = scan_config_entries(&bytes, offset, limit, LIST_CONTAINER_ENTRY_DEPTH)?;
             ensure_scan_success(&input.device, &bytes, &scan)?;
+
+            // Each entry's `digest` is computed by `scan_config_entries` from
+            // the untouched device bytes above -- drift detection must stay
+            // keyed to what PAN-OS actually sent. Only the human/model-facing
+            // `xml` copy is redacted, after that digest already exists.
+            for entry in &mut scan.entries {
+                entry.xml = crate::redact::redact_device_xml(&entry.xml);
+            }
 
             let returned = scan.entries.len();
             Ok(ListPanosEntriesOutput {
@@ -1200,12 +1208,11 @@ impl PanosService {
                 .await?;
             let mut entries = parse_log_entries(&finished)?;
             // PAN-OS config-change log entries can carry a PSK, bind
-            // password, or SNMPv3 key in the before/after change detail
-            // (MEC-528's redactor already matches these shapes); this is
-            // the explicit token-allowlisted tool, but redact regardless of
-            // caller.
+            // password, or SNMPv3 key in the before/after change detail;
+            // this is the explicit token-allowlisted tool, but redact
+            // regardless of caller.
             for entry in &mut entries {
-                entry.xml = redact_secret_material(&entry.xml);
+                entry.xml = crate::redact::redact_device_xml(&entry.xml);
             }
             let returned = entries.len();
             Ok(QueryPanosLogsOutput {
@@ -1281,7 +1288,7 @@ impl PanosService {
 
             let mut entries = scan.entries;
             for entry in &mut entries {
-                entry.xml = redact_secret_material(&entry.xml);
+                entry.xml = crate::redact::redact_device_xml(&entry.xml);
             }
             let returned = entries.len();
             Ok(ListPanosRulebaseEntriesOutput {
@@ -2061,12 +2068,12 @@ fn ensure_scan_success(device: &str, raw: &[u8], scan: &crate::xml::EntryScanRes
         .ok()
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| "PAN-OS returned an error without a message".to_owned());
-    Err(PanosMcpError::Api {
-        device: device.to_owned(),
+    Err(PanosMcpError::api(
+        device,
         code,
-        name: panos_api_code_name(code),
+        panos_api_code_name(code),
         message,
-    })
+    ))
 }
 
 fn bounded_text(input: &str, limits: OutputLimits) -> BoundedText {
