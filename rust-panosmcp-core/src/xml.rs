@@ -536,6 +536,9 @@ fn redact_structural_secret_elements(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut depth = 0usize;
     let mut secret_depth: Option<usize> = None;
+    // One marker per contiguous run of secret content, however quick-xml
+    // chunks it (text, CDATA and entity references arrive as separate events).
+    let mut marker_open = false;
     loop {
         let start = reader.buffer_position() as usize;
         let event = match reader.read_event() {
@@ -546,6 +549,14 @@ fn redact_structural_secret_elements(input: &str) -> String {
             }
         };
         let end = reader.buffer_position() as usize;
+        let secret_content = secret_depth.is_some()
+            && matches!(
+                event,
+                Event::Text(_) | Event::CData(_) | Event::GeneralRef(_)
+            );
+        if !secret_content {
+            marker_open = false;
+        }
         match event {
             Event::Eof => {
                 out.push_str(&input[start..end.min(input.len())]);
@@ -567,8 +578,14 @@ fn redact_structural_secret_elements(input: &str) -> String {
                 depth = depth.saturating_sub(1);
                 out.push_str(&input[start..end]);
             }
-            Event::Text(_) | Event::CData(_) if secret_depth.is_some() => {
-                out.push_str("[REDACTED-SECRET]");
+            // MEC-528 N2: quick-xml reports `&amp;` / `&#x70;` as GeneralRef;
+            // inside a secret element they are secret content too.
+            Event::Text(_) | Event::CData(_) | Event::GeneralRef(_) if secret_depth.is_some() => {
+                if !marker_open {
+                    out.push_str("[REDACTED-SECRET]");
+                    marker_open = true;
+                }
+                continue;
             }
             _ => {
                 out.push_str(&input[start..end]);
@@ -1221,6 +1238,42 @@ mod tests {
     /// a node outside the path the string appears to name. `mgt-config` is
     /// otherwise blocked by device role restriction and the xpath
     /// blocklist -- an axis step must not be a way around either.
+    /// MEC-528 N1: interface names contain `/`; both validators must accept
+    /// them (the strict grammar used to split inside the quoted value).
+    #[test]
+    fn accepts_interface_xpaths_with_slashes() {
+        let base =
+            "/config/devices/entry[@name='localhost.localdomain']/network/interface/ethernet";
+        let roots = vec![base.to_owned()];
+        for xpath in [
+            format!("{base}/entry[@name='ethernet1/1']"),
+            format!(
+                "{base}/entry[@name='ethernet1/1']/layer3/units/entry[@name='ethernet1/1.100']"
+            ),
+        ] {
+            assert!(
+                validate_read_xpath(&xpath).is_ok(),
+                "read must accept: {xpath}"
+            );
+            assert!(
+                validate_write_xpath(&xpath, &roots).is_ok(),
+                "write must accept: {xpath}"
+            );
+        }
+    }
+
+    /// MEC-528 N2: entity references inside a secret element are redacted
+    /// with the surrounding text, not passed through.
+    #[test]
+    fn entity_references_inside_secret_elements_are_redacted() {
+        let out = redact_structural_secret_elements("<password>ab&amp;cd</password>");
+        assert_eq!(out, "<password>[REDACTED-SECRET]</password>");
+        let out = redact_structural_secret_elements("<community>&#x70;&#x77;</community>");
+        assert_eq!(out, "<community>[REDACTED-SECRET]</community>");
+        let out = redact_structural_secret_elements("<x>a&amp;b</x>");
+        assert_eq!(out, "<x>a&amp;b</x>", "non-secret elements are untouched");
+    }
+
     #[test]
     fn rejects_axis_steps_on_read() {
         for xpath in [

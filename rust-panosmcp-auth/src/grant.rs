@@ -110,7 +110,37 @@ pub fn is_strict_xpath_shape(xpath: &str) -> bool {
     if xpath.contains("::") {
         return false;
     }
-    xpath.split('/').skip(1).all(is_strict_xpath_step)
+    let Some(steps) = split_xpath_steps(xpath) else {
+        return false;
+    };
+    steps.into_iter().skip(1).all(is_strict_xpath_step)
+}
+
+/// Split an xpath into steps on `/` only outside a quoted predicate value
+/// (MEC-528 N1): PAN-OS interface names contain `/` (`ethernet1/1`,
+/// `ethernet1/1.100`), so a plain `split('/')` cut the predicate in half and
+/// rejected every interface xpath. `None` for an unterminated quote.
+fn split_xpath_steps(xpath: &str) -> Option<Vec<&str>> {
+    let mut steps = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<u8> = None;
+    for (index, byte) in xpath.bytes().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if byte == b'\'' || byte == b'"' => quote = Some(byte),
+            None if byte == b'/' => {
+                steps.push(&xpath[start..index]);
+                start = index + 1;
+            }
+            None => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    steps.push(&xpath[start..]);
+    Some(steps)
 }
 
 fn is_strict_xpath_step(step: &str) -> bool {
@@ -338,6 +368,29 @@ mod xpath_quote_tests {
     /// gated `allows_xpath`, this passed as "starts with the granted root,
     /// next char is `/`" even though an XPath engine evaluating `parent::`
     /// addresses a node the granted root does not cover.
+    /// MEC-528 N1: a `/` inside a quoted predicate value is part of the
+    /// value, not a step separator -- every PAN-OS interface name has one.
+    #[test]
+    fn interface_names_with_slashes_are_granted() {
+        let root = "/config/devices/entry[@name='localhost.localdomain']/network/interface";
+        for xpath in [
+            format!("{root}/ethernet/entry[@name='ethernet1/1']"),
+            format!(
+                "{root}/ethernet/entry[@name='ethernet1/1']/layer3/units/entry[@name='ethernet1/1.100']"
+            ),
+        ] {
+            assert!(is_strict_xpath_shape(&xpath), "must parse: {xpath}");
+            assert!(grant(root).allows_xpath(&xpath), "must be granted: {xpath}");
+        }
+        // An unterminated quote is still refused, and a `/` does not hide an axis.
+        assert!(!is_strict_xpath_shape(&format!(
+            "{root}/ethernet/entry[@name='ethernet1/1]"
+        )));
+        assert!(!grant(root).allows_xpath(&format!(
+            "{root}/ethernet/entry[@name='e1/1']/parent::node()"
+        )));
+    }
+
     #[test]
     fn axis_syntax_does_not_escape_the_granted_root() {
         let root = "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book";
