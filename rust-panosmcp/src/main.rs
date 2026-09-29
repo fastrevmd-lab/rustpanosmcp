@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redaction,
         journald: cli.audit_journald,
     };
-    rust_panosmcp_core::observability::init_tracing(&audit_cfg)?;
+    let audit_sink = rust_panosmcp_core::observability::init_tracing(&audit_cfg)?;
 
     if let Some(command) = cli.command {
         match command {
@@ -291,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Scan for stale secret files in config and state directories.
     check_stale_secrets(&cli)?;
 
-    spawn_reload_handler(runtime.clone())?;
+    spawn_reload_handler(runtime.clone(), audit_sink)?;
 
     // Bound rather than propagated with `?`, so the evidence flush below runs
     // whichever way serving ended. `EvidenceService::Drop` deliberately does not
@@ -355,12 +355,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(unix)]
-fn spawn_reload_handler(runtime: RuntimeState) -> Result<(), std::io::Error> {
+fn spawn_reload_handler(
+    runtime: RuntimeState,
+    audit_sink: Option<rust_panosmcp_core::observability::AuditFileSink>,
+) -> Result<(), std::io::Error> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut hangup = signal(SignalKind::hangup())?;
     tokio::spawn(async move {
         while hangup.recv().await.is_some() {
+            // Reopen the audit file first: this is the lossless half of log
+            // rotation (rename the file, signal the process). A failed
+            // reopen must not block the inventory/token reload below -- it
+            // is a rotation problem, not an audit-init failure, so it
+            // warn-logs and keeps the previous sink rather than treating the
+            // server as unaudited.
+            if let Some(sink) = &audit_sink {
+                match sink.reopen() {
+                    Ok(()) => {
+                        tracing::info!(path = %sink.path().display(), "audit log reopened");
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            path = %sink.path().display(),
+                            "audit log reopen failed; keeping previous sink"
+                        );
+                    }
+                }
+            }
             match runtime.reload() {
                 Ok(()) => tracing::info!("atomically reloaded inventory and token store"),
                 Err(error) => tracing::error!(%error, "reload refused; retaining previous runtime"),
@@ -371,6 +394,9 @@ fn spawn_reload_handler(runtime: RuntimeState) -> Result<(), std::io::Error> {
 }
 
 #[cfg(not(unix))]
-fn spawn_reload_handler(_runtime: RuntimeState) -> Result<(), std::io::Error> {
+fn spawn_reload_handler(
+    _runtime: RuntimeState,
+    _audit_sink: Option<rust_panosmcp_core::observability::AuditFileSink>,
+) -> Result<(), std::io::Error> {
     Ok(())
 }

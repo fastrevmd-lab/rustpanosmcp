@@ -7,9 +7,11 @@ use crate::{
     observability::AuditScope,
     state_lock::StateFileLock,
     xml::{
-        ConfigEntry, ContentVersionEntry, DeviceFacts, HaState, LicenseEntry, SoftwareVersionEntry,
+        ConfigEntry, ContentVersionEntry, DeviceFacts, DeviceGroupSummary, HaState, JobStatus,
+        LicenseEntry, PushDeviceStatus, SoftwareVersionEntry, TemplateSummary,
         collect_text_for_elements, panos_api_code_name, parse_content_entries, parse_device_facts,
         parse_ha_state, parse_job_id, parse_license_entries, parse_log_entries,
+        parse_panorama_device_groups_op, parse_panorama_templates_op, parse_push_job_status,
         parse_security_policy_match, parse_software_entries, redact_secret_material,
         scan_config_entries, validate_read_only_op_command, validate_read_xpath,
     },
@@ -52,6 +54,25 @@ pub(crate) const LIST_CONTAINER_ENTRY_DEPTH: usize = 3;
 /// Depth for an XPath that already resolves to a single entry directly under
 /// `<result>`: `response`/`result`/`entry`.
 const SINGLE_ENTRY_DEPTH: usize = 2;
+/// Enumerates Panorama's device groups and their connected-firewall serials
+/// in one read-only op command -- runtime state, not the config tree, so the
+/// rulebases/address objects nested under the config equivalent structurally
+/// cannot appear in the response (MEC-759).
+const PANORAMA_DEVICE_GROUPS_OP_COMMAND: &str = "<show><devicegroups></devicegroups></show>";
+/// Enumerates Panorama's template names (plus per-firewall commit/connection
+/// detail this server discards); see `PANORAMA_DEVICE_GROUPS_OP_COMMAND`.
+/// Template *variables* have no op-command equivalent -- they are read per
+/// template via `PANORAMA_TEMPLATE_XPATH` below.
+const PANORAMA_TEMPLATES_OP_COMMAND: &str = "<show><templates></templates></show>";
+/// Panorama's own template container. Fixed, not caller-supplied: only a
+/// name reported by Panorama itself (from `PANORAMA_TEMPLATES_OP_COMMAND`)
+/// is ever appended as a `[@name='...']` predicate, and that predicate is
+/// validated by `validate_read_xpath` before use (MEC-759).
+const PANORAMA_TEMPLATE_XPATH: &str =
+    "/config/devices/entry[@name='localhost.localdomain']/template";
+/// Cap on template variables read back per template; matches the bound the
+/// discarded whole-container read used to enforce implicitly.
+const MAX_TEMPLATE_VARIABLES: usize = 4096;
 
 /// PAN-OS policy action: only Deny is used (fail-open blocklist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -578,6 +599,227 @@ impl PanosService {
                 truncated: response_truncated
                     || scan.truncated
                     || offset + returned < scan.total_seen,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// List Panorama device groups and their member firewall serials.
+    ///
+    /// Reads Panorama's own runtime state via `<show><devicegroups/></show>`
+    /// rather than a config `get` on the whole `device-group` container: the
+    /// op response already nests each group's connected serials, and
+    /// rulebases/address objects/etc. structurally cannot appear in an
+    /// operational response the way they would in that container's full
+    /// config subtree (MEC-759).
+    pub async fn list_panorama_device_groups(
+        &self,
+        input: ListPanoramaDeviceGroupsInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<ListPanoramaDeviceGroupsOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "list_panorama_device_groups",
+                "list-device-groups",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "list_panorama_device_groups",
+                "list-device-groups",
+                vec![input.device.clone()],
+            ),
+        };
+        let client = match self.client(&input.device) {
+            Ok(client) => client,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        let response = match client
+            .operational(PANORAMA_DEVICE_GROUPS_OP_COMMAND, cancellation)
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        let device_groups = match parse_panorama_device_groups_op(&response) {
+            Ok(device_groups) => device_groups,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        audit.succeed();
+        Ok(ListPanoramaDeviceGroupsOutput {
+            device: input.device,
+            device_groups,
+        })
+    }
+
+    /// List Panorama templates and their declared variable names.
+    ///
+    /// Two-phase read (MEC-759): names come from the read-only op command
+    /// `<show><templates/></show>`, which reports per-firewall commit and
+    /// connection history rather than a template's declared variables --
+    /// those are config-only, so each name is then re-queried with a
+    /// single-entry config `get` scoped to exactly that template's
+    /// `/variable` child. Because the xpath ends at `variable`, PAN-OS never
+    /// emits that template's rulebase/interface/zone/etc. config alongside
+    /// it -- the same narrowing `get_panos_entry_digest` relies on for a
+    /// single rule or object.
+    pub async fn list_panorama_templates(
+        &self,
+        input: ListPanoramaTemplatesInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<ListPanoramaTemplatesOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "list_panorama_templates",
+                "list-templates",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "list_panorama_templates",
+                "list-templates",
+                vec![input.device.clone()],
+            ),
+        };
+        let client = match self.client(&input.device) {
+            Ok(client) => client,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        let response = match client
+            .operational(PANORAMA_TEMPLATES_OP_COMMAND, cancellation.clone())
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+        let names = match parse_panorama_templates_op(&response) {
+            Ok(names) => names,
+            Err(e) => {
+                audit.fail(&e);
+                return Err(e);
+            }
+        };
+
+        let mut templates = Vec::with_capacity(names.len());
+        // Skipped rather than failing the whole call: a name Panorama itself
+        // reported that cannot be safely turned into an xpath predicate
+        // (MEC-759's injection guard -- see `read_panorama_template_variables`).
+        let mut skipped_names: u64 = 0;
+        for name in names {
+            match self
+                .read_panorama_template_variables(&input.device, &name, cancellation.clone())
+                .await
+            {
+                Ok(Some(variables)) => templates.push(TemplateSummary { name, variables }),
+                Ok(None) => skipped_names += 1,
+                Err(e) => {
+                    audit.fail(&e);
+                    return Err(e);
+                }
+            }
+        }
+        if skipped_names > 0 {
+            audit.meta("skipped_template_names", skipped_names);
+        }
+        audit.succeed();
+        Ok(ListPanoramaTemplatesOutput {
+            device: input.device,
+            templates,
+        })
+    }
+
+    /// Read one template's declared variable *names* via a single-entry
+    /// config `get` scoped to its `/variable` child.
+    ///
+    /// `Ok(None)` means `template_name` -- reported by Panorama itself, not
+    /// caller-supplied -- failed the same xpath-predicate validation every
+    /// other read-only xpath in this server is held to; the caller skips
+    /// that one template rather than failing the whole list (MEC-759's
+    /// injection guard: a name containing `'`/`"` would unbalance the
+    /// predicate `validate_read_xpath` builds around it). PAN-OS reporting
+    /// "object not present"/"object not found" for a template with no
+    /// declared variables is a normal shape, not a failure, and reported as
+    /// an empty list.
+    async fn read_panorama_template_variables(
+        &self,
+        device: &str,
+        template_name: &str,
+        cancellation: CancellationToken,
+    ) -> Result<Option<Vec<String>>> {
+        let xpath = format!("{PANORAMA_TEMPLATE_XPATH}/entry[@name='{template_name}']/variable");
+        if validate_read_xpath(&xpath).is_err() {
+            return Ok(None);
+        }
+        self.check_xpath_policy(device, &xpath)?;
+
+        let client = self.client(device)?;
+        let response = match client.configuration(false, &xpath, cancellation).await {
+            Ok(response) => response,
+            Err(PanosMcpError::Api { code: 7 | 13, .. }) => return Ok(Some(Vec::new())),
+            Err(e) => return Err(e),
+        };
+        let scan = scan_config_entries(
+            response.xml.as_bytes(),
+            0,
+            MAX_TEMPLATE_VARIABLES,
+            LIST_CONTAINER_ENTRY_DEPTH,
+        )?;
+        Ok(Some(
+            scan.entries.into_iter().map(|entry| entry.name).collect(),
+        ))
+    }
+
+    /// Read a Panorama push (`CommitAll`) job's overall and per-device status.
+    pub async fn get_panorama_push_status(
+        &self,
+        input: GetPanoramaPushStatusInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<PanoramaPushStatusOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panorama_push_status",
+                "get-push-status",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panorama_push_status",
+                "get-push-status",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            let response = client.job_response(&input.job_id, cancellation).await?;
+            let status = parse_push_job_status(&response)?;
+            Ok(PanoramaPushStatusOutput {
+                device: input.device,
+                job_id: input.job_id,
+                job: status.job,
+                devices: status.devices,
             })
         }
         .await;
@@ -1673,6 +1915,63 @@ pub struct ConfigToolOutput {
     pub code: Option<i32>,
     /// Bounded XML and truncation metadata.
     pub output: BoundedText,
+}
+
+/// Input for `list_panorama_device_groups`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPanoramaDeviceGroupsInput {
+    /// Exact inventory device name for the Panorama management API.
+    pub device: String,
+}
+
+/// Result of `list_panorama_device_groups`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ListPanoramaDeviceGroupsOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Configured device groups and their member firewall serials.
+    pub device_groups: Vec<DeviceGroupSummary>,
+}
+
+/// Input for `list_panorama_templates`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPanoramaTemplatesInput {
+    /// Exact inventory device name for the Panorama management API.
+    pub device: String,
+}
+
+/// Result of `list_panorama_templates`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ListPanoramaTemplatesOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Configured templates and their declared variable names.
+    pub templates: Vec<TemplateSummary>,
+}
+
+/// Input for `get_panorama_push_status`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanoramaPushStatusInput {
+    /// Exact inventory device name for the Panorama management API.
+    pub device: String,
+    /// PAN-OS job identifier returned by a Panorama commit-all/push operation.
+    pub job_id: String,
+}
+
+/// Result of `get_panorama_push_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PanoramaPushStatusOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// The PAN-OS job identifier this status was read for.
+    pub job_id: String,
+    /// Overall push job state.
+    pub job: JobStatus,
+    /// Per-target-firewall push results, in document order.
+    pub devices: Vec<PushDeviceStatus>,
 }
 
 /// Caller-visible bounded text plus exact truncation metadata.

@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Panorama read-only tools: `list_panorama_device_groups`,
+  `list_panorama_templates`, `get_panorama_push_status`.** Structured reads
+  over the same audited/blocklist-checked config path `get_panos_config`
+  already uses — device groups and templates return typed summaries (name
+  plus member serials / declared variable names) instead of raw XML, and push
+  status parses a `show jobs id <id>` response into overall and
+  per-target-firewall state. No Panorama write or push-trigger path is added.
+  See the MCP tools reference in the README.
 - **CVE-2026-0310 version-floor advisory in `gather_device_facts`.** The
   response now includes a non-empty `advisories` list when the reported
   `sw-version` is below the published fix level for its release train
