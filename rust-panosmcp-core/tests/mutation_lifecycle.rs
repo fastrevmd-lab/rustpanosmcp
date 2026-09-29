@@ -92,7 +92,7 @@ async fn api(
     }
     if command == "<show><config><list><change-summary/></list></config></show>" {
         return success(
-            "<result><journal><entry><xpath>/config/shared/address</xpath></entry></journal></result>",
+            "<result><journal><entry><xpath>/config/shared/address</xpath><phash>$1$fakesalt$0123456789abcdefghijklmnopqrstuv</phash></entry></journal></result>",
         );
     }
     if command == "<validate><full></full></validate>" {
@@ -599,6 +599,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await;
@@ -618,6 +619,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )
@@ -642,6 +644,14 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
         .await
         .expect("diff");
     assert!(diff.change_summary.contains("/config/shared/address"));
+    // MEC-528 low: change-summary output must go through the same
+    // redaction as read tools, since it echoes device-side XML verbatim.
+    assert!(
+        !diff.change_summary.contains("$1$fakesalt"),
+        "diff_candidate must redact secret material in the change summary, got: {}",
+        diff.change_summary
+    );
+    assert!(diff.change_summary.contains("[REDACTED-SECRET]"));
     let validated = fixture
         .service
         .validate_candidate(operation.clone(), "token-a", None, CancellationToken::new())
@@ -722,6 +732,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -787,6 +798,7 @@ async fn commit_candidate_without_change_set_is_refused_without_the_flag() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )
@@ -916,6 +928,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -992,6 +1005,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
             },
             "token-a",
             None,
+            None,
             CancellationToken::new(),
         )
         .await
@@ -1067,6 +1081,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
                 destructive_confirmation: None,
             },
             "token-a",
+            None,
             None,
             CancellationToken::new(),
         )

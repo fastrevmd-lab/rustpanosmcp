@@ -397,6 +397,7 @@ async fn all_tools_emit_audit_events() {
             },
             "owner",
             None,
+            None,
             cancel.clone(),
         )
         .await;

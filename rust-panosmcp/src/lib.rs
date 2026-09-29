@@ -358,14 +358,14 @@ impl PanosMcpServer {
     }
 
     #[allow(clippy::result_large_err)]
-    fn change_set_identity(
+    fn mutation_identity(
         extensions: &Extensions,
     ) -> Result<(String, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
         let principal = Self::mutation_principal(extensions)?;
         let caller = Self::caller(extensions);
         if caller.as_ref().is_some_and(|caller| caller.grant.is_none()) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
-                "v0.2 change-set writes require a token-specific mutation grant",
+                "candidate mutations over HTTP require a token-specific mutation grant",
             )]));
         }
         Ok((principal, caller.and_then(|caller| caller.grant.clone())))
@@ -395,7 +395,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -481,7 +481,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -543,15 +543,28 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let principal = match Self::mutation_principal(&extensions) {
-            Ok(principal) => principal,
+        // MEC-528 F4: `stage_panos_config` is the v0.1 write tool and used to
+        // check only the device-wide mutation policy for an HTTP caller with
+        // no grant, passing `None` straight to `stage_config` -- unlike the
+        // v0.2 change-set tools (`create_panos_change_set`,
+        // `apply_panos_change_set`), which already refuse that caller via
+        // `mutation_identity`. Sharing the same identity check means both
+        // write paths fail closed on the same condition.
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
+            Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .stage_config(input, &principal, caller.as_ref(), cancellation)
+                .stage_config(
+                    input,
+                    &principal,
+                    grant.as_ref(),
+                    caller.as_ref(),
+                    cancellation,
+                )
                 .await,
         )
     }
