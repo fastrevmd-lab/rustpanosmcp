@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-29
+
 ### Added
 
 - **CVE-2026-0310 version-floor advisory in `gather_device_facts`.** The
@@ -47,8 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `authorization=denied` with `reason=direct_commit_disabled`, instead of a
   generic `result=error`.
 - Pinned the `mecmcp-*` crates to the released `v0.24.0` tag instead of an
-  unreleased commit.
+  unreleased commit, then moved to `v0.24.1` (default-on request rate limits).
 - Raised Rust MSRV from 1.88 to 1.89.
+- Fixed the Docker/compose setup docs and examples to match the image: the
+  ENTRYPOINT bakes in `--tokens-file` and `--state-file` as well as
+  `--device-mapping`, so passing any of the three again on `docker run` /
+  `command:` made the server refuse to start with clap's "cannot be used
+  multiple times" error. `packaging/container/compose.example.yaml` also
+  pinned a stale `0.2.2` image tag. See `docs/HOW-TO-SETUP-DOCKER.md`.
+- Fixed 14 other places where documentation had drifted from the code: the
+  README's advertised version, install-path token file locations, tool count,
+  the `--audit-format` default and accepted values, the CLI reference's
+  missing `token set-scopes` subcommand, `SECURITY.md`'s supported-version
+  range, and `docs/OPERATIONS.md`'s stale title and release-verification
+  example.
 
 ## [0.14.0] - 2026-09-16
 

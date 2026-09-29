@@ -1,4 +1,4 @@
-# v0.2 operator runbook
+# Operator runbook
 
 This runbook covers the Phase 4 systemd and container packages. Read
 `PHASE1_OPERATIONS.md`, `PHASE2_OPERATIONS.md`, and `PHASE3_OPERATIONS.md`
@@ -11,9 +11,9 @@ checksum before extracting and compare the recorded Git commit with the release
 you approved:
 
 ```bash
-sha256sum --check rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf rust-panosmcp-v0.2.2-x86_64-unknown-linux-gnu.tar.gz
-cat rust-panosmcp-v0.2.2/BUILD-INFO
+sha256sum --check rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz
+cat rust-panosmcp-v0.15.0/BUILD-INFO
 ```
 
 The build uses `Cargo.lock`, a fixed Rust MSRV, path remapping, a fixed source
