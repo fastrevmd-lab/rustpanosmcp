@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-families=(10_2 11_1 11_2 12_1)
+families=(10_2 11_1 11_2 12_1 12_2)
 configured=0
 for family in "${families[@]}"; do
     inventory_var="PANOS_MATRIX_${family}_INVENTORY"
