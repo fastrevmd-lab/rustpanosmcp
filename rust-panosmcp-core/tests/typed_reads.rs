@@ -37,6 +37,9 @@ impl Environment for TestEnvironment {
 struct MockState {
     /// Every `(type, action)` pair a request asked for, in order.
     requests: Mutex<Vec<(String, String)>>,
+    /// Every `cmd` field a request carried, in order (empty string when the
+    /// request had none, e.g. a plain `type=log` submission).
+    commands: Mutex<Vec<String>>,
 }
 
 fn success(body: &str) -> String {
@@ -55,6 +58,11 @@ async fn api(
         .expect("requests")
         .push((request_type.clone(), action.clone()));
     let command = form.get("cmd").cloned().unwrap_or_default();
+    state
+        .commands
+        .lock()
+        .expect("commands")
+        .push(command.clone());
 
     if command.contains("<show><high-availability><state>") {
         return success(
@@ -81,20 +89,47 @@ async fn api(
             // Deliberately zero matches for one probe address.
             return success("<result><rules></rules></result>");
         }
+        if command.contains("198.51.100.7") {
+            return success(
+                r#"<result><rules><entry name="block-untrust"><from>untrust</from><to>trust</to><action>deny</action></entry></rules></result>"#,
+            );
+        }
+        if command.contains("203.0.113.50") {
+            // Some PAN-OS releases return a text-form entry
+            // (`rule; index: N`) with no `name` attribute.
+            return success("<result><rules><entry>rule; index: 0</entry></rules></result>");
+        }
         return success(
-            r#"<result><rules><entry name="allow-web"><from>trust</from><to>untrust</to></entry></rules></result>"#,
+            r#"<result><rules><entry name="allow-web"><from>trust</from><to>untrust</to><action>allow</action></entry></rules></result>"#,
         );
     }
     if request_type == "log" && action.is_empty() {
         return success("<result><job>555</job></result>");
     }
     if request_type == "log" && action == "get" {
+        // Real PAN-OS nests a log job's terminal state under `<job>`, the
+        // same as a config/commit job -- not directly under `<result>` (see
+        // `log_job_is_finished`'s doc comment). The second entry carries a
+        // config-change log's before/after detail with a master-key-blob
+        // PSK and a crypt-style admin phash, the shapes `query_panos_logs`
+        // must redact before they reach the model (MEC-528).
         return success(
-            r#"<result><status>FIN</status><log><logs><entry><receive_time>2026-01-01T00:00:00</receive_time><src>192.0.2.1</src></entry></logs></log></result>"#,
+            r#"<result><job><status>FIN</status></job><log><logs><entry><receive_time>2026-01-01T00:00:00</receive_time><src>192.0.2.1</src></entry><entry><receive_time>2026-01-01T00:01:00</receive_time><before><ike-gateway><psk>secret-AQ==deadbeef</psk></ike-gateway></before><after><admin><phash>$5$rounds$abcdefghij</phash></admin></after></entry></logs></log></result>"#,
         );
+    }
+    if request_type == "log" && action == "finish" {
+        return success("<result></result>");
     }
     if request_type == "config" && (action == "show" || action == "get") {
         let xpath = form.get("xpath").cloned().unwrap_or_default();
+        if xpath.contains("vsys-with-secret") {
+            // Rule/object description free text carrying a master-key blob
+            // and a crypt-style hash, the shapes `list_panos_rulebase_entries`
+            // must redact before they reach the model (MEC-528).
+            return success(&format!(
+                r#"<result><container><entry name="from-{xpath}"><description>psk -AQ==zzzz111 phash $6$abc$def</description></entry></container></result>"#
+            ));
+        }
         return success(&format!(
             r#"<result><container><entry name="from-{xpath}"><ip-netmask>192.0.2.0/24</ip-netmask></entry></container></result>"#
         ));
@@ -230,12 +265,13 @@ async fn security_policy_match_reports_matched_and_unmatched_probes() {
                 device: "test-fw".to_owned(),
                 source: "192.0.2.10".parse().expect("ip"),
                 destination: "192.0.2.20".parse().expect("ip"),
-                destination_port: 443,
+                destination_port: Some(443),
                 protocol: IpProtocol::Tcp,
                 from_zone: None,
                 to_zone: None,
                 application: None,
                 source_user: None,
+                vsys: None,
             },
             None,
             CancellationToken::new(),
@@ -244,6 +280,7 @@ async fn security_policy_match_reports_matched_and_unmatched_probes() {
         .expect("policy match");
     assert!(matched.matched);
     assert_eq!(matched.rule_name.as_deref(), Some("allow-web"));
+    assert_eq!(matched.action.as_deref(), Some("allow"));
 
     let unmatched = service
         .test_panos_security_policy_match(
@@ -251,12 +288,13 @@ async fn security_policy_match_reports_matched_and_unmatched_probes() {
                 device: "test-fw".to_owned(),
                 source: "203.0.113.99".parse().expect("ip"),
                 destination: "192.0.2.20".parse().expect("ip"),
-                destination_port: 443,
+                destination_port: Some(443),
                 protocol: IpProtocol::Tcp,
                 from_zone: None,
                 to_zone: None,
                 application: None,
                 source_user: None,
+                vsys: None,
             },
             None,
             CancellationToken::new(),
@@ -265,6 +303,92 @@ async fn security_policy_match_reports_matched_and_unmatched_probes() {
         .expect("policy match");
     assert!(!unmatched.matched);
     assert!(unmatched.rule_name.is_none());
+    assert!(unmatched.action.is_none());
+}
+
+/// A matched deny rule must report its action, so a caller cannot read
+/// `matched: true` as "traffic is permitted" -- the deny/drop answer this
+/// tool exists to give lives only in the rule's `<action>` element.
+#[tokio::test]
+async fn security_policy_match_reports_a_deny_rules_action() {
+    let (service, _state) = fixture().await;
+
+    let denied = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "198.51.100.7".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: Some(443),
+                protocol: IpProtocol::Tcp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("policy match");
+    assert!(denied.matched);
+    assert_eq!(denied.rule_name.as_deref(), Some("block-untrust"));
+    assert_eq!(denied.action.as_deref(), Some("deny"));
+}
+
+/// `destination_port` is optional for `icmp`, which has no port, and
+/// defaults to 0 rather than being rejected as missing.
+#[tokio::test]
+async fn security_policy_match_allows_icmp_without_a_destination_port() {
+    let (service, _state) = fixture().await;
+
+    let result = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "192.0.2.10".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: None,
+                protocol: IpProtocol::Icmp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(result.is_ok());
+}
+
+/// A non-`icmp` probe without a `destination_port` must be rejected rather
+/// than silently defaulting to port 0.
+#[tokio::test]
+async fn security_policy_match_rejects_a_missing_destination_port_for_tcp() {
+    let (service, _state) = fixture().await;
+
+    let result = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "192.0.2.10".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: None,
+                protocol: IpProtocol::Tcp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(result.is_err());
 }
 
 /// A zone name crafted to break out of its `<from>...</from>` element must
@@ -279,12 +403,13 @@ async fn security_policy_match_escapes_a_zone_name_that_looks_like_xml() {
                 device: "test-fw".to_owned(),
                 source: "192.0.2.10".parse().expect("ip"),
                 destination: "192.0.2.20".parse().expect("ip"),
-                destination_port: 443,
+                destination_port: Some(443),
                 protocol: IpProtocol::Tcp,
                 from_zone: Some("trust</from><to>untrust".to_owned()),
                 to_zone: None,
                 application: None,
                 source_user: None,
+                vsys: None,
             },
             None,
             CancellationToken::new(),
@@ -320,7 +445,7 @@ async fn log_query_defaults_to_a_bounded_limit_and_rejects_an_excessive_one() {
         out.max_logs, 100,
         "unspecified max_logs must default, not be unbounded"
     );
-    assert_eq!(out.returned, 1);
+    assert_eq!(out.returned, 2);
 
     let rejected = service
         .query_panos_logs(
@@ -392,4 +517,130 @@ async fn rulebase_entries_rejects_a_vsys_name_that_would_break_out_of_the_predic
         result,
         Err(PanosMcpError::Policy { field: "vsys", .. })
     ));
+}
+
+/// `list_panos_rulebase_entries` must redact secret material (a master-key
+/// blob or a crypt-style hash) out of entry free text before returning it,
+/// the same as `get_panos_config` already does (MEC-528, F1).
+#[tokio::test]
+async fn rulebase_entries_redacts_secret_material_in_entry_text() {
+    let (service, _state) = fixture().await;
+    let out = service
+        .list_panos_rulebase_entries(
+            ListPanosRulebaseEntriesInput {
+                device: "test-fw".to_owned(),
+                source: ConfigSource::Running,
+                kind: RulebaseKind::AddressObjects,
+                vsys: "vsys-with-secret".to_owned(),
+                offset: None,
+                limit: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rulebase entries");
+
+    assert_eq!(out.entries.len(), 1);
+    let xml = &out.entries[0].xml;
+    assert!(!xml.contains("-AQ==zzzz111"), "master-key blob leaked");
+    assert!(!xml.contains("$6$abc$def"), "crypt hash leaked");
+    assert!(xml.contains("[REDACTED"));
+}
+
+/// `query_panos_logs` must redact secret material out of log entry text
+/// before returning it -- a config-change log can carry a PSK or admin
+/// phash in its before/after detail (MEC-528, F1).
+#[tokio::test]
+async fn log_query_redacts_secret_material_in_entry_text() {
+    let (service, _state) = fixture().await;
+    let out = service
+        .query_panos_logs(
+            QueryPanosLogsInput {
+                device: "test-fw".to_owned(),
+                log_type: PanosLogType::Config,
+                query: None,
+                max_logs: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("log query");
+
+    assert_eq!(out.returned, 2);
+    let joined = out
+        .entries
+        .iter()
+        .map(|entry| entry.xml.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!joined.contains("-AQ==deadbeef"), "master-key blob leaked");
+    assert!(
+        !joined.contains("$5$rounds$abcdefghij"),
+        "crypt hash leaked"
+    );
+    assert!(joined.contains("[REDACTED"));
+}
+
+/// `vsys` is sent as its own escaped element in the `<test>` command when
+/// present, so a multi-vsys firewall can be tested against a non-default
+/// vsys rather than only the default one.
+#[tokio::test]
+async fn security_policy_match_sends_an_escaped_vsys_element() {
+    let (service, state) = fixture().await;
+    let _ = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "192.0.2.10".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: Some(443),
+                protocol: IpProtocol::Tcp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: Some("vsys2".to_owned()),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("policy match");
+
+    let commands = state.commands.lock().expect("commands").clone();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.contains("<vsys>vsys2</vsys>"))
+    );
+}
+
+/// A matched entry with no `name` attribute must be reported as a parse
+/// error rather than `rule_name: Some("")`, which would misleadingly read
+/// as "a rule matched but has no name" instead of "the response shape was
+/// not what this parser expected."
+#[tokio::test]
+async fn security_policy_match_rejects_an_entry_with_no_name() {
+    let (service, _state) = fixture().await;
+    let result = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "203.0.113.50".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: Some(443),
+                protocol: IpProtocol::Tcp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result, Err(PanosMcpError::Xml(_))));
 }

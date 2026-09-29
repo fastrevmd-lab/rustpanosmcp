@@ -234,10 +234,17 @@ impl PanosClient {
 
     /// Poll a PAN-OS `type=log` job with cancellation and bounded backoff.
     ///
-    /// A log job's terminal state lives directly under `<result>`, not under
-    /// a `<job>` element the way a config/commit job does, so this cannot
-    /// share [`poll_job`](Self::poll_job)'s `parse_job_status` call -- see
-    /// [`crate::xml::log_job_is_finished`].
+    /// A log job's terminal state is nested under `<result><job><status>...`
+    /// -- the same shape [`poll_job`](Self::poll_job)'s `parse_job_status`
+    /// expects for a config/commit job -- but this uses
+    /// [`crate::xml::log_job_is_finished`], which scans for `<status>`
+    /// anywhere in the document rather than requiring that exact nesting,
+    /// since the shape is based on documentation and hand-written fixtures,
+    /// not a verified live-device response.
+    ///
+    /// On timeout or cancellation, best-effort sends `action=finish` for
+    /// this job id so PAN-OS's small pool of concurrent log-query slots
+    /// does not stay occupied by an abandoned job.
     pub(crate) async fn poll_log_job(
         &self,
         job_id: &str,
@@ -278,11 +285,38 @@ impl PanosClient {
             }
         };
         match time::timeout(deadline, operation).await {
-            Ok(result) => result,
-            Err(_) => Err(PanosMcpError::Timeout {
-                operation: "poll_log_job",
-            }),
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(err)) => {
+                if matches!(err, PanosMcpError::Cancelled) {
+                    self.best_effort_finish_log_job(job_id).await;
+                }
+                Err(err)
+            }
+            Err(_) => {
+                self.best_effort_finish_log_job(job_id).await;
+                Err(PanosMcpError::Timeout {
+                    operation: "poll_log_job",
+                })
+            }
         }
+    }
+
+    /// Best-effort release of a `type=log` job PAN-OS is still holding a
+    /// concurrent-query slot for, after this client gave up waiting on it.
+    /// Uses a fresh cancellation token and a short timeout of its own so a
+    /// wedged connection cannot turn an abandoned poll into a second hang;
+    /// any failure here is swallowed, since the caller is already reporting
+    /// the original timeout or cancellation.
+    async fn best_effort_finish_log_job(&self, job_id: &str) {
+        let finish = self.post(
+            vec![
+                ("type", "log".to_owned()),
+                ("action", "finish".to_owned()),
+                ("job-id", job_id.to_owned()),
+            ],
+            CancellationToken::new(),
+        );
+        let _ = time::timeout(Duration::from_secs(5), finish).await;
     }
 
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.

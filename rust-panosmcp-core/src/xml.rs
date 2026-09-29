@@ -836,11 +836,26 @@ pub fn parse_security_policy_match(response: &PanosResponse) -> Result<Vec<Confi
     Ok(scan.entries)
 }
 
+/// Extract the first occurrence of `tag`'s text from an already-captured
+/// entry's exact source XML (e.g. a [`ConfigEntry::xml`] slice).
+///
+/// Exposed so a caller with a single matched entry in hand -- such as
+/// `test_panos_security_policy_match` reading a rule's `<action>` -- does
+/// not need its own XML reader just to pull one field back out of text this
+/// module already parsed once.
+pub fn extract_element_text(xml: &str, tag: &str) -> Result<Option<String>> {
+    first_element_text(xml.as_bytes(), tag.as_bytes())
+}
+
 /// Whether a polled `type=log&action=get` response reports a terminal job.
 ///
-/// Unlike a config/commit job, PAN-OS nests a log job's state directly under
-/// `<result>` (`<result><status>FIN</status>...`) rather than under a
-/// `<job>` element, so [`parse_job_status`] does not apply here.
+/// A log job's state is nested under `<result><job><status>FIN</status>...`,
+/// the same shape a config/commit job uses -- but this scans for `<status>`
+/// anywhere in the document rather than requiring that exact nesting under
+/// `<job>`, both because the response has not been verified against a live
+/// device and because [`parse_job_status`] is `<job>`-status typed
+/// (`JobStatus`) while a log job's terminal payload also carries the log
+/// entries this function has no reason to parse.
 pub fn log_job_is_finished(response: &PanosResponse) -> Result<bool> {
     let input = response.xml.as_bytes();
     Ok(first_element_text(input, b"status")?.as_deref() == Some("FIN"))

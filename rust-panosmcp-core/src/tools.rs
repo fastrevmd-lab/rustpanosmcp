@@ -869,11 +869,27 @@ impl PanosService {
                 )
                 .await?;
             let rules = parse_security_policy_match(&response)?;
-            let rule_name = rules.first().map(|entry| entry.name.clone());
+            let first_entry = rules.first();
+            // Some PAN-OS releases return a text-form entry (`rule; index:
+            // N`) with no `name` attribute; report that as a parse error
+            // rather than a misleading `rule_name: Some("")`.
+            if let Some(entry) = first_entry
+                && entry.name.is_empty()
+            {
+                return Err(PanosMcpError::Xml(
+                    "security-policy-match matched entry has no rule name".to_owned(),
+                ));
+            }
+            let rule_name = first_entry.map(|entry| entry.name.clone());
+            let action = first_entry
+                .map(|entry| crate::xml::extract_element_text(&entry.xml, "action"))
+                .transpose()?
+                .flatten();
             Ok(TestPanosSecurityPolicyMatchOutput {
                 device: input.device,
                 matched: !rules.is_empty(),
                 rule_name,
+                action,
                 rules,
             })
         }
@@ -937,7 +953,15 @@ impl PanosService {
             let finished = client
                 .poll_log_job(&job_id, LOG_JOB_DEADLINE, cancellation)
                 .await?;
-            let entries = parse_log_entries(&finished)?;
+            let mut entries = parse_log_entries(&finished)?;
+            // PAN-OS config-change log entries can carry a PSK, bind
+            // password, or SNMPv3 key in the before/after change detail
+            // (MEC-528's redactor already matches these shapes); this is
+            // the explicit token-allowlisted tool, but redact regardless of
+            // caller.
+            for entry in &mut entries {
+                entry.xml = redact_secret_material(&entry.xml);
+            }
             let returned = entries.len();
             Ok(QueryPanosLogsOutput {
                 device: input.device,
@@ -1010,14 +1034,18 @@ impl PanosService {
             let scan = scan_config_entries(&bytes, offset, limit, LIST_CONTAINER_ENTRY_DEPTH)?;
             ensure_scan_success(&input.device, &bytes, &scan)?;
 
-            let returned = scan.entries.len();
+            let mut entries = scan.entries;
+            for entry in &mut entries {
+                entry.xml = redact_secret_material(&entry.xml);
+            }
+            let returned = entries.len();
             Ok(ListPanosRulebaseEntriesOutput {
                 device: input.device,
                 source: input.source,
                 kind: input.kind,
                 vsys: input.vsys,
                 xpath,
-                entries: scan.entries,
+                entries,
                 offset,
                 limit,
                 returned,
@@ -1336,8 +1364,10 @@ pub struct TestPanosSecurityPolicyMatchInput {
     pub source: IpAddr,
     /// Simulated packet destination address.
     pub destination: IpAddr,
-    /// Simulated packet destination port.
-    pub destination_port: u16,
+    /// Simulated packet destination port. Required unless `protocol` is
+    /// `icmp`, which has no port; if omitted for `icmp` this defaults to 0.
+    #[serde(default)]
+    pub destination_port: Option<u16>,
     /// Simulated packet IP protocol.
     pub protocol: IpProtocol,
     /// Optional source zone.
@@ -1352,6 +1382,11 @@ pub struct TestPanosSecurityPolicyMatchInput {
     /// Optional `user@domain` source user.
     #[serde(default)]
     pub source_user: Option<String>,
+    /// Optional vsys name; defaults to PAN-OS's own default vsys when
+    /// omitted. Validated with the same token shape as
+    /// `list_panos_rulebase_entries`'s `vsys` field.
+    #[serde(default)]
+    pub vsys: Option<String>,
 }
 
 /// Result of `test_panos_security_policy_match`.
@@ -1363,6 +1398,10 @@ pub struct TestPanosSecurityPolicyMatchOutput {
     pub matched: bool,
     /// The first matched rule's name, when any rule matched.
     pub rule_name: Option<String>,
+    /// The first matched rule's `<action>` (e.g. `allow`, `deny`, `drop`),
+    /// when any rule matched. A model summarizing `matched: true` without
+    /// this could read a matched deny rule as "traffic is permitted".
+    pub action: Option<String>,
     /// Every matched rule, in the order PAN-OS returned them.
     pub rules: Vec<ConfigEntry>,
 }
@@ -1393,6 +1432,19 @@ fn build_security_policy_match_command(
             });
         }
     }
+    if let Some(vsys) = &input.vsys {
+        validate_vsys_name(vsys)?;
+    }
+    let destination_port = match (input.protocol, input.destination_port) {
+        (IpProtocol::Icmp, port) => port.unwrap_or(0),
+        (_, Some(port)) => port,
+        (_, None) => {
+            return Err(PanosMcpError::Policy {
+                field: "destination_port",
+                reason: "required unless protocol is icmp".to_owned(),
+            });
+        }
+    };
 
     let mut command = String::from("<test><security-policy-match>");
     command.push_str(&format!(
@@ -1404,13 +1456,15 @@ fn build_security_policy_match_command(
         escape(input.destination.to_string())
     ));
     command.push_str(&format!(
-        "<destination-port>{}</destination-port>",
-        input.destination_port
+        "<destination-port>{destination_port}</destination-port>"
     ));
     command.push_str(&format!(
         "<protocol>{}</protocol>",
         input.protocol.panos_number()
     ));
+    if let Some(vsys) = &input.vsys {
+        command.push_str(&format!("<vsys>{}</vsys>", escape(vsys)));
+    }
     if let Some(zone) = &input.from_zone {
         command.push_str(&format!("<from>{}</from>", escape(zone)));
     }
