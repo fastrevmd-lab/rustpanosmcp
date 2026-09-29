@@ -21,7 +21,10 @@ use rust_panosmcp_core::{
     },
     tools::{
         ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
-        GetPanosEntryDigestInput, ListPanosEntriesInput, PanosService,
+        GetPanosContentStatusInput, GetPanosEntryDigestInput, GetPanosHaStateInput,
+        GetPanosLicenseInfoInput, GetPanosSoftwareStatusInput, IpProtocol, ListPanosEntriesInput,
+        ListPanosRulebaseEntriesInput, PanosLogType, PanosService, QueryPanosLogsInput,
+        RulebaseKind, TestPanosSecurityPolicyMatchInput,
     },
 };
 use std::{
@@ -107,6 +110,37 @@ async fn api(
     }
     if command == "<check><pending-changes></pending-changes></check>" {
         return success("<result>no</result>");
+    }
+    if command.contains("<show><high-availability><state>") {
+        return success("<result><enabled>no</enabled></result>");
+    }
+    if command.contains("<request><license><info>") {
+        return success(
+            "<result><licenses><entry><feature>PA-VM</feature><expired>no</expired></entry></licenses></result>",
+        );
+    }
+    if command.contains("<request><content><upgrade><info>") {
+        return success(
+            "<result><content-updates><entry><version>1</version></entry></content-updates></result>",
+        );
+    }
+    if command.contains("<request><system><software><info>") {
+        return success(
+            "<result><sw-updates><versions><entry><version>11.0.0</version></entry></versions></sw-updates></result>",
+        );
+    }
+    if command.contains("<test><security-policy-match>") {
+        return success(
+            "<result><rules><entry name=\"allow-all\"><action>allow</action></entry></rules></result>",
+        );
+    }
+    if request_type == Some("log") && action.is_none() {
+        return success("<result><job>103</job></result>");
+    }
+    if request_type == Some("log") && action == Some("get") {
+        return success(
+            "<result><status>FIN</status><log><logs><entry><receive_time>now</receive_time></entry></logs></log></result>",
+        );
     }
 
     r#"<response status="error"><msg><line>unknown request</line></msg></response>"#.to_owned()
@@ -251,6 +285,93 @@ async fn all_tools_emit_audit_events() {
                 device: "test-fw".to_owned(),
                 source: ConfigSource::Candidate,
                 xpath: "/config/shared/address/entry[@name='test']".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .list_panos_rulebase_entries(
+            ListPanosRulebaseEntriesInput {
+                device: "test-fw".to_owned(),
+                source: ConfigSource::Running,
+                kind: RulebaseKind::AddressObjects,
+                vsys: "vsys1".to_owned(),
+                offset: None,
+                limit: None,
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .get_panos_ha_state(
+            GetPanosHaStateInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .get_panos_license_info(
+            GetPanosLicenseInfoInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .get_panos_content_status(
+            GetPanosContentStatusInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .get_panos_software_status(
+            GetPanosSoftwareStatusInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .test_panos_security_policy_match(
+            TestPanosSecurityPolicyMatchInput {
+                device: "test-fw".to_owned(),
+                source: "192.0.2.10".parse().expect("ip"),
+                destination: "192.0.2.20".parse().expect("ip"),
+                destination_port: Some(443),
+                protocol: IpProtocol::Tcp,
+                from_zone: None,
+                to_zone: None,
+                application: None,
+                source_user: None,
+                vsys: None,
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .query_panos_logs(
+            QueryPanosLogsInput {
+                device: "test-fw".to_owned(),
+                log_type: PanosLogType::Traffic,
+                query: None,
+                max_logs: None,
             },
             None,
             cancel.clone(),

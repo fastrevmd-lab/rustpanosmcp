@@ -7,18 +7,21 @@ use crate::{
     observability::AuditScope,
     state_lock::StateFileLock,
     xml::{
-        ConfigEntry, DeviceFacts, collect_text_for_elements, panos_api_code_name,
-        parse_device_facts, redact_secret_material, scan_config_entries,
-        validate_read_only_op_command, validate_read_xpath,
+        ConfigEntry, ContentVersionEntry, DeviceFacts, HaState, LicenseEntry, SoftwareVersionEntry,
+        collect_text_for_elements, panos_api_code_name, parse_content_entries, parse_device_facts,
+        parse_ha_state, parse_job_id, parse_license_entries, parse_log_entries,
+        parse_security_policy_match, parse_software_entries, redact_secret_material,
+        scan_config_entries, validate_read_only_op_command, validate_read_xpath,
     },
 };
 use mecmcp_policy::{
     CommandAllowlist, CommandDomain, CommandMode, DomainRules, Policy, RuleSource, compile_rules,
 };
+use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, net::IpAddr, path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_OUTPUT_BYTES: usize = 512 * 1024;
@@ -26,8 +29,20 @@ const MAX_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_OUTPUT_LINES: usize = 10_000;
 const MAX_OUTPUT_LINES: usize = 100_000;
 const SYSTEM_INFO_COMMAND: &str = "<show><system><info></info></system></show>";
+const HA_STATE_COMMAND: &str =
+    "<show><high-availability><state></state></high-availability></show>";
+const LICENSE_INFO_COMMAND: &str = "<request><license><info></info></license></request>";
+const CONTENT_INFO_COMMAND: &str =
+    "<request><content><upgrade><info></info></upgrade></content></request>";
+const SOFTWARE_INFO_COMMAND: &str =
+    "<request><system><software><info></info></software></system></request>";
 const DEFAULT_LIST_LIMIT: usize = 100;
 const MAX_LIST_LIMIT: usize = 500;
+const DEFAULT_LOG_LIMIT: u32 = 100;
+const MAX_LOG_LIMIT: u32 = 1_000;
+const LOG_JOB_DEADLINE: Duration = Duration::from_secs(120);
+/// Maximum accepted PAN-OS log query filter string.
+const MAX_LOG_QUERY_BYTES: usize = 4096;
 /// Depth, in tag-name-stack entries, at which a list container's `<entry>`
 /// children sit below `<response>`: `response`/`result`/`container`/`entry`.
 const LIST_CONTAINER_ENTRY_DEPTH: usize = 3;
@@ -642,6 +657,412 @@ impl PanosService {
         result
     }
 
+    /// Read HA state via the documented `show high-availability state` command.
+    ///
+    /// All fields are `None` on a standalone device: PAN-OS omits `<group>`
+    /// entirely rather than reporting a "not HA" state, so absence here is a
+    /// valid answer, not a partial failure.
+    pub async fn get_panos_ha_state(
+        &self,
+        input: GetPanosHaStateInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<GetPanosHaStateOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_ha_state",
+                "ha-state",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("get_panos_ha_state", "ha-state", vec![input.device.clone()]),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            let response = client.operational(HA_STATE_COMMAND, cancellation).await?;
+            let state = parse_ha_state(&response)?;
+            Ok(GetPanosHaStateOutput {
+                device: input.device,
+                state,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Read license status via the documented `request license info` command.
+    pub async fn get_panos_license_info(
+        &self,
+        input: GetPanosLicenseInfoInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<GetPanosLicenseInfoOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_license_info",
+                "license-info",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_license_info",
+                "license-info",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            let response = client.fixed_op(LICENSE_INFO_COMMAND, cancellation).await?;
+            let licenses = parse_license_entries(&response)?;
+            Ok(GetPanosLicenseInfoOutput {
+                device: input.device,
+                licenses,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Read content version status via `request content upgrade info`.
+    pub async fn get_panos_content_status(
+        &self,
+        input: GetPanosContentStatusInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<GetPanosContentStatusOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_content_status",
+                "content-status",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_content_status",
+                "content-status",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            let response = client.fixed_op(CONTENT_INFO_COMMAND, cancellation).await?;
+            let versions = parse_content_entries(&response)?;
+            Ok(GetPanosContentStatusOutput {
+                device: input.device,
+                versions,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Read software version status via `request system software info`.
+    pub async fn get_panos_software_status(
+        &self,
+        input: GetPanosSoftwareStatusInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<GetPanosSoftwareStatusOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_software_status",
+                "software-status",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_software_status",
+                "software-status",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let client = self.client(&input.device)?;
+            let response = client.fixed_op(SOFTWARE_INFO_COMMAND, cancellation).await?;
+            let versions = parse_software_entries(&response)?;
+            Ok(GetPanosSoftwareStatusOutput {
+                device: input.device,
+                versions,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Test which security rule, if any, a packet description would match.
+    ///
+    /// Builds the `<test><security-policy-match>` command server-side from
+    /// typed, individually escaped fields -- never from a caller-supplied
+    /// command string -- so this can bypass `operational`'s `<show>`-only
+    /// gate the same way `check_pending_changes` does for its own fixed
+    /// `<check>` command, without accepting arbitrary `<test>` bodies.
+    pub async fn test_panos_security_policy_match(
+        &self,
+        input: TestPanosSecurityPolicyMatchInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<TestPanosSecurityPolicyMatchOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "test_panos_security_policy_match",
+                "policy-match",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "test_panos_security_policy_match",
+                "policy-match",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            let command = build_security_policy_match_command(&input)?;
+
+            // Same fail-open command blocklist already applied to
+            // `execute_panos_op`, so a device- or global-scoped `<test>`
+            // blocklist rule (if ever configured) still applies here.
+            if let Some(policy) = &self.policy {
+                use mecmcp_policy::{Decision, normalize_input};
+                let normalized = normalize_input(&command);
+                match policy.check_command(&input.device, &normalized, Action::Deny) {
+                    Decision::Allow => {}
+                    Decision::Deny { rule, source, .. } => {
+                        return Err(PanosMcpError::Policy {
+                            field: "command",
+                            reason: format!(
+                                "blocked by {} blocklist rule '{}'",
+                                source.as_str(),
+                                rule.pattern
+                            ),
+                        });
+                    }
+                    Decision::DenyAllowlist { reason, .. } => {
+                        return Err(PanosMcpError::Policy {
+                            field: "command",
+                            reason: format!("blocked by command allowlist: {reason:?}"),
+                        });
+                    }
+                }
+            }
+
+            let client = self.client(&input.device)?;
+            let response = client
+                .post_fields(
+                    vec![("type", "op".to_owned()), ("cmd", command)],
+                    cancellation,
+                )
+                .await?;
+            let rules = parse_security_policy_match(&response)?;
+            let first_entry = rules.first();
+            // Some PAN-OS releases return a text-form entry (`rule; index:
+            // N`) with no `name` attribute; report that as a parse error
+            // rather than a misleading `rule_name: Some("")`.
+            if let Some(entry) = first_entry
+                && entry.name.is_empty()
+            {
+                return Err(PanosMcpError::Xml(
+                    "security-policy-match matched entry has no rule name".to_owned(),
+                ));
+            }
+            let rule_name = first_entry.map(|entry| entry.name.clone());
+            let action = first_entry
+                .map(|entry| crate::xml::extract_element_text(&entry.xml, "action"))
+                .transpose()?
+                .flatten();
+            Ok(TestPanosSecurityPolicyMatchOutput {
+                device: input.device,
+                matched: !rules.is_empty(),
+                rule_name,
+                action,
+                rules,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Fetch a bounded window of PAN-OS logs for one log type.
+    ///
+    /// `max_logs` always applies -- defaulting to `DEFAULT_LOG_LIMIT` and
+    /// capped at `MAX_LOG_LIMIT` -- so a caller can never pull an unbounded
+    /// log set; this mirrors `OutputLimits::resolve`'s default-plus-hard-cap
+    /// shape for free-form output.
+    pub async fn query_panos_logs(
+        &self,
+        input: QueryPanosLogsInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<QueryPanosLogsOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "query_panos_logs",
+                "log-query",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio("query_panos_logs", "log-query", vec![input.device.clone()]),
+        };
+        let result = async {
+            let max_logs = input.max_logs.unwrap_or(DEFAULT_LOG_LIMIT);
+            if max_logs == 0 || max_logs > MAX_LOG_LIMIT {
+                return Err(PanosMcpError::Policy {
+                    field: "max_logs",
+                    reason: format!("value must be between 1 and {MAX_LOG_LIMIT}"),
+                });
+            }
+            if let Some(query) = &input.query
+                && (query.is_empty() || query.len() > MAX_LOG_QUERY_BYTES)
+            {
+                return Err(PanosMcpError::Policy {
+                    field: "query",
+                    reason: format!("value must be 1-{MAX_LOG_QUERY_BYTES} bytes"),
+                });
+            }
+
+            let client = self.client(&input.device)?;
+            let mut fields = vec![
+                ("type", "log".to_owned()),
+                ("log-type", input.log_type.panos_value().to_owned()),
+                ("nlogs", max_logs.to_string()),
+            ];
+            if let Some(query) = &input.query {
+                fields.push(("query", query.clone()));
+            }
+            let submitted = client.post_fields(fields, cancellation.clone()).await?;
+            let job_id = parse_job_id(&submitted)?;
+            let finished = client
+                .poll_log_job(&job_id, LOG_JOB_DEADLINE, cancellation)
+                .await?;
+            let mut entries = parse_log_entries(&finished)?;
+            // PAN-OS config-change log entries can carry a PSK, bind
+            // password, or SNMPv3 key in the before/after change detail
+            // (MEC-528's redactor already matches these shapes); this is
+            // the explicit token-allowlisted tool, but redact regardless of
+            // caller.
+            for entry in &mut entries {
+                entry.xml = redact_secret_material(&entry.xml);
+            }
+            let returned = entries.len();
+            Ok(QueryPanosLogsOutput {
+                device: input.device,
+                log_type: input.log_type,
+                max_logs,
+                entries,
+                returned,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// List a rulebase or object container's entries by typed kind and vsys,
+    /// rather than requiring the caller to know the exact XPath.
+    ///
+    /// Shares its scan/pagination/truncation behavior with
+    /// [`list_panos_entries`](Self::list_panos_entries) -- this only differs
+    /// in how the XPath is produced.
+    pub async fn list_panos_rulebase_entries(
+        &self,
+        input: ListPanosRulebaseEntriesInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<ListPanosRulebaseEntriesOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "list_panos_rulebase_entries",
+                "list-rulebase-entries",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "list_panos_rulebase_entries",
+                "list-rulebase-entries",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            validate_vsys_name(&input.vsys)?;
+            let xpath = format!(
+                "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='{}']/{}",
+                input.vsys,
+                input.kind.xpath_suffix()
+            );
+            validate_read_xpath(&xpath)?;
+            self.check_xpath_policy(&input.device, &xpath)?;
+
+            let offset = input.offset.unwrap_or(0);
+            let limit = input.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+            if limit == 0 || limit > MAX_LIST_LIMIT {
+                return Err(PanosMcpError::Policy {
+                    field: "limit",
+                    reason: format!("value must be between 1 and {MAX_LIST_LIMIT}"),
+                });
+            }
+
+            let client = self.client(&input.device)?;
+            let (bytes, response_truncated) = client
+                .configuration_entries(
+                    input.source == ConfigSource::Candidate,
+                    &xpath,
+                    cancellation,
+                )
+                .await?;
+            let scan = scan_config_entries(&bytes, offset, limit, LIST_CONTAINER_ENTRY_DEPTH)?;
+            ensure_scan_success(&input.device, &bytes, &scan)?;
+
+            let mut entries = scan.entries;
+            for entry in &mut entries {
+                entry.xml = redact_secret_material(&entry.xml);
+            }
+            let returned = entries.len();
+            Ok(ListPanosRulebaseEntriesOutput {
+                device: input.device,
+                source: input.source,
+                kind: input.kind,
+                vsys: input.vsys,
+                xpath,
+                entries,
+                offset,
+                limit,
+                returned,
+                total_entries: scan.total_seen,
+                truncated: response_truncated
+                    || scan.truncated
+                    || offset + returned < scan.total_seen,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
     /// Deny an xpath matched by a device or global config blocklist rule.
     ///
     /// Fail-open when no policy is configured, matching this server's
@@ -837,6 +1258,388 @@ pub struct GetPanosEntryDigestOutput {
     /// if and only if this one entry changed -- no other part of the
     /// configuration is read to produce it.
     pub digest: Option<String>,
+}
+
+/// Input for `get_panos_ha_state`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanosHaStateInput {
+    /// Exact inventory device name.
+    pub device: String,
+}
+
+/// Result of `get_panos_ha_state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GetPanosHaStateOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Parsed high-availability state.
+    pub state: HaState,
+}
+
+/// Input for `get_panos_license_info`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanosLicenseInfoInput {
+    /// Exact inventory device name.
+    pub device: String,
+}
+
+/// Result of `get_panos_license_info`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GetPanosLicenseInfoOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Every license entry PAN-OS reported.
+    pub licenses: Vec<LicenseEntry>,
+}
+
+/// Input for `get_panos_content_status`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanosContentStatusInput {
+    /// Exact inventory device name.
+    pub device: String,
+}
+
+/// Result of `get_panos_content_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GetPanosContentStatusOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Every content version entry PAN-OS reported.
+    pub versions: Vec<ContentVersionEntry>,
+}
+
+/// Input for `get_panos_software_status`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanosSoftwareStatusInput {
+    /// Exact inventory device name.
+    pub device: String,
+}
+
+/// Result of `get_panos_software_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GetPanosSoftwareStatusOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Every software version entry PAN-OS reported.
+    pub versions: Vec<SoftwareVersionEntry>,
+}
+
+/// IP protocol accepted by `test_panos_security_policy_match`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IpProtocol {
+    /// TCP (protocol number 6).
+    Tcp,
+    /// UDP (protocol number 17).
+    Udp,
+    /// ICMP (protocol number 1).
+    Icmp,
+}
+
+impl IpProtocol {
+    fn panos_number(self) -> u8 {
+        match self {
+            Self::Tcp => 6,
+            Self::Udp => 17,
+            Self::Icmp => 1,
+        }
+    }
+}
+
+/// Maximum accepted length for a single zone, application, or user field in
+/// a `test_panos_security_policy_match` request.
+const MAX_POLICY_MATCH_FIELD_BYTES: usize = 255;
+
+/// Input for `test_panos_security_policy_match`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestPanosSecurityPolicyMatchInput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Simulated packet source address.
+    pub source: IpAddr,
+    /// Simulated packet destination address.
+    pub destination: IpAddr,
+    /// Simulated packet destination port. Required unless `protocol` is
+    /// `icmp`, which has no port; if omitted for `icmp` the command carries
+    /// no `<destination-port>` element at all.
+    #[serde(default)]
+    pub destination_port: Option<u16>,
+    /// Simulated packet IP protocol.
+    pub protocol: IpProtocol,
+    /// Optional source zone.
+    #[serde(default)]
+    pub from_zone: Option<String>,
+    /// Optional destination zone.
+    #[serde(default)]
+    pub to_zone: Option<String>,
+    /// Optional application name.
+    #[serde(default)]
+    pub application: Option<String>,
+    /// Optional `user@domain` source user.
+    #[serde(default)]
+    pub source_user: Option<String>,
+    /// Optional vsys name; defaults to PAN-OS's own default vsys when
+    /// omitted. Validated with the same token shape as
+    /// `list_panos_rulebase_entries`'s `vsys` field.
+    #[serde(default)]
+    pub vsys: Option<String>,
+}
+
+/// Result of `test_panos_security_policy_match`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct TestPanosSecurityPolicyMatchOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Whether any security rule matched the simulated packet.
+    pub matched: bool,
+    /// The first matched rule's name, when any rule matched.
+    pub rule_name: Option<String>,
+    /// The first matched rule's `<action>` (e.g. `allow`, `deny`, `drop`),
+    /// when any rule matched. A model summarizing `matched: true` without
+    /// this could read a matched deny rule as "traffic is permitted".
+    pub action: Option<String>,
+    /// Every matched rule, in the order PAN-OS returned them.
+    pub rules: Vec<ConfigEntry>,
+}
+
+/// Build the `<test><security-policy-match>` command from typed, validated
+/// fields, escaping every caller-supplied string individually.
+///
+/// This never interpolates a caller-supplied command string -- every value
+/// here is either a validated typed field (`IpAddr`, `u16`, [`IpProtocol`])
+/// or an explicitly length-capped, XML-escaped string -- matching the
+/// pattern `mutation.rs` uses to build fixed-shape commands from operator
+/// input.
+fn build_security_policy_match_command(
+    input: &TestPanosSecurityPolicyMatchInput,
+) -> Result<String> {
+    for (field, value) in [
+        ("from_zone", &input.from_zone),
+        ("to_zone", &input.to_zone),
+        ("application", &input.application),
+        ("source_user", &input.source_user),
+    ] {
+        if let Some(value) = value
+            && (value.is_empty() || value.len() > MAX_POLICY_MATCH_FIELD_BYTES)
+        {
+            return Err(PanosMcpError::Policy {
+                field,
+                reason: format!("value must be 1-{MAX_POLICY_MATCH_FIELD_BYTES} bytes"),
+            });
+        }
+    }
+    if let Some(vsys) = &input.vsys {
+        validate_vsys_name(vsys)?;
+    }
+    let destination_port = match (input.protocol, input.destination_port) {
+        (IpProtocol::Icmp, port) => port,
+        (_, Some(port)) => Some(port),
+        (_, None) => {
+            return Err(PanosMcpError::Policy {
+                field: "destination_port",
+                reason: "required unless protocol is icmp".to_owned(),
+            });
+        }
+    };
+
+    let mut command = String::from("<test><security-policy-match>");
+    command.push_str(&format!(
+        "<source>{}</source>",
+        escape(input.source.to_string())
+    ));
+    command.push_str(&format!(
+        "<destination>{}</destination>",
+        escape(input.destination.to_string())
+    ));
+    if let Some(port) = destination_port {
+        command.push_str(&format!("<destination-port>{port}</destination-port>"));
+    }
+    command.push_str(&format!(
+        "<protocol>{}</protocol>",
+        input.protocol.panos_number()
+    ));
+    if let Some(vsys) = &input.vsys {
+        command.push_str(&format!("<vsys>{}</vsys>", escape(vsys)));
+    }
+    if let Some(zone) = &input.from_zone {
+        command.push_str(&format!("<from>{}</from>", escape(zone)));
+    }
+    if let Some(zone) = &input.to_zone {
+        command.push_str(&format!("<to>{}</to>", escape(zone)));
+    }
+    if let Some(application) = &input.application {
+        command.push_str(&format!(
+            "<application>{}</application>",
+            escape(application)
+        ));
+    }
+    if let Some(user) = &input.source_user {
+        command.push_str(&format!("<source-user>{}</source-user>", escape(user)));
+    }
+    command.push_str("</security-policy-match></test>");
+    Ok(command)
+}
+
+/// PAN-OS log type accepted by `query_panos_logs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PanosLogType {
+    /// Traffic log.
+    Traffic,
+    /// Threat log.
+    Threat,
+    /// System log.
+    System,
+    /// Configuration log.
+    Config,
+}
+
+impl PanosLogType {
+    fn panos_value(self) -> &'static str {
+        match self {
+            Self::Traffic => "traffic",
+            Self::Threat => "threat",
+            Self::System => "system",
+            Self::Config => "config",
+        }
+    }
+}
+
+/// Input for `query_panos_logs`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryPanosLogsInput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// PAN-OS log type to query.
+    pub log_type: PanosLogType,
+    /// Optional PAN-OS log filter expression.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Maximum log entries to return; defaults to 100 and cannot exceed 1000.
+    #[serde(default)]
+    pub max_logs: Option<u32>,
+}
+
+/// Result of `query_panos_logs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct QueryPanosLogsOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// PAN-OS log type queried.
+    pub log_type: PanosLogType,
+    /// The resolved, enforced cap applied to this query.
+    pub max_logs: u32,
+    /// Matched log entries, up to `max_logs`.
+    pub entries: Vec<ConfigEntry>,
+    /// `entries.len()`.
+    pub returned: usize,
+}
+
+/// Typed rulebase or object container `list_panos_rulebase_entries` can page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RulebaseKind {
+    /// `rule-base/security/rules`.
+    SecurityRules,
+    /// `rule-base/nat/rules`.
+    NatRules,
+    /// `address`.
+    AddressObjects,
+    /// `service`.
+    ServiceObjects,
+}
+
+impl RulebaseKind {
+    fn xpath_suffix(self) -> &'static str {
+        match self {
+            Self::SecurityRules => "rule-base/security/rules",
+            Self::NatRules => "rule-base/nat/rules",
+            Self::AddressObjects => "address",
+            Self::ServiceObjects => "service",
+        }
+    }
+}
+
+fn default_vsys() -> String {
+    "vsys1".to_owned()
+}
+
+/// Validate a caller-supplied vsys name before it is interpolated into an
+/// XPath predicate.
+///
+/// Restricted to a safe token shape (no quotes, brackets, or slashes) so the
+/// built XPath cannot address anything the `vsys`/`kind` combination did not
+/// intend, regardless of what `validate_read_xpath`'s broader XPath grammar
+/// would otherwise accept.
+fn validate_vsys_name(vsys: &str) -> Result<()> {
+    if vsys.is_empty()
+        || vsys.len() > 63
+        || !vsys
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(PanosMcpError::Policy {
+            field: "vsys",
+            reason: "value must be 1-63 ASCII alphanumeric, '-', '_', or '.' characters".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Input for `list_panos_rulebase_entries`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPanosRulebaseEntriesInput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Running or candidate configuration; defaults to running.
+    #[serde(default)]
+    pub source: ConfigSource,
+    /// Rulebase or object container to list.
+    pub kind: RulebaseKind,
+    /// Vsys name; defaults to `vsys1`.
+    #[serde(default = "default_vsys")]
+    pub vsys: String,
+    /// Zero-based index of the first entry to return; defaults to 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Maximum entries to return; defaults to 100 and cannot exceed 500.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Result of `list_panos_rulebase_entries`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ListPanosRulebaseEntriesOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Configuration data source.
+    pub source: ConfigSource,
+    /// Rulebase or object container listed.
+    pub kind: RulebaseKind,
+    /// Vsys name used to build the XPath.
+    pub vsys: String,
+    /// The XPath resolved from `kind` and `vsys`.
+    pub xpath: String,
+    /// Entries in `[offset, offset + limit)`, each with its own XML and digest.
+    pub entries: Vec<ConfigEntry>,
+    /// Zero-based index of the first entry requested.
+    pub offset: usize,
+    /// Maximum entries requested.
+    pub limit: usize,
+    /// `entries.len()`.
+    pub returned: usize,
+    /// Complete entries observed in the response, truncated or not.
+    pub total_entries: usize,
+    /// True when more entries exist beyond this page, or the device response
+    /// itself was cut off before every entry could be observed.
+    pub truncated: bool,
 }
 
 /// Bounded XML result shared by operational reads.

@@ -24,8 +24,11 @@ use rust_panosmcp_core::{
         StageConfigInput,
     },
     tools::{
-        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, GetPanosEntryDigestInput,
-        ListPanosEntriesInput, PanosService,
+        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
+        GetPanosContentStatusInput, GetPanosEntryDigestInput, GetPanosHaStateInput,
+        GetPanosLicenseInfoInput, GetPanosSoftwareStatusInput, ListPanosEntriesInput,
+        ListPanosRulebaseEntriesInput, PanosService, QueryPanosLogsInput,
+        TestPanosSecurityPolicyMatchInput,
     },
 };
 use schemars::JsonSchema;
@@ -836,6 +839,186 @@ impl PanosMcpServer {
         Self::to_call_result(
             service
                 .list_panos_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List a rulebase or object container's entries by typed kind and vsys.
+    #[tool(
+        name = "list_panos_rulebase_entries",
+        description = "List security rules, NAT rules, address objects, or service objects for a vsys as structured JSON, paginated and truncation-marked"
+    )]
+    async fn list_panos_rulebase_entries(
+        &self,
+        Parameters(input): Parameters<ListPanosRulebaseEntriesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "list_panos_rulebase_entries",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panos_rulebase_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read high-availability state.
+    #[tool(
+        name = "get_panos_ha_state",
+        description = "Read PAN-OS high-availability state (enabled, mode, local and peer state) on an authorized device"
+    )]
+    async fn get_panos_ha_state(
+        &self,
+        Parameters(input): Parameters<GetPanosHaStateInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_ha_state", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_ha_state(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read license status.
+    #[tool(
+        name = "get_panos_license_info",
+        description = "Read PAN-OS license status (feature, serial, issued, expires, expired) on an authorized device"
+    )]
+    async fn get_panos_license_info(
+        &self,
+        Parameters(input): Parameters<GetPanosLicenseInfoInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_license_info", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_license_info(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read content version status.
+    #[tool(
+        name = "get_panos_content_status",
+        description = "Read PAN-OS content version status (version, released, downloaded, current) on an authorized device"
+    )]
+    async fn get_panos_content_status(
+        &self,
+        Parameters(input): Parameters<GetPanosContentStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_content_status", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_content_status(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read software version status.
+    #[tool(
+        name = "get_panos_software_status",
+        description = "Read PAN-OS software version status (version, released, downloaded, current, latest) on an authorized device"
+    )]
+    async fn get_panos_software_status(
+        &self,
+        Parameters(input): Parameters<GetPanosSoftwareStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "get_panos_software_status",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_software_status(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Test which security rule a simulated packet would match.
+    #[tool(
+        name = "test_panos_security_policy_match",
+        description = "Test which PAN-OS security rule, if any, a simulated packet (source, destination, port, protocol, zones, application, user) would match on an authorized device"
+    )]
+    async fn test_panos_security_policy_match(
+        &self,
+        Parameters(input): Parameters<TestPanosSecurityPolicyMatchInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "test_panos_security_policy_match",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .test_panos_security_policy_match(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Fetch a bounded window of PAN-OS logs.
+    #[tool(
+        name = "query_panos_logs",
+        description = "Fetch a bounded window of PAN-OS logs (traffic, threat, system, or config) on an authorized device; always capped, never unbounded"
+    )]
+    async fn query_panos_logs(
+        &self,
+        Parameters(input): Parameters<QueryPanosLogsInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(&extensions, "query_panos_logs", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .query_panos_logs(input, caller.as_ref(), cancellation)
                 .await,
         )
     }

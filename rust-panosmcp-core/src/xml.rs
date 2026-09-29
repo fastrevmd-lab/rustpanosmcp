@@ -373,6 +373,72 @@ impl JobStatus {
     }
 }
 
+/// `show high-availability state` result.
+///
+/// Fields are `None` on a standalone (non-HA) device, where PAN-OS omits the
+/// `<group>` element entirely -- absence is a valid, common answer, not a
+/// parse failure.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct HaState {
+    /// Whether HA is configured on this device (`yes`/`no`).
+    pub enabled: Option<String>,
+    /// Configured HA mode, e.g. `Active-Passive`.
+    pub mode: Option<String>,
+    /// This device's own HA state, e.g. `active`, `passive`, `suspended`.
+    pub local_state: Option<String>,
+    /// The peer's last-known HA state.
+    pub peer_state: Option<String>,
+}
+
+/// One `<entry>` under `request license info`'s `<licenses>` container.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct LicenseEntry {
+    /// Licensed feature name.
+    pub feature: Option<String>,
+    /// Human-readable feature description.
+    pub description: Option<String>,
+    /// Serial the license is issued to.
+    pub serial: Option<String>,
+    /// Issue date, as reported by PAN-OS.
+    pub issued: Option<String>,
+    /// Expiration date, or `Never`.
+    pub expires: Option<String>,
+    /// Whether the license has expired (`yes`/`no`).
+    pub expired: Option<String>,
+}
+
+/// One `<entry>` under `request content upgrade info`'s content-version list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ContentVersionEntry {
+    /// Content release version string.
+    pub version: Option<String>,
+    /// Content package filename.
+    pub filename: Option<String>,
+    /// Release date, as reported by PAN-OS.
+    pub released_on: Option<String>,
+    /// Whether this version is downloaded to the device (`yes`/`no`).
+    pub downloaded: Option<String>,
+    /// Whether this version is the one currently installed (`yes`/`no`).
+    pub current: Option<String>,
+}
+
+/// One `<entry>` under `request system software info`'s version list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SoftwareVersionEntry {
+    /// PAN-OS release version string.
+    pub version: Option<String>,
+    /// Release package filename.
+    pub filename: Option<String>,
+    /// Release date, as reported by PAN-OS.
+    pub released_on: Option<String>,
+    /// Whether this version is downloaded to the device (`yes`/`no`).
+    pub downloaded: Option<String>,
+    /// Whether this version is the one currently running (`yes`/`no`).
+    pub current: Option<String>,
+    /// Whether this is the latest version PAN-OS knows about (`yes`/`no`).
+    pub latest: Option<String>,
+}
+
 /// Validate XML structure and return top-level PAN-OS response attributes.
 ///
 /// DTD declarations are rejected, raw input and depth are bounded, and the
@@ -665,6 +731,141 @@ pub fn parse_job_status(response: &PanosResponse) -> Result<JobStatus> {
         progress,
         details: first_child_text(input, b"job", b"details")?,
     })
+}
+
+/// Extract `show high-availability state` fields from a successful response.
+///
+/// `local-info`/`peer-info`/`group` are read by scanning for a match
+/// anywhere in the document rather than requiring exact depth, so this
+/// degrades to all-`None` on a standalone device's response instead of
+/// failing -- HA is optional per device, not an error case.
+pub fn parse_ha_state(response: &PanosResponse) -> Result<HaState> {
+    let input = response.xml.as_bytes();
+    Ok(HaState {
+        enabled: first_element_text(input, b"enabled")?,
+        mode: first_child_text(input, b"group", b"mode")?,
+        local_state: first_child_text(input, b"local-info", b"state")?,
+        peer_state: first_child_text(input, b"peer-info", b"state")?,
+    })
+}
+
+/// Depth, in tag-name-stack entries, at which `<licenses>` and
+/// `<content-updates>` list their `<entry>` children directly below
+/// `<result>`: `response`/`result`/`container`/`entry`.
+const LICENSE_CONTENT_ENTRY_DEPTH: usize = 3;
+/// Depth for `request system software info`, which nests its version list
+/// one level deeper than license/content: `response`/`result`/`sw-updates`/
+/// `versions`/`entry`.
+const SOFTWARE_ENTRY_DEPTH: usize = 4;
+/// Depth for a `type=log&action=get` result's entries: `response`/`result`/
+/// `log`/`logs`/`entry`.
+const LOG_ENTRY_DEPTH: usize = 4;
+
+/// Parse every `<entry>` in a successful `request license info` response.
+///
+/// Reuses [`scan_config_entries`] for the same bounded, tolerant-of-a-cut-
+/// response scan every other list reader gets, then extracts named fields
+/// from each entry's own self-contained XML slice.
+pub fn parse_license_entries(response: &PanosResponse) -> Result<Vec<LicenseEntry>> {
+    let raw = response.xml.as_bytes();
+    let scan = scan_config_entries(raw, 0, usize::MAX, LICENSE_CONTENT_ENTRY_DEPTH)?;
+    scan.entries
+        .iter()
+        .map(|entry| {
+            let xml = entry.xml.as_bytes();
+            Ok(LicenseEntry {
+                feature: first_element_text(xml, b"feature")?,
+                description: first_element_text(xml, b"description")?,
+                serial: first_element_text(xml, b"serial")?,
+                issued: first_element_text(xml, b"issued")?,
+                expires: first_element_text(xml, b"expires")?,
+                expired: first_element_text(xml, b"expired")?,
+            })
+        })
+        .collect()
+}
+
+/// Parse every `<entry>` in a successful `request content upgrade info` response.
+pub fn parse_content_entries(response: &PanosResponse) -> Result<Vec<ContentVersionEntry>> {
+    let raw = response.xml.as_bytes();
+    let scan = scan_config_entries(raw, 0, usize::MAX, LICENSE_CONTENT_ENTRY_DEPTH)?;
+    scan.entries
+        .iter()
+        .map(|entry| {
+            let xml = entry.xml.as_bytes();
+            Ok(ContentVersionEntry {
+                version: first_element_text(xml, b"version")?,
+                filename: first_element_text(xml, b"filename")?,
+                released_on: first_element_text(xml, b"released-on")?,
+                downloaded: first_element_text(xml, b"downloaded")?,
+                current: first_element_text(xml, b"current")?,
+            })
+        })
+        .collect()
+}
+
+/// Parse every `<entry>` in a successful `request system software info` response.
+pub fn parse_software_entries(response: &PanosResponse) -> Result<Vec<SoftwareVersionEntry>> {
+    let raw = response.xml.as_bytes();
+    let scan = scan_config_entries(raw, 0, usize::MAX, SOFTWARE_ENTRY_DEPTH)?;
+    scan.entries
+        .iter()
+        .map(|entry| {
+            let xml = entry.xml.as_bytes();
+            Ok(SoftwareVersionEntry {
+                version: first_element_text(xml, b"version")?,
+                filename: first_element_text(xml, b"filename")?,
+                released_on: first_element_text(xml, b"released-on")?,
+                downloaded: first_element_text(xml, b"downloaded")?,
+                current: first_element_text(xml, b"current")?,
+                latest: first_element_text(xml, b"latest")?,
+            })
+        })
+        .collect()
+}
+
+/// Parse the matched-rule entries from a `test security-policy-match`
+/// response.
+///
+/// PAN-OS returns zero or more `<rules><entry name="...">...</entry></rules>`
+/// children under `<result>`; an empty list is a valid "no rule matched"
+/// answer, not an error, matching how PAN-OS documents this command.
+pub fn parse_security_policy_match(response: &PanosResponse) -> Result<Vec<ConfigEntry>> {
+    let raw = response.xml.as_bytes();
+    let scan = scan_config_entries(raw, 0, usize::MAX, LICENSE_CONTENT_ENTRY_DEPTH)?;
+    Ok(scan.entries)
+}
+
+/// Extract the first occurrence of `tag`'s text from an already-captured
+/// entry's exact source XML (e.g. a [`ConfigEntry::xml`] slice).
+///
+/// Exposed so a caller with a single matched entry in hand -- such as
+/// `test_panos_security_policy_match` reading a rule's `<action>` -- does
+/// not need its own XML reader just to pull one field back out of text this
+/// module already parsed once.
+pub fn extract_element_text(xml: &str, tag: &str) -> Result<Option<String>> {
+    first_element_text(xml.as_bytes(), tag.as_bytes())
+}
+
+/// Whether a polled `type=log&action=get` response reports a terminal job.
+///
+/// A log job's state is nested under `<result><job><status>FIN</status>...`,
+/// the same shape a config/commit job uses -- but this scans for `<status>`
+/// anywhere in the document rather than requiring that exact nesting under
+/// `<job>`, both because the response has not been verified against a live
+/// device and because [`parse_job_status`] is `<job>`-status typed
+/// (`JobStatus`) while a log job's terminal payload also carries the log
+/// entries this function has no reason to parse.
+pub fn log_job_is_finished(response: &PanosResponse) -> Result<bool> {
+    let input = response.xml.as_bytes();
+    Ok(first_element_text(input, b"status")?.as_deref() == Some("FIN"))
+}
+
+/// Parse the bounded set of log entries from a finished log job's response.
+pub fn parse_log_entries(response: &PanosResponse) -> Result<Vec<ConfigEntry>> {
+    let raw = response.xml.as_bytes();
+    let scan = scan_config_entries(raw, 0, usize::MAX, LOG_ENTRY_DEPTH)?;
+    Ok(scan.entries)
 }
 
 /// Redact PAN-OS secret material that would otherwise be echoed back

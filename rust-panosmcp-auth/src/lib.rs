@@ -38,11 +38,18 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_candidate_fingerprint",
     "get_panos_change_set",
     "get_panos_config",
+    "get_panos_content_status",
     "get_panos_entry_digest",
+    "get_panos_ha_state",
+    "get_panos_license_info",
     "get_panos_operation",
+    "get_panos_software_status",
     "list_devices",
     "list_panos_entries",
+    "list_panos_rulebase_entries",
+    "query_panos_logs",
     "stage_panos_config",
+    "test_panos_security_policy_match",
     "validate_panos_candidate",
 ];
 
@@ -57,6 +64,7 @@ pub const MUTATION_TOOLS: &[&str] = &[
     "get_candidate_fingerprint",
     "get_panos_change_set",
     "get_panos_operation",
+    "query_panos_logs",
     "stage_panos_config",
     "validate_panos_candidate",
 ];
