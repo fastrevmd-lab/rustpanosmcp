@@ -292,10 +292,20 @@ impl PanosService {
                 return Err(e);
             }
         };
+        let advisories: Vec<String> = facts
+            .software_version
+            .as_deref()
+            .and_then(crate::version_advisory::cve_2026_0310_warning)
+            .into_iter()
+            .collect();
+        if let Some(warning) = advisories.first() {
+            audit.meta("version_advisory", warning.clone());
+        }
         audit.succeed();
         Ok(GatherDeviceFactsOutput {
             device: input.device,
             facts,
+            advisories,
         })
     }
 
@@ -461,6 +471,12 @@ pub struct GatherDeviceFactsOutput {
     pub device: String,
     /// Selected facts from `show system info`.
     pub facts: DeviceFacts,
+    /// Known-CVE version-floor warnings for the reported `sw-version`.
+    ///
+    /// Never gates the call -- this is advisory text for the human operator,
+    /// not a decision. Empty when the version is unknown, unparseable, or at
+    /// or above every fix level this server currently tracks.
+    pub advisories: Vec<String>,
 }
 
 /// Input for `execute_panos_op`.
