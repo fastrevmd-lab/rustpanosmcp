@@ -21,7 +21,7 @@ use rust_panosmcp_core::{
     },
     tools::{
         ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
-        PanosService,
+        GetPanosEntryDigestInput, ListPanosEntriesInput, PanosService,
     },
 };
 use std::{
@@ -225,6 +225,32 @@ async fn all_tools_emit_audit_events() {
         )
         .await;
 
+    let _ = service
+        .list_panos_entries(
+            ListPanosEntriesInput {
+                device: "test-fw".to_owned(),
+                source: ConfigSource::Candidate,
+                xpath: "/config/shared/address".to_owned(),
+                offset: None,
+                limit: None,
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
+    let _ = service
+        .get_panos_entry_digest(
+            GetPanosEntryDigestInput {
+                device: "test-fw".to_owned(),
+                source: ConfigSource::Candidate,
+                xpath: "/config/shared/address/entry[@name='test']".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await;
+
     let fp = service
         .candidate_fingerprint(
             CandidateFingerprintInput {
@@ -370,6 +396,7 @@ async fn all_tools_emit_audit_events() {
                 destructive_confirmation: None,
             },
             "owner",
+            None,
             None,
             cancel.clone(),
         )

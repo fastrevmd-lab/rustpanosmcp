@@ -207,6 +207,7 @@ async fn redaction_applies_to_newly_audited_tools() {
             },
             "test-owner",
             None,
+            None,
             cancel,
         )
         .await;
