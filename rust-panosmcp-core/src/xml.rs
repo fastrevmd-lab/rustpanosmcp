@@ -4,6 +4,7 @@ use crate::{PanosMcpError, Result};
 use quick_xml::{Reader, XmlVersion, events::Event};
 use schemars::JsonSchema;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// Maximum accepted operational command body.
 pub const MAX_OP_COMMAND_BYTES: usize = 64 * 1024;
@@ -102,6 +103,247 @@ pub struct DeviceFacts {
     pub uptime: Option<String>,
     /// Device family when supplied by the release.
     pub family: Option<String>,
+}
+
+/// One `<entry>` captured from a PAN-OS list container, with its exact source
+/// bytes preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConfigEntry {
+    /// Value of the entry's `name` attribute, or empty when absent.
+    pub name: String,
+    /// The entry's exact source XML, including its own `<entry>` tags.
+    pub xml: String,
+    /// `sha256:<hex>` over `xml`. Changes if and only if this entry's source
+    /// XML changes -- the point of hashing per entry rather than hashing the
+    /// whole config root just to notice one rule moved.
+    pub digest: String,
+}
+
+/// Result of scanning a PAN-OS list response for its top-level `<entry>`
+/// children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryScanResult {
+    /// PAN-OS envelope status.
+    pub status: String,
+    /// PAN-OS numeric response code, when supplied.
+    pub code: Option<i32>,
+    /// Entries within the requested `[offset, offset + limit)` window.
+    pub entries: Vec<ConfigEntry>,
+    /// Count of complete entries observed in the (possibly truncated) response.
+    pub total_seen: usize,
+    /// True when the response ended before its root element closed.
+    pub truncated: bool,
+}
+
+/// Maximum nesting depth the entry scanner will track before refusing input.
+///
+/// Not `XmlLimits::max_depth`: that guards a strict single-document parse,
+/// this guards a stack of owned tag names built up over a scan that
+/// deliberately tolerates a truncated tail, so it needs its own bound.
+const MAX_SCAN_DEPTH: usize = 128;
+
+/// Scan a PAN-OS `<response><result>...</result></response>` document for the
+/// `<entry>` elements nested at least `min_depth` levels below the root --
+/// `3` for a container fetch (`response`/`result`/`container`/`entry`), `2`
+/// for an XPath that already resolves to one entry directly under `<result>`.
+///
+/// Only complete entries are returned, sliced out of `raw` byte-for-byte, and
+/// only those inside `[offset, offset + limit)` are materialized; entries
+/// outside the window are counted but never copied, so a huge rulebase costs
+/// one pass over the bytes rather than one allocation per rule.
+///
+/// Tolerant of a response the caller intentionally truncated mid-stream to
+/// stay under a byte budget: once the envelope's root start tag has been
+/// read, a read error or an early `Eof` ends the scan rather than failing it,
+/// and any entry still open at that point is dropped rather than
+/// half-reported. A read error or missing envelope *before* the root's own
+/// start tag closes is still a hard failure -- that is not a size problem,
+/// it is not PAN-OS XML.
+pub fn scan_config_entries(
+    raw: &[u8],
+    offset: usize,
+    limit: usize,
+    min_depth: usize,
+) -> Result<EntryScanResult> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().check_end_names = true;
+
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut status: Option<String> = None;
+    let mut code: Option<String> = None;
+    let mut saw_root = false;
+    let mut root_closed = false;
+    let mut entries = Vec::new();
+    let mut total_seen = 0_usize;
+    // (depth before the entry's own tag was pushed, start byte offset, name)
+    let mut pending: Option<(usize, usize, String)> = None;
+    let end_truncated;
+    let window_end = offset.saturating_add(limit);
+
+    loop {
+        let pos_before = reader.buffer_position() as usize;
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(error) => {
+                if saw_root {
+                    end_truncated = true;
+                    break;
+                }
+                return Err(PanosMcpError::Xml(error.to_string()));
+            }
+        };
+        match event {
+            Event::DocType(_) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Event::Start(element) => {
+                if stack.len() >= MAX_SCAN_DEPTH {
+                    return Err(PanosMcpError::Xml(format!(
+                        "element depth exceeds the {MAX_SCAN_DEPTH}-level limit"
+                    )));
+                }
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if !saw_root {
+                    if name != b"response" {
+                        return Err(PanosMcpError::Xml(
+                            "root element must be 'response'".to_owned(),
+                        ));
+                    }
+                    saw_root = true;
+                    read_status_and_code(&element, &mut status, &mut code)?;
+                } else if pending.is_none() && name == b"entry" && stack.len() >= min_depth {
+                    let entry_name = read_name_attribute(&element)?;
+                    pending = Some((stack.len(), pos_before, entry_name));
+                }
+                stack.push(name);
+            }
+            Event::Empty(element) => {
+                if stack.len() >= MAX_SCAN_DEPTH {
+                    return Err(PanosMcpError::Xml(format!(
+                        "element depth exceeds the {MAX_SCAN_DEPTH}-level limit"
+                    )));
+                }
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if !saw_root {
+                    if name != b"response" {
+                        return Err(PanosMcpError::Xml(
+                            "root element must be 'response'".to_owned(),
+                        ));
+                    }
+                    saw_root = true;
+                    root_closed = true;
+                    read_status_and_code(&element, &mut status, &mut code)?;
+                } else if pending.is_none() && name == b"entry" && stack.len() >= min_depth {
+                    let index = total_seen;
+                    total_seen += 1;
+                    if index >= offset && index < window_end {
+                        let entry_name = read_name_attribute(&element)?;
+                        let end = reader.buffer_position() as usize;
+                        entries.push(owned_entry(raw, pos_before, end, entry_name)?);
+                    }
+                }
+            }
+            Event::End(element) => {
+                let name = element.name().as_ref().as_bytes().to_vec();
+                match stack.pop() {
+                    Some(open) if open == name => {}
+                    _ => {
+                        return Err(PanosMcpError::Xml(
+                            "input contains a mismatched closing element".to_owned(),
+                        ));
+                    }
+                }
+                if let Some((depth, start, entry_name)) = &pending
+                    && stack.len() == *depth
+                    && name == b"entry"
+                {
+                    let index = total_seen;
+                    total_seen += 1;
+                    if index >= offset && index < window_end {
+                        let end = reader.buffer_position() as usize;
+                        entries.push(owned_entry(raw, *start, end, entry_name.clone())?);
+                    }
+                    pending = None;
+                }
+                if saw_root && stack.is_empty() {
+                    root_closed = true;
+                }
+            }
+            Event::Eof => {
+                end_truncated = !root_closed;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let code = code
+        .as_deref()
+        .map(str::parse::<i32>)
+        .transpose()
+        .map_err(|_| PanosMcpError::Xml("response code is not an integer".to_owned()))?;
+
+    Ok(EntryScanResult {
+        status: status.unwrap_or_default(),
+        code,
+        entries,
+        total_seen,
+        truncated: end_truncated || pending.is_some(),
+    })
+}
+
+fn owned_entry(raw: &[u8], start: usize, end: usize, name: String) -> Result<ConfigEntry> {
+    let xml = std::str::from_utf8(&raw[start..end])
+        .map_err(|_| PanosMcpError::Xml("entry is not valid UTF-8".to_owned()))?
+        .to_owned();
+    let digest = format!("sha256:{}", hex_digest(&Sha256::digest(xml.as_bytes())));
+    Ok(ConfigEntry { name, xml, digest })
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn read_name_attribute(element: &quick_xml::events::BytesStart<'_>) -> Result<String> {
+    for attribute in element.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+        if attribute.key.as_ref() == "name" {
+            let value = attribute
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(|error| PanosMcpError::Xml(error.to_string()))?
+                .into_owned();
+            return Ok(value);
+        }
+    }
+    Ok(String::new())
+}
+
+fn read_status_and_code(
+    element: &quick_xml::events::BytesStart<'_>,
+    status: &mut Option<String>,
+    code: &mut Option<String>,
+) -> Result<()> {
+    for attribute in element.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| PanosMcpError::Xml(error.to_string()))?
+            .into_owned();
+        match attribute.key.as_ref() {
+            "status" => *status = Some(value),
+            "code" => *code = Some(value),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Terminal and intermediate state from a PAN-OS asynchronous job.
@@ -1055,7 +1297,11 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
     }
 }
 
-fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -> Result<String> {
+pub(crate) fn collect_text_for_elements(
+    input: &[u8],
+    wanted: &[&[u8]],
+    max_bytes: usize,
+) -> Result<String> {
     let mut reader = Reader::from_reader(input);
     // Not `trim_text(true)`: that trims every *run*, and an entity splits one
     // value into several runs. `done &amp; dusted` arrives as "done ", "&",
@@ -1665,5 +1911,136 @@ mod bound_and_trim_tests {
             .expect("parses")
             .expect("present");
         assert_eq!(got, "fw01");
+    }
+}
+
+#[cfg(test)]
+mod entry_scan_tests {
+    use super::*;
+
+    fn rules_response(rules: &str) -> String {
+        format!(r#"<response status="success"><result><rules>{rules}</rules></result></response>"#)
+    }
+
+    #[test]
+    fn lists_entries_with_names_and_stable_digests() {
+        let xml = rules_response(
+            r#"<entry name="allow-dns"><action>allow</action></entry><entry name="deny-all"><action>deny</action></entry>"#,
+        );
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.status, "success");
+        assert_eq!(scan.total_seen, 2);
+        assert!(!scan.truncated);
+        assert_eq!(scan.entries.len(), 2);
+        assert_eq!(scan.entries[0].name, "allow-dns");
+        assert_eq!(scan.entries[1].name, "deny-all");
+        assert!(scan.entries[0].digest.starts_with("sha256:"));
+        assert_ne!(scan.entries[0].digest, scan.entries[1].digest);
+
+        // Same entry, fetched again unchanged, hashes identically.
+        let again = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(again.entries[0].digest, scan.entries[0].digest);
+    }
+
+    #[test]
+    fn a_changed_entry_changes_only_its_own_digest() {
+        let before = rules_response(r#"<entry name="r1"><action>allow</action></entry>"#);
+        let after = rules_response(r#"<entry name="r1"><action>deny</action></entry>"#);
+        let before_digest = scan_config_entries(before.as_bytes(), 0, 10, 3)
+            .expect("scan")
+            .entries
+            .remove(0)
+            .digest;
+        let after_digest = scan_config_entries(after.as_bytes(), 0, 10, 3)
+            .expect("scan")
+            .entries
+            .remove(0)
+            .digest;
+        assert_ne!(before_digest, after_digest);
+    }
+
+    #[test]
+    fn self_closing_entries_are_captured_like_open_ones() {
+        let xml = rules_response(r#"<entry name="empty-rule"/>"#);
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries[0].name, "empty-rule");
+        assert_eq!(scan.entries[0].xml, r#"<entry name="empty-rule"/>"#);
+    }
+
+    #[test]
+    fn pagination_returns_only_the_requested_window() {
+        let rules: String = (0..25)
+            .map(|i| format!(r#"<entry name="r{i}"/>"#))
+            .collect();
+        let xml = rules_response(&rules);
+
+        let page = scan_config_entries(xml.as_bytes(), 10, 5, 3).expect("scan");
+        assert_eq!(page.total_seen, 25);
+        assert_eq!(page.entries.len(), 5);
+        assert_eq!(page.entries[0].name, "r10");
+        assert_eq!(page.entries[4].name, "r14");
+        // "N of M shown": more entries exist beyond this page.
+        assert!(10 + page.entries.len() < page.total_seen);
+    }
+
+    #[test]
+    fn a_response_truncated_mid_entry_drops_the_partial_entry_and_is_marked() {
+        let full = rules_response(
+            r#"<entry name="r1"/><entry name="r2"><action>allow</action></entry><entry name="r3"/>"#,
+        );
+        // Cut the byte stream partway through r2's body, well before its
+        // closing tag -- this is what a byte-capped device fetch produces.
+        let cut = full.find("<action>").expect("marker") + 4;
+        let truncated = &full.as_bytes()[..cut];
+
+        let scan = scan_config_entries(truncated, 0, 10, 3).expect("scan");
+        assert!(scan.truncated);
+        // r1 completed before the cut; r2 was still open and must not appear.
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "r1");
+    }
+
+    #[test]
+    fn a_response_truncated_before_the_envelope_opens_is_an_error() {
+        let truncated = br#"<respo"#;
+        assert!(scan_config_entries(truncated, 0, 10, 3).is_err());
+    }
+
+    #[test]
+    fn an_error_envelope_is_still_reported() {
+        let xml = r#"<response status="error" code="7"><msg><line>Object not present</line></msg></response>"#;
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.status, "error");
+        assert_eq!(scan.code, Some(7));
+        assert!(scan.entries.is_empty());
+    }
+
+    #[test]
+    fn min_depth_two_finds_an_entry_resolved_directly_by_its_own_xpath() {
+        let xml = r#"<response status="success"><result><entry name="allow-dns"><action>allow</action></entry></result></response>"#;
+        let scan = scan_config_entries(xml.as_bytes(), 0, 1, 2).expect("scan");
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "allow-dns");
+    }
+
+    #[test]
+    fn nested_entries_inside_a_captured_entry_are_not_double_counted() {
+        // Defensive: a rule containing something that itself looks like an
+        // <entry> must not be treated as a second top-level list entry.
+        let xml = rules_response(
+            r#"<entry name="outer"><profile-setting><entry name="inner"/></profile-setting></entry>"#,
+        );
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries[0].name, "outer");
+        assert!(scan.entries[0].xml.contains("inner"));
+    }
+
+    #[test]
+    fn rejects_doctype_even_mid_scan() {
+        let xml = br#"<response status="success"><result><rules><!DOCTYPE x><entry name="r1"/></rules></result></response>"#;
+        assert!(scan_config_entries(xml, 0, 10, 3).is_err());
     }
 }

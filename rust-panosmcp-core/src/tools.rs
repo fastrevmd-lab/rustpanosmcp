@@ -6,8 +6,9 @@ use crate::{
     inventory::{DeviceMetadata, Inventory},
     observability::AuditScope,
     xml::{
-        DeviceFacts, parse_device_facts, redact_secret_material, validate_read_only_op_command,
-        validate_read_xpath,
+        ConfigEntry, DeviceFacts, collect_text_for_elements, panos_api_code_name,
+        parse_device_facts, redact_secret_material, scan_config_entries,
+        validate_read_only_op_command, validate_read_xpath,
     },
 };
 use mecmcp_policy::{
@@ -24,6 +25,14 @@ const MAX_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_OUTPUT_LINES: usize = 10_000;
 const MAX_OUTPUT_LINES: usize = 100_000;
 const SYSTEM_INFO_COMMAND: &str = "<show><system><info></info></system></show>";
+const DEFAULT_LIST_LIMIT: usize = 100;
+const MAX_LIST_LIMIT: usize = 500;
+/// Depth, in tag-name-stack entries, at which a list container's `<entry>`
+/// children sit below `<response>`: `response`/`result`/`container`/`entry`.
+const LIST_CONTAINER_ENTRY_DEPTH: usize = 3;
+/// Depth for an XPath that already resolves to a single entry directly under
+/// `<result>`: `response`/`result`/`entry`.
+const SINGLE_ENTRY_DEPTH: usize = 2;
 
 /// PAN-OS policy action: only Deny is used (fail-open blocklist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,36 +434,7 @@ impl PanosService {
         let result = async {
             let xpath = input.xpath.unwrap_or_else(|| "/config".to_owned());
             validate_read_xpath(&xpath)?;
-
-            // Check blocklist policy if configured (fail-open: no policy = allow all)
-            // We use config_rules_for for xpath matching (not check_config which is for multi-line text)
-            if let Some(policy) = &self.policy {
-                use mecmcp_policy::{evaluate, normalize_input};
-                // Canonicalise quote style before matching, the same way
-                // `validate_write_xpath` does for the write path: `'` and `"`
-                // are the same XPath predicate to PAN-OS, so an operator's
-                // blocklist rule written with one quote style must still
-                // catch a request spelled with the other (MEC-528 class 3 --
-                // this used to only normalize whitespace, so a rule written
-                // as `.../entry[@name='secret']*` never matched a read
-                // spelled with double quotes).
-                let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(&xpath);
-                let normalized = normalize_input(&canonical);
-                let rules = policy.config_rules_for(&input.device);
-                match evaluate(&rules, &normalized) {
-                    Some(rule) if rule.action == Action::Deny => {
-                        return Err(PanosMcpError::Policy {
-                            field: "xpath",
-                            reason: format!(
-                                "blocked by {} blocklist rule '{}'",
-                                rule.source.as_str(),
-                                rule.pattern
-                            ),
-                        });
-                    }
-                    _ => {}
-                }
-            }
+            self.check_xpath_policy(&input.device, &xpath)?;
 
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
@@ -481,6 +461,178 @@ impl PanosService {
             Err(e) => audit.fail(e),
         }
         result
+    }
+
+    /// Read entries from a list container without materializing the whole
+    /// thing: a response over the byte cap is truncated and marked rather
+    /// than refused, and only the requested `[offset, offset + limit)` window
+    /// is decoded into owned strings.
+    pub async fn list_panos_entries(
+        &self,
+        input: ListPanosEntriesInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<ListPanosEntriesOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "list_panos_entries",
+                "list-entries",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "list_panos_entries",
+                "list-entries",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            validate_read_xpath(&input.xpath)?;
+            self.check_xpath_policy(&input.device, &input.xpath)?;
+
+            let offset = input.offset.unwrap_or(0);
+            let limit = input.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+            if limit == 0 || limit > MAX_LIST_LIMIT {
+                return Err(PanosMcpError::Policy {
+                    field: "limit",
+                    reason: format!("value must be between 1 and {MAX_LIST_LIMIT}"),
+                });
+            }
+
+            let client = self.client(&input.device)?;
+            let (bytes, response_truncated) = client
+                .configuration_entries(
+                    input.source == ConfigSource::Candidate,
+                    &input.xpath,
+                    cancellation,
+                )
+                .await?;
+            let scan = scan_config_entries(&bytes, offset, limit, LIST_CONTAINER_ENTRY_DEPTH)?;
+            ensure_scan_success(&input.device, &bytes, &scan)?;
+
+            let returned = scan.entries.len();
+            Ok(ListPanosEntriesOutput {
+                device: input.device,
+                source: input.source,
+                xpath: input.xpath,
+                entries: scan.entries,
+                offset,
+                limit,
+                returned,
+                total_entries: scan.total_seen,
+                truncated: response_truncated
+                    || scan.truncated
+                    || offset + returned < scan.total_seen,
+            })
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Digest one entry by its exact XPath, without reading anything else.
+    ///
+    /// Meant for drift checks on a single rule or object: unlike
+    /// `get_candidate_fingerprint`, which hashes every operator-authorized
+    /// write root to detect any change, this issues one request scoped to
+    /// the caller's entry and says only whether *that* entry's XML changed.
+    pub async fn get_panos_entry_digest(
+        &self,
+        input: GetPanosEntryDigestInput,
+        ctx: Option<&CallerContext>,
+        cancellation: CancellationToken,
+    ) -> Result<GetPanosEntryDigestOutput> {
+        let mut audit = match ctx {
+            Some(ctx) => AuditScope::from_caller(
+                ctx,
+                "get_panos_entry_digest",
+                "entry-digest",
+                vec![input.device.clone()],
+            ),
+            None => AuditScope::stdio(
+                "get_panos_entry_digest",
+                "entry-digest",
+                vec![input.device.clone()],
+            ),
+        };
+        let result = async {
+            validate_read_xpath(&input.xpath)?;
+            if !input.xpath.ends_with(']') {
+                return Err(PanosMcpError::Policy {
+                    field: "xpath",
+                    reason: "must select exactly one entry via a [@name='...'] predicate"
+                        .to_owned(),
+                });
+            }
+            self.check_xpath_policy(&input.device, &input.xpath)?;
+
+            let client = self.client(&input.device)?;
+            let response = client
+                .configuration(
+                    input.source == ConfigSource::Candidate,
+                    &input.xpath,
+                    cancellation,
+                )
+                .await?;
+            let scan = scan_config_entries(response.xml.as_bytes(), 0, 1, SINGLE_ENTRY_DEPTH)?;
+            match scan.entries.into_iter().next() {
+                Some(entry) => Ok(GetPanosEntryDigestOutput {
+                    device: input.device,
+                    source: input.source,
+                    xpath: input.xpath,
+                    found: true,
+                    name: Some(entry.name),
+                    digest: Some(entry.digest),
+                }),
+                None => Ok(GetPanosEntryDigestOutput {
+                    device: input.device,
+                    source: input.source,
+                    xpath: input.xpath,
+                    found: false,
+                    name: None,
+                    digest: None,
+                }),
+            }
+        }
+        .await;
+        match &result {
+            Ok(_) => audit.succeed(),
+            Err(e) => audit.fail(e),
+        }
+        result
+    }
+
+    /// Deny an xpath matched by a device or global config blocklist rule.
+    ///
+    /// Fail-open when no policy is configured, matching this server's
+    /// existing command-blocklist semantics.
+    fn check_xpath_policy(&self, device: &str, xpath: &str) -> Result<()> {
+        let Some(policy) = &self.policy else {
+            return Ok(());
+        };
+        use mecmcp_policy::{evaluate, normalize_input};
+        // Canonicalise quote style before matching, as `validate_write_xpath`
+        // does: `'` and `"` are the same XPath predicate to PAN-OS, so a
+        // blocklist rule written with one quote style must still catch a read
+        // spelled with the other (MEC-528 class 3). Applies to every read path
+        // that goes through this helper, including the paginated ones.
+        let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(xpath);
+        let normalized = normalize_input(&canonical);
+        let rules = policy.config_rules_for(device);
+        match evaluate(&rules, &normalized) {
+            Some(rule) if rule.action == Action::Deny => Err(PanosMcpError::Policy {
+                field: "xpath",
+                reason: format!(
+                    "blocked by {} blocklist rule '{}'",
+                    rule.source.as_str(),
+                    rule.pattern
+                ),
+            }),
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn client(&self, name: &str) -> Result<Arc<PanosClient>> {
@@ -566,6 +718,88 @@ pub struct GetPanosConfigInput {
     /// Optional returned-line cap; defaults to 10000 and cannot exceed 100000.
     #[serde(default)]
     pub max_lines: Option<usize>,
+}
+
+/// Input for `list_panos_entries`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListPanosEntriesInput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Running or candidate configuration; defaults to running.
+    #[serde(default)]
+    pub source: ConfigSource,
+    /// XPath of the list container, e.g. a rulebase or address-object list.
+    pub xpath: String,
+    /// Zero-based index of the first entry to return; defaults to 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Maximum entries to return; defaults to 100 and cannot exceed 500.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Result of `list_panos_entries`.
+///
+/// `entries` holds only the `[offset, offset + limit)` window; `total_entries`
+/// counts every complete entry observed in the (possibly `truncated`)
+/// response, so a caller can page through a rulebase far larger than any
+/// single response is allowed to be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ListPanosEntriesOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Configuration data source.
+    pub source: ConfigSource,
+    /// Validated XPath sent to PAN-OS.
+    pub xpath: String,
+    /// Entries in `[offset, offset + limit)`, each with its own XML and digest.
+    pub entries: Vec<ConfigEntry>,
+    /// Zero-based index of the first entry requested.
+    pub offset: usize,
+    /// Maximum entries requested.
+    pub limit: usize,
+    /// `entries.len()`.
+    pub returned: usize,
+    /// Complete entries observed in the response, truncated or not.
+    pub total_entries: usize,
+    /// True when more entries exist beyond this page, or the device response
+    /// itself was cut off before every entry could be observed -- "N of M
+    /// shown" rather than an outright failure.
+    pub truncated: bool,
+}
+
+/// Input for `get_panos_entry_digest`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetPanosEntryDigestInput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Running or candidate configuration; defaults to running.
+    #[serde(default)]
+    pub source: ConfigSource,
+    /// XPath resolving to exactly one entry, e.g.
+    /// `.../rule-base/security/rules/entry[@name='allow-dns']`.
+    pub xpath: String,
+}
+
+/// Result of `get_panos_entry_digest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct GetPanosEntryDigestOutput {
+    /// Exact inventory device name.
+    pub device: String,
+    /// Configuration data source.
+    pub source: ConfigSource,
+    /// Validated XPath sent to PAN-OS.
+    pub xpath: String,
+    /// Whether PAN-OS had an entry at this XPath.
+    pub found: bool,
+    /// The entry's `name` attribute, when found.
+    pub name: Option<String>,
+    /// `sha256:<hex>` over the entry's exact source XML, when found. Changes
+    /// if and only if this one entry changed -- no other part of the
+    /// configuration is read to produce it.
+    pub digest: Option<String>,
 }
 
 /// Bounded XML result shared by operational reads.
@@ -667,6 +901,30 @@ fn escape_xpath_glob_metacharacters(pattern: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Turn a failed PAN-OS envelope observed mid-scan into a typed API error.
+///
+/// The entry scan never buffers a full [`PanosResponse`], so it cannot reuse
+/// `PanosResponse::ensure_success` -- this extracts the same `<msg>`/`<line>`
+/// text from the raw bytes instead.
+fn ensure_scan_success(device: &str, raw: &[u8], scan: &crate::xml::EntryScanResult) -> Result<()> {
+    let is_success =
+        scan.status.eq_ignore_ascii_case("success") && !matches!(scan.code, Some(1..=18 | 21..));
+    if is_success {
+        return Ok(());
+    }
+    let code = scan.code.unwrap_or(-1);
+    let message = collect_text_for_elements(raw, &[b"msg", b"line"], 1024)
+        .ok()
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "PAN-OS returned an error without a message".to_owned());
+    Err(PanosMcpError::Api {
+        device: device.to_owned(),
+        code,
+        name: panos_api_code_name(code),
+        message,
+    })
 }
 
 fn bounded_text(input: &str, limits: OutputLimits) -> BoundedText {

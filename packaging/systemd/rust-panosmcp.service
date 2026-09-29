@@ -1,6 +1,6 @@
 [Unit]
 Description=Secure PAN-OS MCP server
-Documentation=https://github.com/fastrevmd-lab/rust-panosmcp/blob/main/docs/OPERATIONS.md
+Documentation=https://github.com/mechubsec/rustpanosmcp/blob/main/docs/OPERATIONS.md
 After=network-online.target
 Wants=network-online.target
 
