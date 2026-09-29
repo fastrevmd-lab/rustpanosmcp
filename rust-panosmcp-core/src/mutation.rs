@@ -1188,7 +1188,13 @@ impl PanosService {
             }
         }
         if input.action == StageAction::Move {
-            let (container, moved_name) = extract_move_target(&input.xpath)?;
+            let (container, moved_name) = match extract_move_target(&input.xpath) {
+                Ok(target) => target,
+                Err(error) => {
+                    audit.fail(&error);
+                    return Err(error);
+                }
+            };
             if let Err(error) = require_move_target_exists(
                 &client,
                 &container,
@@ -2246,57 +2252,65 @@ fn validate_move_destination_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Split a validated write XPath into its container prefix and the exact
-/// name of the trailing `entry[@name='...']` step being moved.
+/// Split a write XPath into its container prefix and the exact name of the
+/// trailing `entry[@name='...']` step, when the XPath has that shape.
 ///
 /// Only ever called after [`validate_write_xpath`], which (via
 /// `is_strict_xpath_shape`) has already guaranteed every step is either a
 /// bare name or `name[@attr='literal']`/`name[@attr="literal"]` -- so the
 /// final step here is trusted to have that shape rather than re-validated.
-fn extract_move_target(xpath: &str) -> Result<(String, String)> {
-    let Some(slash) = xpath.rfind('/') else {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath addressing one named entry",
-        ));
-    };
+/// Returns `None` for a container-level XPath (for example a `set` whose
+/// element carries the new entry's name, rather than the XPath itself
+/// naming the entry) -- callers that only simulate entry-shaped actions
+/// treat that as "nothing to simulate", not an error.
+fn split_container_and_entry_name(xpath: &str) -> Option<(String, String)> {
+    let slash = xpath.rfind('/')?;
     let (container, last_step) = xpath.split_at(slash);
     let last_step = &last_step[1..];
-    let Some(rest) = last_step.strip_prefix("entry[@name=") else {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath ending in entry[@name='...']",
-        ));
-    };
-    let Some(rest) = rest.strip_suffix(']') else {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath ending in entry[@name='...']",
-        ));
-    };
-    let Some(quote) = rest.chars().next() else {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath ending in entry[@name='...']",
-        ));
-    };
+    let rest = last_step.strip_prefix("entry[@name=")?;
+    let rest = rest.strip_suffix(']')?;
+    let quote = rest.chars().next()?;
     if (quote != '\'' && quote != '"') || !rest.ends_with(quote) || rest.len() < 2 {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath ending in entry[@name='...']",
-        ));
+        return None;
     }
     let name = rest[quote.len_utf8()..rest.len() - quote.len_utf8()].to_owned();
     if name.is_empty() {
-        return Err(policy(
-            "xpath",
-            "move requires an xpath ending in entry[@name='...']",
-        ));
+        return None;
     }
-    Ok((container.to_owned(), name))
+    Some((container.to_owned(), name))
 }
 
-/// Run [`require_move_target_exists`] for every `move` action in a plan.
+/// Split a validated write XPath into its container prefix and the exact
+/// name of the trailing `entry[@name='...']` step being moved.
+fn extract_move_target(xpath: &str) -> Result<(String, String)> {
+    split_container_and_entry_name(xpath).ok_or_else(|| {
+        policy(
+            "xpath",
+            "move requires an xpath ending in entry[@name='...']",
+        )
+    })
+}
+
+/// Per-container view of entry names used to check `move` actions in a plan,
+/// simulating the `set`/`delete` actions that precede them in the same plan.
+struct ContainerEntries {
+    names: std::collections::HashSet<String>,
+    /// Whether the live fetch this view is based on was too large to scan in
+    /// full -- see [`require_move_target_exists`].
+    truncated: bool,
+}
+
+/// Check every `move` action in a plan against the live rulebase container it
+/// targets, *as that container will look after every `set`/`delete` action
+/// earlier in the same plan has run* -- not just against what is live on the
+/// device right now.
+///
+/// Without this, `[set .../rules/entry[@name='new'], move new top]` -- adding
+/// a rule and immediately placing it, the most common real workflow -- would
+/// be refused at plan time because `new` does not exist yet on the device.
+/// And `[delete .../rules/entry[@name='B'], move A after B]` would pass
+/// planning and approval, then fail only when PAN-OS applies it, which is
+/// exactly the device-side error the existence check exists to avoid.
 ///
 /// Called once per `create_change_set`, before the plan is persisted --
 /// nonexistent targets are refused at plan time, not discovered only when an
@@ -2306,19 +2320,76 @@ async fn require_move_targets_exist(
     actions: &[ChangeSetAction],
     cancellation: CancellationToken,
 ) -> Result<()> {
+    let mut containers: std::collections::HashMap<String, ContainerEntries> =
+        std::collections::HashMap::new();
     for action in actions {
         if action.action != StageAction::Move {
             continue;
         }
-        let (container, moved_name) = extract_move_target(&action.xpath)?;
-        require_move_target_exists(
-            client,
-            &container,
-            &moved_name,
-            action.move_destination.as_deref(),
-            cancellation.clone(),
-        )
-        .await?;
+        let (container, _) = extract_move_target(&action.xpath)?;
+        if containers.contains_key(&container) {
+            continue;
+        }
+        let (bytes, response_truncated) = client
+            .configuration_entries(false, &container, cancellation.clone())
+            .await?;
+        let scan = scan_config_entries(
+            &bytes,
+            0,
+            MAX_MOVE_SIBLING_ENTRIES,
+            LIST_CONTAINER_ENTRY_DEPTH,
+        )?;
+        let truncated =
+            response_truncated || scan.truncated || scan.total_seen > scan.entries.len();
+        let names = scan.entries.into_iter().map(|entry| entry.name).collect();
+        containers.insert(container, ContainerEntries { names, truncated });
+    }
+
+    for action in actions {
+        let Some((container, name)) = split_container_and_entry_name(&action.xpath) else {
+            continue;
+        };
+        match action.action {
+            StageAction::Set => {
+                if let Some(state) = containers.get_mut(&container) {
+                    state.names.insert(name);
+                }
+            }
+            StageAction::Delete => {
+                if let Some(state) = containers.get_mut(&container) {
+                    state.names.remove(&name);
+                }
+            }
+            StageAction::Move => {
+                let state = containers
+                    .get(&container)
+                    .expect("every move's container was fetched above");
+                if !state.names.contains(name.as_str()) {
+                    return Err(policy(
+                        "xpath",
+                        if state.truncated {
+                            "the rule to move could not be confirmed to exist: the live \
+                             rulebase is too large to verify in full"
+                        } else {
+                            "the rule to move does not exist in the live rulebase"
+                        },
+                    ));
+                }
+                if let Some(destination) = action.move_destination.as_deref()
+                    && !state.names.contains(destination)
+                {
+                    return Err(policy(
+                        "move_destination",
+                        if state.truncated {
+                            "the destination sibling rule could not be confirmed to exist: \
+                             the live rulebase is too large to verify in full"
+                        } else {
+                            "the destination sibling rule does not exist in the live rulebase"
+                        },
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -12,12 +12,12 @@ use axum::{
     routing::post,
 };
 use rcgen::generate_simple_self_signed;
-use rust_panosmcp_auth::{MutationAction, MutationGrant};
+use rust_panosmcp_auth::{ActorType, CallerContext, MutationAction, MutationGrant, ScopeSet};
 use rust_panosmcp_core::{
     inventory::{Environment, Inventory},
     mutation::{
-        CandidateFingerprintInput, ChangeSetAction, CreateChangeSetInput, MovePosition,
-        StageAction, StageConfigInput,
+        ApplyChangeSetInput, ApproveChangeSetInput, CandidateFingerprintInput, ChangeSetAction,
+        CreateChangeSetInput, MovePosition, StageAction, StageConfigInput,
     },
     tools::PanosService,
 };
@@ -191,8 +191,41 @@ fn grant() -> MutationGrant {
     }
 }
 
+/// A grant covering every action used by the same-plan simulation tests
+/// below, which stage `set`/`delete` alongside `move`.
+fn grant_with_set_and_delete() -> MutationGrant {
+    MutationGrant {
+        allowed_xpath_roots: vec![RULES_XPATH.to_owned()],
+        actions: vec![
+            MutationAction::Set,
+            MutationAction::Delete,
+            MutationAction::Move,
+        ],
+    }
+}
+
 fn rule_xpath(name: &str) -> String {
     format!("{RULES_XPATH}/entry[@name='{name}']")
+}
+
+/// A human reviewer context -- mecmcp's house rule requires a human
+/// principal to approve a change set; stdio's implicit `ActorType::Unknown`
+/// is refused for approval.
+fn reviewer_ctx() -> CallerContext {
+    CallerContext {
+        token_name: "reviewer".to_owned(),
+        devices: ScopeSet::Wildcard,
+        tools: ScopeSet::Wildcard,
+        grant: None,
+        provider: None,
+        provider_tier: None,
+        on_behalf_of: None,
+        actor_type: ActorType::Human,
+        client_name: None,
+        model_id: None,
+        session_id: None,
+        request_id: uuid::Uuid::new_v4(),
+    }
 }
 
 #[tokio::test]
@@ -392,4 +425,212 @@ async fn create_change_set_refuses_a_move_whose_destination_does_not_exist() {
             .move_requests
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn create_change_set_accepts_a_move_of_a_rule_added_earlier_in_the_same_plan() {
+    // The most common real workflow: add a rule, then place it. `new` does
+    // not exist on the live device yet -- only after the `set` earlier in
+    // this same plan would run -- so the move must be checked against the
+    // plan's simulated result, not just today's live rulebase (MEC-535 F1).
+    let fixture = fixture().await;
+    let fingerprint = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+
+    let planned = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: fingerprint.candidate_fingerprint,
+                actions: vec![
+                    ChangeSetAction {
+                        action: StageAction::Set,
+                        xpath: rule_xpath("new"),
+                        element: Some("<action>allow</action>".to_owned()),
+                        destructive_confirmation: None,
+                        move_position: None,
+                        move_destination: None,
+                    },
+                    ChangeSetAction {
+                        action: StageAction::Move,
+                        xpath: rule_xpath("new"),
+                        element: None,
+                        destructive_confirmation: None,
+                        move_position: Some(MovePosition::Top),
+                        move_destination: None,
+                    },
+                ],
+            },
+            None,
+            "writer",
+            Some(&grant_with_set_and_delete()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a move of a rule added earlier in the same plan must be accepted at plan time");
+    assert_eq!(planned.actions.len(), 2);
+}
+
+#[tokio::test]
+async fn create_change_set_refuses_a_move_after_a_sibling_deleted_earlier_in_the_same_plan() {
+    // The inverse: `rule2` is deleted earlier in the plan, so a later `move
+    // ... after rule2` must be refused at plan time -- not waved through
+    // planning and approval only to fail when PAN-OS applies it, which is
+    // exactly the device-side error the existence check exists to avoid
+    // (MEC-535 F1).
+    let fixture = fixture().await;
+    let fingerprint = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+
+    let error = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: fingerprint.candidate_fingerprint,
+                actions: vec![
+                    ChangeSetAction {
+                        action: StageAction::Delete,
+                        xpath: rule_xpath("rule2"),
+                        element: None,
+                        destructive_confirmation: Some(format!("DELETE {}", rule_xpath("rule2"))),
+                        move_position: None,
+                        move_destination: None,
+                    },
+                    ChangeSetAction {
+                        action: StageAction::Move,
+                        xpath: rule_xpath("rule1"),
+                        element: None,
+                        destructive_confirmation: None,
+                        move_position: Some(MovePosition::After),
+                        move_destination: Some("rule2".to_owned()),
+                    },
+                ],
+            },
+            None,
+            "writer",
+            Some(&grant_with_set_and_delete()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err(
+            "a move after a sibling deleted earlier in the same plan must be refused at plan time",
+        );
+    assert!(error.to_string().contains("does not exist"));
+    assert!(
+        fixture
+            .state
+            .lock()
+            .expect("state")
+            .move_requests
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn apply_change_set_sends_the_approved_move_to_pan_os() {
+    // The create/approve/refuse-at-plan-time path is covered above and in
+    // `stage_config_moves_an_existing_rule_after_an_existing_sibling`, but
+    // nothing previously drove an approved move through `apply_change_set`
+    // -- so the `where`/`dst` device-command construction on that path was
+    // never exercised (MEC-535 F2).
+    let fixture = fixture().await;
+    let fingerprint = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+
+    let planned = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: fingerprint.candidate_fingerprint.clone(),
+                actions: vec![ChangeSetAction {
+                    action: StageAction::Move,
+                    xpath: rule_xpath("rule1"),
+                    element: None,
+                    destructive_confirmation: None,
+                    move_position: Some(MovePosition::After),
+                    move_destination: Some("rule2".to_owned()),
+                }],
+            },
+            None,
+            "writer",
+            Some(&grant()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("plan");
+
+    let approved = fixture
+        .service
+        .approve_change_set(
+            ApproveChangeSetInput {
+                device: "mock-fw".to_owned(),
+                change_set_id: planned.change_set_id.clone(),
+                expected_digest: planned.digest.clone(),
+            },
+            Some(&reviewer_ctx()),
+            "reviewer",
+        )
+        .await
+        .expect("independent human approval");
+    assert_eq!(approved.state, "approved");
+
+    fixture
+        .service
+        .apply_change_set(
+            ApplyChangeSetInput {
+                device: "mock-fw".to_owned(),
+                change_set_id: planned.change_set_id,
+                expected_digest: planned.digest,
+                expected_candidate_fingerprint: fingerprint.candidate_fingerprint,
+            },
+            None,
+            "writer",
+            Some(&grant()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("apply of an approved move");
+
+    let state = fixture.state.lock().expect("state");
+    assert_eq!(
+        state.move_requests,
+        vec![(
+            rule_xpath("rule1"),
+            "after".to_owned(),
+            Some("rule2".to_owned())
+        )],
+        "apply_change_set must build the device command from the approved move's own \
+         xpath, position, and destination"
+    );
+    assert_eq!(state.locks_added, 1);
 }
