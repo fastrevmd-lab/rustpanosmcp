@@ -5,10 +5,14 @@ use crate::{
     client::PanosClient,
     inventory::{DeviceMetadata, Inventory},
     observability::AuditScope,
-    xml::{DeviceFacts, parse_device_facts, validate_read_only_op_command, validate_read_xpath},
+    xml::{
+        DeviceFacts, op_command_tag_path, parse_device_facts, validate_read_only_op_command,
+        validate_read_xpath,
+    },
 };
 use mecmcp_policy::{
-    CommandAllowlist, CommandDomain, CommandMode, DomainRules, Policy, RuleSource, compile_rules,
+    CommandAllowlist, CommandDomain, CommandMode, Decision, DomainRules, Policy, RuleSource,
+    compile_allowlist_entries, compile_rules, normalize_input,
 };
 use rust_panosmcp_auth::CallerContext;
 use schemars::JsonSchema;
@@ -43,7 +47,26 @@ pub struct PanosService {
     /// here. **Both must share one recorder** -- a different one splits a single
     /// change across two chains, and both halves verify as valid chains.
     pub(crate) evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+    /// Config-domain (xpath) deny rules for `get_panos_config`, plus the
+    /// commands-domain deny rules for `execute_panos_op` when
+    /// `command_policy_mode` is [`CommandMode::Blocklist`]. Both domains
+    /// dispatch per-device internally via `mecmcp_policy`'s own
+    /// defaults-plus-device-specific merge, so one shared object is
+    /// sufficient here. `None` when no device configures any deny rule --
+    /// the config domain is fail-open regardless of `command_policy_mode`.
     policy: Option<Arc<Policy<Action>>>,
+    /// Resolved authorization model for `execute_panos_op`. Only meaningful
+    /// together with `command_allowlists`: `check_command` never gets called
+    /// against `policy` under `Allowlist` mode, because
+    /// `mecmcp_policy::CommandAllowlist` has no per-device dispatch and
+    /// `command_allowlists` provides the equivalent instead.
+    command_policy_mode: CommandMode,
+    /// Per-device `execute_panos_op` allowlist policy, one entry per
+    /// inventory device, each built from the global `policy.allow` /
+    /// `policy.allowed_pipes` defaults merged with that device's own
+    /// `blocklist.allow` / `blocklist.allowed_pipes` additions. Populated
+    /// only when `command_policy_mode` is [`CommandMode::Allowlist`].
+    command_allowlists: BTreeMap<String, Arc<Policy<Action>>>,
     pub(crate) allow_plane_owned_writes: bool,
     /// Gate for `commit_candidate` calls with no change_set_id -- committed
     /// with no second-principal approval at all. Refused by default; set via
@@ -152,8 +175,9 @@ impl PanosService {
             clients.insert(client.device_name().to_owned(), client);
         }
 
-        // Build policy from per-device blocklist rules (fail-open: no rules = allow all)
-        let policy = Self::build_policy(&inventory)?;
+        let command_policy_mode = CommandMode::from(inventory.policy_mode());
+        let policy = Self::build_deny_policy(&inventory, command_policy_mode)?;
+        let command_allowlists = Self::build_command_allowlists(&inventory, command_policy_mode)?;
 
         Ok(Self {
             inventory,
@@ -161,21 +185,29 @@ impl PanosService {
             mutations,
             evidence,
             policy: policy.map(Arc::new),
+            command_policy_mode,
+            command_allowlists,
             allow_plane_owned_writes,
             direct_commit: mecmcp_audit::DirectCommitPolicy::new(allow_direct_commit),
         })
     }
 
-    fn build_policy(inventory: &Inventory) -> Result<Option<Policy<Action>>> {
+    /// Build the shared deny-pattern policy: the config (xpath) domain
+    /// always, plus the commands domain when `mode` is
+    /// [`CommandMode::Blocklist`]. `None` when neither domain has a rule --
+    /// both are fail-open, so an absent policy is equivalent to an empty one.
+    fn build_deny_policy(
+        inventory: &Inventory,
+        mode: CommandMode,
+    ) -> Result<Option<Policy<Action>>> {
         let mut commands_domain = DomainRules::default();
         let mut config_domain = DomainRules::default();
-        let pfe_commands_domain = DomainRules::default(); // PAN-OS has no PFE commands
 
         let mut has_any_rules = false;
 
         for device in inventory.entries() {
             if let Some(blocklist) = &device.blocklist {
-                if !blocklist.commands.is_empty() {
+                if mode == CommandMode::Blocklist && !blocklist.commands.is_empty() {
                     has_any_rules = true;
                     let rules: Vec<(Action, String)> = blocklist
                         .commands
@@ -222,24 +254,83 @@ impl PanosService {
         }
 
         if has_any_rules {
-            // Blocklist mode keeps this server's existing semantics (commands
-            // are allowed unless a rule denies them). mecmcp >= 0.24 made the
-            // mode explicit and defaults to Allowlist, so it must be passed.
+            // `mode` only matters to the commands domain (config is always
+            // fail-open blocklist regardless of CommandMode); passing it
+            // through keeps this object internally consistent even though
+            // `execute_panos_op` never calls `check_command` on it in
+            // Allowlist mode (see `command_allowlists`).
             Ok(Some(Policy::new(
-                CommandMode::Blocklist,
+                mode,
                 CommandDomain {
                     blocklist: commands_domain,
                     allowlist: CommandAllowlist::default(),
                 },
                 config_domain,
-                CommandDomain {
-                    blocklist: pfe_commands_domain,
-                    allowlist: CommandAllowlist::default(),
-                },
+                CommandDomain::default(), // PAN-OS has no PFE commands
             )))
         } else {
             Ok(None)
         }
+    }
+
+    /// Build one [`Policy`] per inventory device for `execute_panos_op`'s
+    /// fail-closed allowlist, merging the global `policy.allow` /
+    /// `policy.allowed_pipes` defaults with that device's own
+    /// `blocklist.allow` / `blocklist.allowed_pipes` additions -- the same
+    /// defaults-plus-device-specific shape the deny-rule domains use.
+    ///
+    /// `mecmcp_policy::CommandAllowlist` has no per-device dispatch within a
+    /// single `Policy` (unlike the deny-rule `DomainRules`), so a shared
+    /// object can't hold per-device allow entries; building one compiled
+    /// `Policy` per device is the workaround. Returns an empty map when
+    /// `mode` is [`CommandMode::Blocklist`] -- `execute_panos_op` never
+    /// consults it in that mode.
+    fn build_command_allowlists(
+        inventory: &Inventory,
+        mode: CommandMode,
+    ) -> Result<BTreeMap<String, Arc<Policy<Action>>>> {
+        let mut policies = BTreeMap::new();
+        if mode != CommandMode::Allowlist {
+            return Ok(policies);
+        }
+
+        for device in inventory.entries() {
+            let mut allow = inventory.policy_allow_defaults().to_vec();
+            let mut allowed_pipes = inventory.policy_allowed_pipes_defaults().to_vec();
+            if let Some(blocklist) = &device.blocklist {
+                allow.extend(blocklist.allow.iter().cloned());
+                allowed_pipes.extend(blocklist.allowed_pipes.iter().cloned());
+            }
+
+            let scope = &device.metadata.name;
+            let entries = compile_allowlist_entries(&allow, scope, |scope, entry, kind| {
+                PanosMcpError::Inventory(format!(
+                    "device '{scope}' policy.allow entry '{entry}' is invalid: {kind:?}"
+                ))
+            })?;
+            let allowed_pipe_entries =
+                compile_allowlist_entries(&allowed_pipes, scope, |scope, entry, kind| {
+                    PanosMcpError::Inventory(format!(
+                        "device '{scope}' policy.allowed_pipes entry '{entry}' is invalid: {kind:?}"
+                    ))
+                })?;
+
+            let policy = Policy::new(
+                CommandMode::Allowlist,
+                CommandDomain {
+                    blocklist: DomainRules::default(),
+                    allowlist: CommandAllowlist {
+                        entries,
+                        allowed_pipes: allowed_pipe_entries,
+                    },
+                },
+                DomainRules::default(),
+                CommandDomain::default(),
+            );
+            policies.insert(device.metadata.name.clone(), Arc::new(policy));
+        }
+
+        Ok(policies)
     }
 
     /// Return only non-secret inventory metadata in stable name order.
@@ -328,11 +419,31 @@ impl PanosService {
         let result = async {
             validate_read_only_op_command(&input.command)?;
 
-            // Check blocklist policy if configured (fail-open: no policy = allow all)
-            if let Some(policy) = &self.policy {
-                use mecmcp_policy::{Decision, normalize_input};
-                let normalized = normalize_input(&input.command);
-                match policy.check_command(&input.device, &normalized, Action::Deny) {
+            // Fail-closed allowlist (default) and fail-open blocklist
+            // (legacy, opt-in) resolve to a `Decision` differently -- the
+            // allowlist checks a tag-path derived from the command XML
+            // against a per-device merged CommandAllowlist (no per-device
+            // dispatch inside mecmcp_policy for that domain), the blocklist
+            // checks the normalized raw command against the shared deny-rule
+            // policy -- but from here on both are handled by one exhaustive
+            // match so neither path can silently allow a variant the other
+            // introduced (Percy F1, MEC-352).
+            let decision = match self.command_policy_mode {
+                CommandMode::Blocklist => self.policy.as_ref().map(|policy| {
+                    let normalized = normalize_input(&input.command);
+                    policy.check_command(&input.device, &normalized, Action::Deny)
+                }),
+                CommandMode::Allowlist => {
+                    let policy = self
+                        .command_allowlists
+                        .get(&input.device)
+                        .ok_or_else(|| PanosMcpError::UnknownDevice(input.device.clone()))?;
+                    let tag_path = op_command_tag_path(&input.command)?;
+                    Some(policy.check_command(&input.device, &tag_path, Action::Deny))
+                }
+            };
+            if let Some(decision) = decision {
+                match decision {
                     Decision::Allow => {}
                     Decision::Deny { rule, source, .. } => {
                         return Err(PanosMcpError::Policy {
@@ -344,13 +455,15 @@ impl PanosService {
                             ),
                         });
                     }
-                    // Must deny (Percy F1, MEC-352): never a wildcard or allow.
-                    // Unreachable in Blocklist mode today, but a future mode
-                    // change must fail closed rather than silently allow.
-                    Decision::DenyAllowlist { reason, .. } => {
+                    Decision::DenyAllowlist {
+                        reason, normalized, ..
+                    } => {
                         return Err(PanosMcpError::Policy {
                             field: "command",
-                            reason: format!("blocked by command allowlist: {reason:?}"),
+                            reason: format!(
+                                "refused by allowlist ({}); normalized input: {normalized}",
+                                reason.as_str()
+                            ),
                         });
                     }
                 }
@@ -397,7 +510,7 @@ impl PanosService {
             // Check blocklist policy if configured (fail-open: no policy = allow all)
             // We use config_rules_for for xpath matching (not check_config which is for multi-line text)
             if let Some(policy) = &self.policy {
-                use mecmcp_policy::{evaluate, normalize_input};
+                use mecmcp_policy::evaluate;
                 let normalized = normalize_input(&xpath);
                 let rules = policy.config_rules_for(&input.device);
                 match evaluate(&rules, &normalized) {

@@ -159,9 +159,52 @@ pub struct DeviceConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct BlocklistRules {
     /// Glob patterns denying operational commands (execute_panos_op).
+    ///
+    /// Only consulted when the resolved [`PolicyMode`] is `Blocklist`.
     pub(crate) commands: Vec<String>,
     /// Glob patterns denying XPath config reads (get_panos_config).
+    ///
+    /// The config domain is mode-independent -- always a deny-pattern
+    /// blocklist -- so this applies regardless of [`PolicyMode`].
     pub(crate) xpath: Vec<String>,
+    /// Token-prefix entries added to the global `policy.allow` defaults for
+    /// this device's `execute_panos_op` commands. Only consulted when the
+    /// resolved [`PolicyMode`] is `Allowlist`.
+    pub(crate) allow: Vec<String>,
+    /// Token-prefix entries added to the global `policy.allowed_pipes`
+    /// defaults for this device. Only consulted when the resolved
+    /// [`PolicyMode`] is `Allowlist`.
+    pub(crate) allowed_pipes: Vec<String>,
+}
+
+/// Which authorization model governs `execute_panos_op` commands.
+///
+/// Mirrors `mecmcp_policy::CommandMode`, kept as a separate, serde-friendly
+/// type (the upstream enum has no `Deserialize`/`Serialize` impl) so the
+/// inventory JSON key stays a stable `"allowlist"` / `"blocklist"` string
+/// independent of the upstream crate's enum shape.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyMode {
+    /// Fail-closed: a command is denied unless it matches an `allow` entry.
+    /// The default for any inventory with no `policy` section and no legacy
+    /// deny-only `blocklist.commands` rules.
+    Allowlist,
+    /// Fail-open: a command is denied only if it matches a deny rule under
+    /// `blocklist.commands`. The pre-existing behavior, kept for deployments
+    /// that request it explicitly, or that have legacy deny rules and no
+    /// `policy.mode` key (see [`Inventory::load_with_environment`]'s
+    /// migration logging).
+    Blocklist,
+}
+
+impl From<PolicyMode> for mecmcp_policy::CommandMode {
+    fn from(mode: PolicyMode) -> Self {
+        match mode {
+            PolicyMode::Allowlist => mecmcp_policy::CommandMode::Allowlist,
+            PolicyMode::Blocklist => mecmcp_policy::CommandMode::Blocklist,
+        }
+    }
 }
 
 /// Operator-controlled guardrails for PAN-OS candidate mutations.
@@ -198,6 +241,13 @@ impl fmt::Debug for DeviceConfig {
 pub struct Inventory {
     source: PathBuf,
     devices: BTreeMap<String, Arc<DeviceConfig>>,
+    /// Resolved authorization model for `execute_panos_op`; see [`PolicyMode`]
+    /// and the migration logic in [`Inventory::load_with_environment`].
+    policy_mode: PolicyMode,
+    /// Global `policy.allow` entries every device's allowlist starts from.
+    policy_allow_defaults: Vec<String>,
+    /// Global `policy.allowed_pipes` entries every device's allowlist starts from.
+    policy_allowed_pipes_defaults: Vec<String>,
 }
 
 impl Inventory {
@@ -285,6 +335,8 @@ impl Inventory {
         struct InventoryFile {
             version: u32,
             devices: Vec<RawDevice>,
+            #[serde(default)]
+            policy: Option<RawPolicyConfig>,
         }
 
         let parsed: InventoryFile = serde_json::from_slice(&bytes)
@@ -310,6 +362,44 @@ impl Inventory {
             )));
         }
 
+        // Resolve the execute_panos_op policy mode before consuming `devices`
+        // (`load_device` takes each entry by value).
+        //
+        // - An explicit `policy.mode` always wins.
+        // - Otherwise, a config with at least one legacy deny rule
+        //   (`blocklist.commands` on any device) is treated as `Blocklist`
+        //   for backward compatibility, with one startup WARN: fail-open
+        //   blocklist mode has no allowlist to fall back on, and staying on
+        //   it silently would be a silent security regression relative to
+        //   the new fail-closed default.
+        // - Otherwise (no policy section, or a freshly generated sample
+        //   config with no deny rules), the fail-closed default applies.
+        let has_legacy_deny_rules = parsed.devices.iter().any(|device| {
+            device
+                .blocklist
+                .as_ref()
+                .is_some_and(|bl| !bl.commands.is_empty())
+        });
+        let policy_mode = match parsed.policy.as_ref().and_then(|p| p.mode) {
+            Some(mode) => mode,
+            None if has_legacy_deny_rules => {
+                tracing::warn!(
+                    "execute_panos_op policy has deny rules but no explicit \
+                     \"policy\": {{\"mode\": ...}} key; loading as fail-open \
+                     \"blocklist\" mode for backward compatibility. Fail-open \
+                     blocklist mode allows any command that does not match a \
+                     deny rule -- switch to fail-closed \"allowlist\" mode \
+                     when convenient. See docs/ for migration guidance."
+                );
+                PolicyMode::Blocklist
+            }
+            None => PolicyMode::Allowlist,
+        };
+        let (policy_allow_defaults, policy_allowed_pipes_defaults) = match parsed.policy {
+            Some(policy) => (policy.allow, policy.allowed_pipes),
+            None => (Vec::new(), Vec::new()),
+        };
+
         // Load and resolve all devices
         let mut devices = BTreeMap::new();
         for raw in parsed.devices {
@@ -328,7 +418,28 @@ impl Inventory {
         Ok(Self {
             source: path.to_path_buf(),
             devices,
+            policy_mode,
+            policy_allow_defaults,
+            policy_allowed_pipes_defaults,
         })
+    }
+
+    /// Resolved authorization model for `execute_panos_op`; see [`PolicyMode`].
+    #[must_use]
+    pub(crate) fn policy_mode(&self) -> PolicyMode {
+        self.policy_mode
+    }
+
+    /// Global `policy.allow` entries every device's allowlist starts from.
+    #[must_use]
+    pub(crate) fn policy_allow_defaults(&self) -> &[String] {
+        &self.policy_allow_defaults
+    }
+
+    /// Global `policy.allowed_pipes` entries every device's allowlist starts from.
+    #[must_use]
+    pub(crate) fn policy_allowed_pipes_defaults(&self) -> &[String] {
+        &self.policy_allowed_pipes_defaults
     }
 
     /// Source inventory path.
@@ -406,6 +517,25 @@ struct RawBlocklistRules {
     commands: Vec<String>,
     #[serde(default)]
     xpath: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    allowed_pipes: Vec<String>,
+}
+
+/// Global `execute_panos_op` policy section (top-level `policy` key).
+#[derive(Debug, Default, Deserialize, serde::Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct RawPolicyConfig {
+    /// `allowlist` (fail-closed) or `blocklist` (fail-open). See [`PolicyMode`].
+    #[serde(default)]
+    mode: Option<PolicyMode>,
+    /// Default token-prefix allowlist entries, shared by every device.
+    #[serde(default)]
+    allow: Vec<String>,
+    /// Default token-prefix pipe-stage entries, shared by every device.
+    #[serde(default)]
+    allowed_pipes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
@@ -488,6 +618,8 @@ fn load_device(raw: RawDevice, environment: &dyn Environment) -> Result<DeviceCo
     let blocklist = raw.blocklist.map(|rules| BlocklistRules {
         commands: rules.commands,
         xpath: rules.xpath,
+        allow: rules.allow,
+        allowed_pipes: rules.allowed_pipes,
     });
 
     if !(1..=MAX_DEVICE_CONCURRENCY).contains(&raw.max_concurrency) {

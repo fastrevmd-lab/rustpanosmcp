@@ -1,5 +1,15 @@
 {
   "version": 1,
+  "policy": {
+    "mode": "allowlist",
+    "allow": [
+      "show system info",
+      "show interface all",
+      "show routing route",
+      "show running security-policy",
+      "show session info"
+    ]
+  },
   "devices": [
     {
       "name": "lab-fw-01",

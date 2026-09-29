@@ -195,6 +195,36 @@ pub fn validate_read_only_op_command(input: &str) -> Result<()> {
     Ok(())
 }
 
+/// Convert a `<show>...</show>` operational command into a whitespace-joined
+/// element tag path suitable for allowlist token-prefix matching, e.g.
+/// `<show><system><info/></system></show>` becomes `"show system info"`.
+///
+/// Call only after [`validate_read_only_op_command`] has confirmed the input
+/// is well-formed XML, within size/depth limits, rooted at an attribute-free
+/// `<show>` element. Element attributes and leaf text content are dropped --
+/// the allowlist governs which command *shape* may run, matching how the
+/// PAN-OS CLI's own free-form allowlist entries (e.g. `show system info`)
+/// are written, not the literal argument values ultimately sent to PAN-OS.
+pub fn op_command_tag_path(input: &str) -> Result<String> {
+    let mut reader = Reader::from_reader(input.as_bytes());
+    reader.config_mut().trim_text(true);
+    let mut tags: Vec<String> = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let qname = element.name();
+                let name = std::str::from_utf8(qname.as_ref().as_bytes())
+                    .map_err(|_| PanosMcpError::Xml("non-UTF-8 element name".to_owned()))?;
+                tags.push(name.to_owned());
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
+        }
+    }
+    Ok(tags.join(" "))
+}
+
 /// Validate the deliberately small read-only XPath subset accepted in Phase 1.
 pub fn validate_read_xpath(xpath: &str) -> Result<()> {
     if xpath.is_empty() {
