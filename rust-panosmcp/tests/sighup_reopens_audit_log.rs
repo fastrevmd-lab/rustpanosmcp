@@ -115,6 +115,15 @@ fn spawn(
     tokens_file: &std::path::Path,
     audit_log_file: &std::path::Path,
 ) -> Server {
+    spawn_with_stderr(inventory_path, tokens_file, audit_log_file, Stdio::null())
+}
+
+fn spawn_with_stderr(
+    inventory_path: &std::path::Path,
+    tokens_file: &std::path::Path,
+    audit_log_file: &std::path::Path,
+    stderr: Stdio,
+) -> Server {
     let port = pick_port();
     let child = Command::new(env!("CARGO_BIN_EXE_rust-panosmcp"))
         .args([
@@ -135,7 +144,7 @@ fn spawn(
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .expect("spawn rust-panosmcp");
     wait_for_port(port, Instant::now() + Duration::from_secs(5));
@@ -308,13 +317,37 @@ async fn sighup_reopens_audit_log_after_rename() {
     );
 }
 
+/// Drains the child's stderr into a shared buffer so the test can wait for a
+/// specific log line without blocking the server on a full pipe.
+fn capture_stderr(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
+    use std::io::BufRead;
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let sink = buffer.clone();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            let mut guard = sink.lock().expect("stderr buffer mutex");
+            guard.push_str(&line);
+            guard.push('\n');
+        }
+    });
+    buffer
+}
+
 #[tokio::test]
 async fn sighup_audit_reopen_failure_keeps_server_and_other_reloads_alive() {
     let inventory = write_inventory();
     let directory = tempfile::tempdir().expect("temp dir");
     let audit_path = directory.path().join("audit.jsonl");
 
-    let server = spawn(&inventory.path, &inventory.tokens_file, &audit_path);
+    let mut server = spawn_with_stderr(
+        &inventory.path,
+        &inventory.tokens_file,
+        &audit_path,
+        Stdio::piped(),
+    );
+    let stderr = capture_stderr(&mut server.child);
     let session_id = initialize(server.port, &inventory.bearer).await;
 
     emit_audit_record(server.port, &inventory.bearer, &session_id, 2).await;
@@ -326,27 +359,70 @@ async fn sighup_audit_reopen_failure_keeps_server_and_other_reloads_alive() {
     // existing (now-unlinked) descriptor keeps working regardless.
     std::fs::remove_file(&audit_path).expect("remove audit file");
     std::fs::create_dir(&audit_path).expect("create directory in its place");
+
+    // Issue a second token before the signal. It only becomes valid if the
+    // token/inventory reload that shares the SIGHUP handler still runs after
+    // the audit reopen has failed -- a handler that bailed out (`?`, panic,
+    // early return) on the reopen error would leave it unknown to the server.
+    let known = rust_panosmcp_auth::KnownNames {
+        devices: None,
+        tools: rust_panosmcp_auth::KNOWN_TOOLS,
+    };
+    let reloaded_bearer = TokenStoreFile::add(
+        &inventory.tokens_file,
+        "sighup-test-after-reload",
+        ScopeSet::Wildcard,
+        ScopeSet::Wildcard,
+        &known,
+    )
+    .expect("token add")
+    .expose_secret()
+    .to_owned();
+
     sighup(server.child.id());
 
-    // The server must keep serving requests -- a failed audit reopen must
-    // not take down the process or block the token/inventory reload that
-    // shares the same SIGHUP handler.
+    // The reopen-failure path must actually have been taken; otherwise the
+    // assertions below prove nothing about it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !stderr
+        .lock()
+        .expect("stderr buffer mutex")
+        .contains("audit log reopen failed")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "server never logged the failed audit reopen; stderr:\n{}",
+            stderr.lock().expect("stderr buffer mutex")
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // The server must keep serving, and the reload must have run: the token
+    // issued just before SIGHUP now authenticates.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let (status, _) = post(
-            server.port,
-            &inventory.bearer,
-            Some(&session_id),
-            &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}),
-        )
-        .await;
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "sighup-audit-test", "version": "1"}
+            }
+        });
+        let (status, _) = post(server.port, &reloaded_bearer, None, &body).await;
         if status == 200 {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "server stopped responding after a failed audit reopen (last status {status})"
+            "token issued before SIGHUP never became valid after a failed audit reopen (last status {status})"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    assert!(
+        server.child.try_wait().expect("poll child").is_none(),
+        "server exited after a failed audit reopen"
+    );
 }
