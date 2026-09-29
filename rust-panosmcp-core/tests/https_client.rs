@@ -12,7 +12,10 @@ use rust_panosmcp_core::{
     PanosMcpError,
     client::PanosClient,
     inventory::{Environment, Inventory},
-    xml::{parse_device_facts, parse_device_groups, parse_push_job_status, parse_templates},
+    xml::{
+        parse_device_facts, parse_panorama_device_groups_op, parse_panorama_templates_op,
+        parse_push_job_status, scan_config_entries,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -219,13 +222,27 @@ async fn api(
         }
         return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><status>FIN</status><result>OK</result><progress>100</progress></job></result></response>".to_owned());
     }
+    if command == "<show><devicegroups></devicegroups></show>" {
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><devicegroups><entry name=\"DG-Branch\"><devices><entry name=\"0011C1\"/></devices></entry></devicegroups></result></response>".to_owned());
+    }
+    if command == "<show><templates></templates></show>" {
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><templates><entry name=\"TMPL-Base\"><devices><entry name=\"0011C1\"/></devices></entry></templates></result></response>".to_owned());
+    }
     if form.get("type").map(String::as_str) == Some("config") {
         let xpath = form.get("xpath").map(String::as_str).unwrap_or_default();
+        if xpath
+            == "/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='TMPL-Base']/variable"
+        {
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><variable><entry name=\"$var1\"/></variable></result></response>".to_owned());
+        }
+        // MEC-759: a regression back to fetching the whole `device-group`/
+        // `template` container would land here and get a fixture carrying a
+        // large sibling subtree the current two-phase read never requests.
         if xpath.ends_with("/device-group") {
-            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><device-group><entry name=\"DG-Branch\"><devices><entry name=\"0011C1\"/></devices></entry></device-group></result></response>".to_owned());
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><device-group><entry name=\"DG-Branch\"><pre-rulebase><security><rules><entry name=\"deny-all\"/></rules></security></pre-rulebase><devices><entry name=\"0011C1\"/></devices></entry></device-group></result></response>".to_owned());
         }
         if xpath.ends_with("/template") {
-            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><template><entry name=\"TMPL-Base\"><variable><entry name=\"$var1\"/></variable></entry></template></result></response>".to_owned());
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><template><entry name=\"TMPL-Base\"><config><devices><entry name=\"localhost.localdomain\"><vsys><entry name=\"vsys1\"><zone><entry name=\"trust\"/></zone></entry></vsys></entry></devices></config><variable><entry name=\"$var1\"/></variable></entry></template></result></response>".to_owned());
         }
         return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><config><devices/></config></result></response>".to_owned());
     }
@@ -509,38 +526,73 @@ fn percentile(samples: &[Duration], percentile: usize) -> Duration {
     samples[index]
 }
 
-/// MEC-536: Panorama device-group/template/push-status reads, end to end
-/// through the real HTTPS transport -- not just the XML parser in isolation.
+/// MEC-536/MEC-759: Panorama device-group/template/push-status reads, end to
+/// end through the real HTTPS transport -- not just the XML parser in
+/// isolation.
+///
+/// Device groups and template *names* come from read-only op commands
+/// (`<show><devicegroups/></show>` / `<show><templates/></show>`), and a
+/// template's variables come from a second, single-entry config `get`
+/// scoped to exactly that template's `/variable` child -- never a config
+/// `get`/`show` on the whole `device-group`/`template` container, which is
+/// asserted below against the requests this mock actually received.
 #[tokio::test]
 async fn panorama_device_groups_templates_and_push_status_read_over_https() {
     let mock = MockHttps::start().await;
     let client = mock.client("custom_ca", "\"max_concurrency\":1");
 
     let response = client
-        .configuration(
-            false,
-            "/config/devices/entry[@name='localhost.localdomain']/device-group",
+        .operational(
+            "<show><devicegroups></devicegroups></show>",
             CancellationToken::new(),
         )
         .await
-        .expect("device-group read");
-    let groups = parse_device_groups(&response).expect("device groups parse");
+        .expect("device-group op read");
+    let groups = parse_panorama_device_groups_op(&response).expect("device groups parse");
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].name, "DG-Branch");
     assert_eq!(groups[0].member_serials, vec!["0011C1".to_owned()]);
 
     let response = client
-        .configuration(
-            false,
-            "/config/devices/entry[@name='localhost.localdomain']/template",
+        .operational(
+            "<show><templates></templates></show>",
             CancellationToken::new(),
         )
         .await
-        .expect("template read");
-    let templates = parse_templates(&response).expect("templates parse");
-    assert_eq!(templates.len(), 1);
-    assert_eq!(templates[0].name, "TMPL-Base");
-    assert_eq!(templates[0].variables, vec!["$var1".to_owned()]);
+        .expect("template op read");
+    let template_names = parse_panorama_templates_op(&response).expect("template names parse");
+    assert_eq!(template_names, vec!["TMPL-Base".to_owned()]);
+
+    let response = client
+        .configuration(
+            false,
+            "/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='TMPL-Base']/variable",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("per-template variable read");
+    let variables: Vec<String> = scan_config_entries(response.xml.as_bytes(), 0, 100, 3)
+        .expect("variable entries scan")
+        .entries
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(variables, vec!["$var1".to_owned()]);
+
+    let sent_xpaths: Vec<String> = mock
+        .state
+        .records
+        .lock()
+        .expect("records")
+        .iter()
+        .filter_map(|record| record.form.get("xpath").cloned())
+        .collect();
+    assert!(
+        !sent_xpaths
+            .iter()
+            .any(|xpath| xpath.ends_with("/device-group") || xpath.ends_with("/template")),
+        "must never request the whole device-group/template container: sent {sent_xpaths:?}"
+    );
 
     let response = client
         .job_response("777", CancellationToken::new())

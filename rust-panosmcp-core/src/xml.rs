@@ -1157,10 +1157,20 @@ pub struct PushJobStatus {
     pub devices: Vec<PushDeviceStatus>,
 }
 
-/// Parse `/config/devices/entry[@name='localhost.localdomain']/device-group`
-/// into structured summaries.
-pub fn parse_device_groups(response: &PanosResponse) -> Result<Vec<DeviceGroupSummary>> {
-    let entries = parse_grouped_entries(response.xml.as_bytes(), b"device-group", b"devices")?;
+/// Parse `<show><devicegroups></devicegroups></show>` operational output into
+/// structured summaries.
+///
+/// Panorama's device-group op output already nests each group's connected
+/// firewall serials under a `devices` container exactly like the config-tree
+/// fetch does (`<devicegroups><entry name="DG"><devices><entry name="serial"
+/// .../></devices></entry></devicegroups>`), so this alone answers
+/// `list_panorama_device_groups`: no per-group config `get` is needed, and
+/// the rulebases/address objects/etc. nested under the config equivalent
+/// structurally cannot appear in an operational response (MEC-759).
+pub fn parse_panorama_device_groups_op(
+    response: &PanosResponse,
+) -> Result<Vec<DeviceGroupSummary>> {
+    let entries = parse_grouped_entries(response.xml.as_bytes(), b"devicegroups", b"devices")?;
     Ok(entries
         .into_iter()
         .map(|entry| DeviceGroupSummary {
@@ -1170,16 +1180,19 @@ pub fn parse_device_groups(response: &PanosResponse) -> Result<Vec<DeviceGroupSu
         .collect())
 }
 
-/// Parse `/config/devices/entry[@name='localhost.localdomain']/template`
-/// into structured summaries.
-pub fn parse_templates(response: &PanosResponse) -> Result<Vec<TemplateSummary>> {
-    let entries = parse_grouped_entries(response.xml.as_bytes(), b"template", b"variable")?;
+/// Parse `<show><templates></templates></show>` operational output for
+/// template *names* only.
+///
+/// Unlike device groups, Panorama's template op output reports per-target-
+/// firewall commit/connection history, not the template's declared
+/// variables -- those live only in the config tree, so `list_panorama_templates`
+/// pairs this with a per-template `/variable` config read (see
+/// `crate::tools::PanosService::list_panorama_templates`, MEC-759).
+pub fn parse_panorama_templates_op(response: &PanosResponse) -> Result<Vec<String>> {
+    let entries = list_child_entries(response.xml.as_bytes(), b"templates")?;
     Ok(entries
         .into_iter()
-        .map(|entry| TemplateSummary {
-            name: entry.name,
-            variables: entry.members,
-        })
+        .map(|entry| entry.name_attr.unwrap_or_default())
         .collect())
 }
 
@@ -2638,14 +2651,22 @@ mod panorama_tests {
     }
 
     #[test]
-    fn parses_device_groups_with_members_and_an_empty_group() {
+    fn parses_op_device_groups_with_members_and_an_empty_group() {
+        // MEC-759: `<show><devicegroups/></show>` output nests connected
+        // serials the same way the config `device-group` container does, and
+        // may carry sibling per-firewall connection/commit detail (`<conn-
+        // status>`, `<last-commit-all-state-sp>`, ...) this parser must
+        // ignore rather than mistake for a member serial.
         let response = response(
-            r#"<response status="success"><result><device-group>
-                <entry name="DG-Branch"><devices><entry name="0011C1"/><entry name="0011C2"/></devices></entry>
+            r#"<response status="success"><result><devicegroups>
+                <entry name="DG-Branch"><devices>
+                    <entry name="0011C1"><hostname>fw-01</hostname><conn-status>up</conn-status></entry>
+                    <entry name="0011C2"/>
+                </devices></entry>
                 <entry name="DG-Empty"/>
-            </device-group></result></response>"#,
+            </devicegroups></result></response>"#,
         );
-        let groups = parse_device_groups(&response).expect("device groups parse");
+        let groups = parse_panorama_device_groups_op(&response).expect("device groups parse");
         assert_eq!(
             groups,
             vec![
@@ -2662,34 +2683,31 @@ mod panorama_tests {
     }
 
     #[test]
-    fn parses_templates_with_variables_and_none() {
+    fn parses_op_template_names_ignoring_non_variable_op_detail() {
+        // MEC-759: `<show><templates/></show>` reports per-target-firewall
+        // commit/connection history, not variables -- this parser must
+        // extract only the template names and ignore that nested detail.
         let response = response(
-            r#"<response status="success"><result><template>
-                <entry name="TMPL-Base"><variable><entry name="$var1"/><entry name="$var2"/></variable></entry>
-                <entry name="TMPL-NoVars"/>
-            </template></result></response>"#,
+            r#"<response status="success"><result><templates>
+                <entry name="TMPL-Base"><devices><entry name="0011C1"><conn-status>up</conn-status></entry></devices></entry>
+                <entry name="TMPL-NoDevices"/>
+            </templates></result></response>"#,
         );
-        let templates = parse_templates(&response).expect("templates parse");
+        let names = parse_panorama_templates_op(&response).expect("template names parse");
         assert_eq!(
-            templates,
-            vec![
-                TemplateSummary {
-                    name: "TMPL-Base".to_owned(),
-                    variables: vec!["$var1".to_owned(), "$var2".to_owned()],
-                },
-                TemplateSummary {
-                    name: "TMPL-NoVars".to_owned(),
-                    variables: vec![],
-                },
-            ]
+            names,
+            vec!["TMPL-Base".to_owned(), "TMPL-NoDevices".to_owned()]
         );
     }
 
     #[test]
-    fn an_empty_device_group_container_yields_no_entries() {
+    fn an_empty_device_group_op_container_yields_no_entries() {
         let response =
-            response(r#"<response status="success"><result><device-group/></result></response>"#);
-        assert_eq!(parse_device_groups(&response).expect("parses"), vec![]);
+            response(r#"<response status="success"><result><devicegroups/></result></response>"#);
+        assert_eq!(
+            parse_panorama_device_groups_op(&response).expect("parses"),
+            vec![]
+        );
     }
 
     #[test]
@@ -2840,10 +2858,11 @@ mod panorama_tests {
             members.push_str(&format!("<entry name=\"serial-{index}\"/>"));
         }
         let xml = format!(
-            r#"<response status="success"><result><device-group><entry name="DG"><devices>{members}</devices></entry></device-group></result></response>"#
+            r#"<response status="success"><result><devicegroups><entry name="DG"><devices>{members}</devices></entry></devicegroups></result></response>"#
         );
         let response = response(&xml);
-        let error = parse_device_groups(&response).expect_err("excess members must be refused");
+        let error =
+            parse_panorama_device_groups_op(&response).expect_err("excess members must be refused");
         assert!(error.to_string().contains("more than"));
     }
 }
