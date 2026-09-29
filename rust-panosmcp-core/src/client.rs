@@ -239,15 +239,24 @@ impl PanosClient {
         fields: Vec<(&'static str, String)>,
         cancellation: CancellationToken,
     ) -> Result<PanosResponse> {
-        let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
-        parse_panos_response(
-            &bytes,
-            XmlLimits {
-                max_bytes: self.config.max_response_bytes,
-                max_depth: 64,
-            },
-        )?
-        .ensure_success(self.device_name())
+        let outcome = async {
+            let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
+            parse_panos_response(
+                &bytes,
+                XmlLimits {
+                    max_bytes: self.config.max_response_bytes,
+                    max_depth: 64,
+                },
+            )?
+            .ensure_success(self.device_name())
+        }
+        .await;
+        // `send`'s own bookkeeping only sees the transport layer, so it
+        // cannot notice an API-level auth failure (code 22) that arrives as
+        // a 200 OK wrapping an XML error. Re-record here with the fully
+        // parsed outcome so that case still flips `auth_healthy`.
+        self.record_auth_result(&outcome);
+        outcome
     }
 
     /// Shared request/response plumbing behind [`post`](Self::post) and
@@ -341,23 +350,41 @@ impl PanosClient {
                 }
             }
         };
-        self.record_auth_result(&outcome);
+        // `send` only sees the transport layer: a 2xx here does not mean the
+        // request authenticated, since PAN-OS can wrap an unrelated API
+        // error (or even an auth failure such as code 22) inside an HTTP 200
+        // body that `send` never parses. So only react to a failure here --
+        // an `HttpStatus` rejection is itself proof of a bad credential --
+        // and leave marking `auth_healthy` back to `true` to `post`, which
+        // sees the fully parsed result.
+        if let Err(error) = &outcome {
+            self.record_auth_failure(error);
+        }
         outcome
     }
 
-    /// Update `auth_healthy` from a completed request's outcome.
-    fn record_auth_result(&self, outcome: &Result<PanosResponse>) {
+    /// Update `auth_healthy` from a completed request's fully parsed outcome.
+    fn record_auth_result<T>(&self, outcome: &Result<T>) {
         match outcome {
             Ok(_) => self.auth_healthy.store(true, Ordering::Relaxed),
-            Err(PanosMcpError::Api { code, .. }) if AUTH_FAILURE_CODES.contains(code) => {
+            Err(error) => self.record_auth_failure(error),
+        }
+    }
+
+    /// Flip `auth_healthy` to `false` if `error` is one of the specific
+    /// shapes PAN-OS uses to reject a bad credential; leave it unchanged for
+    /// every other error (timeout, transport, unrelated API error).
+    fn record_auth_failure(&self, error: &PanosMcpError) {
+        match error {
+            PanosMcpError::Api { code, .. } if AUTH_FAILURE_CODES.contains(code) => {
                 self.auth_healthy.store(false, Ordering::Relaxed);
             }
-            Err(PanosMcpError::HttpStatus { status, .. })
+            PanosMcpError::HttpStatus { status, .. }
                 if AUTH_FAILURE_HTTP_STATUSES.contains(status) =>
             {
                 self.auth_healthy.store(false, Ordering::Relaxed);
             }
-            Err(_) => {}
+            _ => {}
         }
     }
 }
