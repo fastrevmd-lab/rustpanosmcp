@@ -178,6 +178,20 @@ impl PanosService {
         })
     }
 
+    /// `/readyz` probe: `Err` once any device's most recent PAN-OS request
+    /// came back unauthorized or session-timed-out (see
+    /// [`crate::client::PanosClient::is_auth_healthy`]).
+    ///
+    /// A device that has made no request yet reports healthy -- readiness
+    /// reflects proven auth failure, not silence.
+    pub fn auth_health_check(&self) -> std::result::Result<(), &'static str> {
+        if self.clients.values().all(|client| client.is_auth_healthy()) {
+            Ok(())
+        } else {
+            Err("PAN-OS authentication failed for one or more devices")
+        }
+    }
+
     fn build_policy(inventory: &Inventory) -> Result<Option<Policy<Action>>> {
         let mut commands_domain = DomainRules::default();
         let mut config_domain = DomainRules::default();

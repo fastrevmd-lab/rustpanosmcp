@@ -17,12 +17,35 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 const API_PATH: &str = "api/";
 const JOB_ID_MAX_BYTES: usize = 32;
+
+/// PAN-OS XML API codes that mean the configured key stopped authenticating,
+/// as opposed to a transient transport failure or an unrelated API error.
+///
+/// `22` is "session timed out", which the XML API also raises for an expired
+/// API key. Code `16` ("unauthorized") is deliberately excluded: PAN-OS uses
+/// it when a *valid* key's role lacks rights for the specific command sent,
+/// which a correctly-scoped least-privilege key can trigger routinely. See
+/// [`crate::xml::panos_api_code_name`].
+const AUTH_FAILURE_CODES: [i32; 1] = [22];
+
+/// HTTP statuses PAN-OS uses to reject a request before it can even reach
+/// the XML API layer -- the shape a revoked, invalid, or otherwise
+/// credential-rejected key actually returns (an HTTP 200 wrapping an XML
+/// error code is not what a bad key produces).
+const AUTH_FAILURE_HTTP_STATUSES: [u16; 2] = [401, 403];
 
 /// Pooled PAN-OS API client for exactly one validated inventory device.
 #[derive(Clone)]
@@ -31,6 +54,11 @@ pub struct PanosClient {
     client: Client,
     api_url: reqwest::Url,
     concurrency: Arc<Semaphore>,
+    /// Set to `false` on the most recent request's PAN-OS auth failure
+    /// (unauthorized key or expired session), `true` on any successful
+    /// response. Other errors (timeout, transport, non-auth API error)
+    /// leave it unchanged -- they say nothing about the key's validity.
+    auth_healthy: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PanosClient {
@@ -57,6 +85,7 @@ impl PanosClient {
             config,
             client,
             api_url,
+            auth_healthy: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -64,6 +93,15 @@ impl PanosClient {
     #[must_use]
     pub fn device_name(&self) -> &str {
         &self.config.metadata.name
+    }
+
+    /// Whether the most recent request against this device authenticated.
+    ///
+    /// Starts `true`: an unreached device has not yet proven its key is bad,
+    /// and `/readyz` should not fail before the first request goes out.
+    #[must_use]
+    pub fn is_auth_healthy(&self) -> bool {
+        self.auth_healthy.load(Ordering::Relaxed)
     }
 
     /// Explicit candidate-mutation policy, if the operator enabled writes.
@@ -201,15 +239,24 @@ impl PanosClient {
         fields: Vec<(&'static str, String)>,
         cancellation: CancellationToken,
     ) -> Result<PanosResponse> {
-        let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
-        parse_panos_response(
-            &bytes,
-            XmlLimits {
-                max_bytes: self.config.max_response_bytes,
-                max_depth: 64,
-            },
-        )?
-        .ensure_success(self.device_name())
+        let outcome = async {
+            let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
+            parse_panos_response(
+                &bytes,
+                XmlLimits {
+                    max_bytes: self.config.max_response_bytes,
+                    max_depth: 64,
+                },
+            )?
+            .ensure_success(self.device_name())
+        }
+        .await;
+        // `send`'s own bookkeeping only sees the transport layer, so it
+        // cannot notice an API-level auth failure (code 22) that arrives as
+        // a 200 OK wrapping an XML error. Re-record here with the fully
+        // parsed outcome so that case still flips `auth_healthy`.
+        self.record_auth_result(&outcome);
+        outcome
     }
 
     /// Shared request/response plumbing behind [`post`](Self::post) and
@@ -294,7 +341,7 @@ impl PanosClient {
             Ok((bytes, truncated))
         };
 
-        tokio::select! {
+        let outcome = tokio::select! {
             () = cancellation.cancelled() => Err(PanosMcpError::Cancelled),
             result = time::timeout(self.config.request_timeout, operation) => {
                 match result {
@@ -302,6 +349,42 @@ impl PanosClient {
                     Err(_) => Err(PanosMcpError::Timeout { operation: "panos_api" }),
                 }
             }
+        };
+        // `send` only sees the transport layer: a 2xx here does not mean the
+        // request authenticated, since PAN-OS can wrap an unrelated API
+        // error (or even an auth failure such as code 22) inside an HTTP 200
+        // body that `send` never parses. So only react to a failure here --
+        // an `HttpStatus` rejection is itself proof of a bad credential --
+        // and leave marking `auth_healthy` back to `true` to `post`, which
+        // sees the fully parsed result.
+        if let Err(error) = &outcome {
+            self.record_auth_failure(error);
+        }
+        outcome
+    }
+
+    /// Update `auth_healthy` from a completed request's fully parsed outcome.
+    fn record_auth_result<T>(&self, outcome: &Result<T>) {
+        match outcome {
+            Ok(_) => self.auth_healthy.store(true, Ordering::Relaxed),
+            Err(error) => self.record_auth_failure(error),
+        }
+    }
+
+    /// Flip `auth_healthy` to `false` if `error` is one of the specific
+    /// shapes PAN-OS uses to reject a bad credential; leave it unchanged for
+    /// every other error (timeout, transport, unrelated API error).
+    fn record_auth_failure(&self, error: &PanosMcpError) {
+        match error {
+            PanosMcpError::Api { code, .. } if AUTH_FAILURE_CODES.contains(code) => {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            PanosMcpError::HttpStatus { status, .. }
+                if AUTH_FAILURE_HTTP_STATUSES.contains(status) =>
+            {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }
