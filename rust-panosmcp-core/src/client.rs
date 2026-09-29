@@ -211,6 +211,105 @@ impl PanosClient {
         parse_pending_changes(&response)
     }
 
+    /// Execute a fixed, parameter-free `<request>`-rooted operational
+    /// command.
+    ///
+    /// Same rationale as [`check_pending_changes`](Self::check_pending_changes):
+    /// `<request>` is a distinct PAN-OS operational root from `<show>`, and
+    /// this bypasses [`operational`](Self::operational)'s `<show>`-only gate
+    /// rather than widening it, because every caller here passes one of a
+    /// small set of `&'static str` constants -- never caller-supplied text.
+    pub(crate) async fn fixed_op(
+        &self,
+        command: &'static str,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        self.post(
+            vec![("type", "op".to_owned()), ("cmd", command.to_owned())],
+            cancellation,
+        )
+        .await
+    }
+
+    /// Poll a PAN-OS `type=log` job with cancellation and bounded backoff.
+    ///
+    /// A log job's terminal state is nested under `<result><job><status>...`
+    /// -- the same shape [`poll_job`](Self::poll_job)'s `parse_job_status`
+    /// expects for a config/commit job -- but this uses
+    /// [`crate::xml::log_job_is_finished`], which scans for `<status>`
+    /// anywhere in the document rather than requiring that exact nesting,
+    /// since the shape is based on documentation and hand-written fixtures,
+    /// not a verified live-device response.
+    ///
+    /// On timeout or cancellation, best-effort sends `action=finish` for
+    /// this job id so PAN-OS's small pool of concurrent log-query slots
+    /// does not stay occupied by an abandoned job.
+    pub(crate) async fn poll_log_job(
+        &self,
+        job_id: &str,
+        deadline: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        validate_job_id(job_id)?;
+        let operation = async {
+            let mut backoff = Duration::from_millis(200);
+            loop {
+                let response = self
+                    .post(
+                        vec![
+                            ("type", "log".to_owned()),
+                            ("action", "get".to_owned()),
+                            ("job-id", job_id.to_owned()),
+                        ],
+                        cancellation.clone(),
+                    )
+                    .await?;
+                if crate::xml::log_job_is_finished(&response)? {
+                    return Ok(response);
+                }
+                let jitter = fastrand::u64(0..=100);
+                tokio::select! {
+                    () = cancellation.cancelled() => return Err(PanosMcpError::Cancelled),
+                    () = time::sleep(backoff + Duration::from_millis(jitter)) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(3));
+            }
+        };
+        match time::timeout(deadline, operation).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(err)) => {
+                if matches!(err, PanosMcpError::Cancelled) {
+                    self.best_effort_finish_log_job(job_id).await;
+                }
+                Err(err)
+            }
+            Err(_) => {
+                self.best_effort_finish_log_job(job_id).await;
+                Err(PanosMcpError::Timeout {
+                    operation: "poll_log_job",
+                })
+            }
+        }
+    }
+
+    /// Best-effort release of a `type=log` job PAN-OS is still holding a
+    /// concurrent-query slot for, after this client gave up waiting on it.
+    /// Uses a fresh cancellation token and a short timeout of its own so a
+    /// wedged connection cannot turn an abandoned poll into a second hang;
+    /// any failure here is swallowed, since the caller is already reporting
+    /// the original timeout or cancellation.
+    async fn best_effort_finish_log_job(&self, job_id: &str) {
+        let finish = self.post(
+            vec![
+                ("type", "log".to_owned()),
+                ("action", "finish".to_owned()),
+                ("job-id", job_id.to_owned()),
+            ],
+            CancellationToken::new(),
+        );
+        let _ = time::timeout(Duration::from_secs(5), finish).await;
+    }
+
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.
     pub async fn poll_job(
         &self,
