@@ -3,7 +3,7 @@
 use axum::{
     Router,
     extract::{ConnectInfo, Form, OriginalUri, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
 };
@@ -188,24 +188,35 @@ async fn api(
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     if command.contains("<large") {
-        return format!(
-            "<response status=\"success\" code=\"19\"><result>{}</result></response>",
-            "x".repeat(4096)
+        return (
+            StatusCode::OK,
+            format!(
+                "<response status=\"success\" code=\"19\"><result>{}</result></response>",
+                "x".repeat(4096)
+            ),
         );
     }
     if command.contains("<error") {
-        return "<response status=\"error\" code=\"7\"><msg><line>Object is not present</line></msg></response>".to_owned();
+        return (StatusCode::OK, "<response status=\"error\" code=\"7\"><msg><line>Object is not present</line></msg></response>".to_owned());
+    }
+    if command.contains("<unauthorized") {
+        return (StatusCode::OK, "<response status=\"error\" code=\"16\"><msg><line>Invalid credential</line></msg></response>".to_owned());
+    }
+    // PAN-OS's documented shape for a bad or revoked API key: an HTTP-level
+    // rejection, not an HTTP 200 wrapping an XML error code.
+    if command.contains("<badkey") {
+        return (StatusCode::FORBIDDEN, "<response status=\"error\" code=\"403\"><msg><line>Invalid Credential</line></msg></response>".to_owned());
     }
     if command.contains("<jobs>") {
         if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
-            return "<response status=\"success\" code=\"19\"><result><job><status>ACT</status><progress>25</progress></job></result></response>".to_owned();
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><status>ACT</status><progress>25</progress></job></result></response>".to_owned());
         }
-        return "<response status=\"success\" code=\"19\"><result><job><status>FIN</status><result>OK</result><progress>100</progress></job></result></response>".to_owned();
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><status>FIN</status><result>OK</result><progress>100</progress></job></result></response>".to_owned());
     }
     if form.get("type").map(String::as_str) == Some("config") {
-        return "<response status=\"success\" code=\"19\"><result><config><devices/></config></result></response>".to_owned();
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><config><devices/></config></result></response>".to_owned());
     }
-    "<response status=\"success\" code=\"19\"><result><system><hostname>mock-fw</hostname><ip-address>192.0.2.10</ip-address><model>PA-VM</model><serial>012345</serial><sw-version>11.2.4</sw-version><uptime>1 day</uptime></system></result></response>".to_owned()
+    (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><system><hostname>mock-fw</hostname><ip-address>192.0.2.10</ip-address><model>PA-VM</model><serial>012345</serial><sw-version>11.2.4</sw-version><uptime>1 day</uptime></system></result></response>".to_owned())
 }
 
 fn digest_hex(digest: [u8; 32]) -> String {
@@ -353,6 +364,92 @@ async fn asynchronous_job_polling_reaches_terminal_state() {
         .expect("job polling");
     assert!(job.succeeded());
     assert!(mock.state.jobs.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn auth_health_flips_on_http_403_invalid_credential_and_recovers_on_success() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+    assert!(
+        client.is_auth_healthy(),
+        "starts healthy before any request"
+    );
+
+    // A revoked or invalid API key: PAN-OS answers with an HTTP-level 403,
+    // not an HTTP 200 wrapping an XML error code (MEC-530 review F1).
+    let error = client
+        .operational("<show><badkey/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock invalid-credential rejection");
+    assert!(matches!(
+        error,
+        PanosMcpError::HttpStatus { status: 403, .. }
+    ));
+    assert!(
+        !client.is_auth_healthy(),
+        "an HTTP 403 invalid-credential rejection must flip auth_healthy"
+    );
+
+    // An unrelated failure (object-not-present) must not mask the known-bad
+    // key by resetting the flag to healthy.
+    let unrelated = client
+        .operational("<show><error/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock generic API error");
+    assert!(matches!(unrelated, PanosMcpError::Api { code: 7, .. }));
+    assert!(
+        !client.is_auth_healthy(),
+        "an unrelated API error must not clear a known auth failure"
+    );
+
+    client
+        .operational(
+            "<show><system><info/></system></show>",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("subsequent healthy read");
+    assert!(
+        client.is_auth_healthy(),
+        "a later success must clear the auth failure"
+    );
+}
+
+#[tokio::test]
+async fn auth_health_is_unaffected_by_non_auth_errors() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+
+    let error = client
+        .operational("<show><error/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock generic API error");
+    assert!(matches!(error, PanosMcpError::Api { code: 7, .. }));
+    assert!(
+        client.is_auth_healthy(),
+        "a non-auth API error must not flip readiness"
+    );
+}
+
+#[tokio::test]
+async fn auth_health_is_unaffected_by_panos_unauthorized_role_error() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+
+    // Code 16 ("unauthorized") is PAN-OS's response when a *valid* key's
+    // role lacks rights for this specific command, not a bad key. A
+    // correctly-scoped least-privilege key can hit this on every
+    // out-of-role request, so it must not flip readiness for the whole
+    // server (MEC-530 review F2).
+    let error = client
+        .operational("<show><unauthorized/></show>", CancellationToken::new())
+        .await
+        .expect_err("mock unauthorized (role) response");
+    assert!(matches!(error, PanosMcpError::Api { code: 16, .. }));
+    assert!(
+        client.is_auth_healthy(),
+        "code 16 (unauthorized) is a role/permission error, not a key failure"
+    );
 }
 
 #[tokio::test]
