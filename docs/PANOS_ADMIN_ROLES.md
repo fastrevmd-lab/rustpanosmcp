@@ -31,7 +31,7 @@ matching rust-panosmcp inventory entries and MCP bearer scopes:
 
 | PAN-OS account | Custom admin role | Used by | Never gets |
 |---|---|---|---|
-| `mcp-reader` | Read-only: XML API access limited to `<show>` operational commands and candidate/running configuration reads. No commit, no config write, no operational commands that change device state (e.g. no `clear`, `request`, `test` beyond diagnostics you've explicitly reviewed). | The reader MCP connection (`list_devices`, `gather_device_facts`, `execute_panos_op`, `get_panos_config`) | Config write privilege, Commit privilege, superuser |
+| `mcp-reader` | Read-only: enable only the *Operational Requests* and *Configuration* (read) XML API categories under Admin Roles; PAN-OS's XML API role scoping is coarse-grained by category, not per command, so this is the widest surface the account can reach. No commit, no config write. | The reader MCP connection (`list_devices`, `gather_device_facts`, `execute_panos_op`, `get_panos_config`) | Config write privilege, Commit privilege, superuser |
 | `mcp-change` | Write: candidate configuration read/write and commit, scoped to the exact XPath roots this deployment's `mutation.allowed_xpath_roots` covers. No access to accounts, roles, HA, or system settings beyond what the automation touches. | The writer MCP connection (`create_panos_change_set`, `stage_panos_config`, `commit_panos_candidate`, …) | Superuser, access to Device/Network tabs outside the automated scope |
 
 Build each with PAN-OS **Admin Roles** (Device > Admin Roles), starting from
@@ -40,6 +40,16 @@ GUI/CLI privileges each account needs — not by cloning the built-in
 `superuser` role and removing items. A denylist role silently regains
 access when PAN-OS adds a new privilege in a future release; an allowlist
 role does not.
+
+The PAN-OS admin role is the *coarse*, per-account gate: it grants or
+withholds entire XML API categories (Operational Requests, Configuration,
+Commit, …), not individual commands. The finer-grained control — which
+specific `<show>`/operational commands `execute_panos_op` will actually
+forward to a given device — is this server's own inventory-level op-command
+allowlist (`config/devices.example.json`'s per-device policy), not the
+PAN-OS role. Treat the two as layered: the server's allowlist narrows what a
+request can ask for, and the PAN-OS role is the backstop if that allowlist
+is ever misconfigured or bypassed.
 
 Rationale for splitting rather than sharing one account across both MCP
 connections:
@@ -99,7 +109,11 @@ After provisioning both accounts:
    independent check, confirm the `mcp-reader` PAN-OS account's admin role
    has no commit or config-write privilege, so even a misconfigured MCP
    scope cannot reach PAN-OS as a write.
-4. Confirm `GET /readyz` is healthy for both accounts (see
-   [OPERATIONS.md](OPERATIONS.md#pan-os-api-key-lifetime-and-rotation)) and
-   that connecting from outside the permitted management-IP range is
-   refused by PAN-OS.
+4. Run `gather_device_facts` through each account's MCP connection, *then*
+   confirm `GET /readyz` is healthy (see
+   [OPERATIONS.md](OPERATIONS.md#pan-os-api-key-lifetime-and-rotation)).
+   `/readyz`'s `panos_auth` check is reactive, not an active poll: it only
+   reflects the outcome of the most recent real request to each device, so
+   checking it before any request has been made proves nothing about
+   whether the account's key actually works. Also confirm that connecting
+   from outside the permitted management-IP range is refused by PAN-OS.

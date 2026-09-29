@@ -12,8 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 const API_KEY: &str = "readyz-test-api-key";
 
-/// A single-purpose mock PAN-OS endpoint that always answers `unauthorized`
-/// (XML API code 16), regardless of what was requested.
+/// A single-purpose mock PAN-OS endpoint that always answers with an HTTP
+/// 403 "Invalid Credential" rejection, regardless of what was requested --
+/// the shape PAN-OS actually uses for a revoked, invalid, or expired API
+/// key (an HTTP 200 wrapping an XML error code is not what a bad key
+/// produces).
 struct UnauthorizedMock {
     endpoint: String,
     cert_path: PathBuf,
@@ -43,7 +46,10 @@ impl UnauthorizedMock {
         let app = axum::Router::new().route(
             "/api/",
             axum::routing::post(|| async {
-                r#"<response status="error" code="16"><msg><line>Invalid credential</line></msg></response>"#
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    r#"<response status="error" code="403"><msg><line>Invalid Credential</line></msg></response>"#,
+                )
             }),
         );
         let handle = axum_server::Handle::new();
@@ -140,8 +146,9 @@ async fn readyz_flips_to_failing_after_a_panos_auth_error() {
     let before = readyz(served.address).await;
     assert_eq!(before.status(), reqwest::StatusCode::OK);
 
-    // Trigger one real request against the mock, which always answers
-    // "unauthorized" -- this is what an expired or revoked API key looks like.
+    // Trigger one real request against the mock, which always answers an
+    // HTTP 403 invalid-credential rejection -- this is what an expired or
+    // revoked API key looks like for real.
     let service = runtime.snapshot().service.clone();
     let error = service
         .gather_device_facts(
@@ -152,11 +159,11 @@ async fn readyz_flips_to_failing_after_a_panos_auth_error() {
             CancellationToken::new(),
         )
         .await
-        .expect_err("mock always answers unauthorized");
+        .expect_err("mock always answers invalid credential");
     assert!(
         matches!(
             error,
-            rust_panosmcp_core::PanosMcpError::Api { code: 16, .. }
+            rust_panosmcp_core::PanosMcpError::HttpStatus { status: 403, .. }
         ),
         "unexpected error: {error:?}"
     );

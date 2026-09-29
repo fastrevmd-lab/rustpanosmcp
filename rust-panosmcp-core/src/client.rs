@@ -34,10 +34,18 @@ const JOB_ID_MAX_BYTES: usize = 32;
 /// PAN-OS XML API codes that mean the configured key stopped authenticating,
 /// as opposed to a transient transport failure or an unrelated API error.
 ///
-/// `16` is "unauthorized" (bad or revoked key); `22` is "session timed out",
-/// which the XML API also raises for an expired API key. See
+/// `22` is "session timed out", which the XML API also raises for an expired
+/// API key. Code `16` ("unauthorized") is deliberately excluded: PAN-OS uses
+/// it when a *valid* key's role lacks rights for the specific command sent,
+/// which a correctly-scoped least-privilege key can trigger routinely. See
 /// [`crate::xml::panos_api_code_name`].
-const AUTH_FAILURE_CODES: [i32; 2] = [16, 22];
+const AUTH_FAILURE_CODES: [i32; 1] = [22];
+
+/// HTTP statuses PAN-OS uses to reject a request before it can even reach
+/// the XML API layer -- the shape a revoked, invalid, or otherwise
+/// credential-rejected key actually returns (an HTTP 200 wrapping an XML
+/// error code is not what a bad key produces).
+const AUTH_FAILURE_HTTP_STATUSES: [u16; 2] = [401, 403];
 
 /// Pooled PAN-OS API client for exactly one validated inventory device.
 #[derive(Clone)]
@@ -286,6 +294,11 @@ impl PanosClient {
         match outcome {
             Ok(_) => self.auth_healthy.store(true, Ordering::Relaxed),
             Err(PanosMcpError::Api { code, .. }) if AUTH_FAILURE_CODES.contains(code) => {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            Err(PanosMcpError::HttpStatus { status, .. })
+                if AUTH_FAILURE_HTTP_STATUSES.contains(status) =>
+            {
                 self.auth_healthy.store(false, Ordering::Relaxed);
             }
             Err(_) => {}

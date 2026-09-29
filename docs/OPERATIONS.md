@@ -161,13 +161,24 @@ never grants mutation tools.
 
 ## PAN-OS API-key lifetime and rotation
 
-A PAN-OS API key does not expire on its own; it stays valid until the issuing
-administrator account is disabled/deleted, its password changes (the key is
-derived from the account credential), an administrator explicitly revokes it
-(`request api-key-format`/`op` key revocation, PAN-OS-version-dependent), or
-the API Key Certificate switch below invalidates it. Treat "no built-in TTL"
-as a reason to rotate on a schedule yourself, not as a reason to skip
-rotation.
+An API key's lifetime is governed by the firewall's **API Key Lifetime**
+setting (Device > Setup > Management > Authentication Settings, or
+`set mgt-config authentication-profile <name> api-key-lifetime <minutes>`
+on modern releases): a positive value expires the key that many minutes
+after it was generated, and `0` — the factory default — means the key never
+expires on its own. Do not rely on the default; set an explicit lifetime
+under change control so a leaked or forgotten key is not valid forever.
+
+Independent of that setting, a key also stops working when: the issuing
+administrator account is disabled/deleted; its password changes (the key is
+derived from the account credential); an administrator explicitly revokes it
+(`request api-key revoke` on modern PAN-OS, or the equivalent Web UI/Panorama
+**Expire All API Keys** action, which revokes every key on the device at
+once); or the API Key Certificate switch below invalidates it. In every one
+of these cases the firewall rejects the key with an HTTP-level 401/403 (not
+an HTTP 200 wrapping an XML error code), which this server's `panos_auth`
+`/readyz` check treats as an auth failure (see below) — so an expired or
+revoked key is visible operationally even before rotation.
 
 **Prefer a file-based key over an environment-variable key.** Both
 `api_key.type` values (`file`, `env`) are supported in inventory (see
@@ -191,11 +202,19 @@ permits overlap; otherwise schedule the brief cutover. Inspect PAN-OS
 administrator logs and rust-panosmcp audit events. A reload validates
 files and policy but cannot prove a new key to the firewall until a
 request is made — watch `GET /readyz`, which fails the check named
-`panos_auth` as soon as any device's most recent request comes back
-`unauthorized` or `session-timed-out` (PAN-OS XML API codes 16 and 22),
-and recovers on the next successful request. `/readyz` starts (and stays)
-healthy for a device that has made no request yet; it reports proven
-failure, not silence.
+`panos_auth` as soon as any device's most recent request comes back an
+HTTP 401/403 rejection (an invalid, expired, or revoked key) or a PAN-OS
+XML API `session-timed-out` (code 22), and recovers on the next successful
+request. PAN-OS XML API code 16 ("unauthorized") does *not* fail this
+check on its own: PAN-OS also uses it when a valid key's role lacks rights
+for a specific command, which a correctly-scoped least-privilege key (see
+"Least-privilege PAN-OS roles" below) can trigger routinely, and treating
+it as a key failure would flap `/readyz` for the whole server on ordinary
+role-scoped traffic. `/readyz` starts (and stays) healthy for a device
+that has made no request yet; it reports proven failure, not silence, and
+only reacts to real MCP tool traffic — it does not itself poll the device,
+so a key that goes bad while a device is otherwise idle is not detected
+until the next tool call reaches it.
 
 ### The API Key Certificate switch
 
