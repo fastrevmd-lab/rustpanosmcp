@@ -8,7 +8,6 @@ use crate::{
     xml::{parse_job_id, redact_secret_material, validate_config_element, validate_write_xpath},
 };
 use mecmcp_audit::Attribution;
-use mecmcp_changeset::DeviceTransaction as _;
 use quick_xml::escape::escape;
 use rust_panosmcp_auth::CallerContext;
 use rust_panosmcp_auth::{Grant, MutationAction, MutationGrant};
@@ -429,19 +428,11 @@ pub struct OperationStatusInput {
 
 impl PanosService {
     /// Fingerprint every operator-authorized candidate subtree.
-    ///
-    /// `_cancellation` is accepted and unused. This now reads the fingerprint
-    /// through `DeviceTransaction::fingerprint`, whose signature takes no
-    /// cancellation token, so a long fingerprint read can no longer be
-    /// cancelled mid-flight the way the local helper allowed. The parameter is
-    /// kept so the public signature does not change under callers; removing it
-    /// is a separate decision, and adding cancellation to the shared trait is
-    /// another.
     pub async fn candidate_fingerprint(
         &self,
         input: CandidateFingerprintInput,
         ctx: Option<&CallerContext>,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<CandidateFingerprintOutput> {
         let mut audit = match ctx {
             Some(ctx) => AuditScope::from_caller(
@@ -459,7 +450,7 @@ impl PanosService {
         let result = async {
             let client = self.client(&input.device)?;
             require_policy(&client)?;
-            let candidate = client.fingerprint().await?;
+            let candidate = candidate_fingerprint(&client, cancellation).await?;
             Ok(CandidateFingerprintOutput {
                 device: input.device,
                 candidate_fingerprint: candidate,
@@ -501,8 +492,10 @@ impl PanosService {
             let client = self.client(&input.device)?;
             let policy = require_policy(&client)?;
             validate_change_set_actions(&input.actions, policy, grant)?;
-            let current = candidate_fingerprint(&client, cancellation).await?;
+            let current = candidate_fingerprint(&client, cancellation.clone()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
+            let running = running_fingerprint(&client, cancellation).await?;
+            require_clean_candidate(&current, &running)?;
             let now = now_unix()?;
             let id = new_operation_id()?;
 
@@ -906,6 +899,23 @@ impl PanosService {
             self.mutations.remove(&operation_id).await;
             return Err(error);
         }
+        let running = match running_fingerprint(&client, CancellationToken::new()).await {
+            Ok(value) => value,
+            Err(error) => {
+                if config_lock_held {
+                    release_config_lock_best_effort(&client).await;
+                }
+                self.mutations.remove(&operation_id).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = require_clean_candidate(&before, &running) {
+            if config_lock_held {
+                release_config_lock_best_effort(&client).await;
+            }
+            self.mutations.remove(&operation_id).await;
+            return Err(error);
+        }
         // mecmcp 0.22.0 makes `claim_change_set_for_apply` the only legal
         // `Approved -> Applying` transition, and it does the read and the write
         // under one lock so two applies cannot both read `Approved` and both
@@ -1177,6 +1187,8 @@ impl PanosService {
         let result = async {
             let before = candidate_fingerprint(&client, CancellationToken::new()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &before)?;
+            let running = running_fingerprint(&client, CancellationToken::new()).await?;
+            require_clean_candidate(&before, &running)?;
             let mut fields = vec![
                 ("type", "config".to_owned()),
                 ("action", input.action.api_name().to_owned()),
@@ -2098,6 +2110,50 @@ pub(crate) async fn candidate_fingerprint(
         digest.update(response.xml.as_bytes());
     }
     Ok(format!("sha256:{}", bytes_hex(&digest.finalize())))
+}
+
+/// Fingerprint the running (committed) configuration at every
+/// operator-authorized subtree, using the same digest construction as
+/// [`candidate_fingerprint`] so the two are directly comparable.
+pub(crate) async fn running_fingerprint(
+    client: &PanosClient,
+    cancellation: CancellationToken,
+) -> Result<String> {
+    let policy = require_policy(client)?;
+    let mut digest = Sha256::new();
+    for root in &policy.allowed_xpath_roots {
+        if cancellation.is_cancelled() {
+            return Err(PanosMcpError::Cancelled);
+        }
+        let response = client
+            .configuration(false, root, cancellation.clone())
+            .await?;
+        digest.update((root.len() as u64).to_be_bytes());
+        digest.update(root.as_bytes());
+        digest.update((response.xml.len() as u64).to_be_bytes());
+        digest.update(response.xml.as_bytes());
+    }
+    Ok(format!("sha256:{}", bytes_hex(&digest.finalize())))
+}
+
+/// Refuse a candidate that already diverges from the running configuration
+/// before this operation has written anything.
+///
+/// A caller's `expected_candidate_fingerprint` only proves the candidate has
+/// not changed since *they* observed it -- it says nothing about whether that
+/// observation was already dirty from another admin's uncommitted edits sitting
+/// in the same candidate. Comparing against the running configuration closes
+/// that gap: a clean candidate is byte-identical to what is already committed.
+fn require_clean_candidate(candidate_fp: &str, running_fp: &str) -> Result<()> {
+    if candidate_fp == running_fp {
+        Ok(())
+    } else {
+        Err(policy(
+            "candidate",
+            "candidate configuration already has pending changes outside this operation; \
+             commit or discard them before staging a new change",
+        ))
+    }
 }
 
 fn require_fingerprint(expected: &str, actual: &str) -> Result<()> {

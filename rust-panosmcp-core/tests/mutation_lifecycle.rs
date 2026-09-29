@@ -68,6 +68,10 @@ async fn api(
         let candidate = state.lock().expect("state").candidate.clone();
         return success(&format!("<result>{candidate}</result>"));
     }
+    if request_type == Some("config") && action == Some("show") {
+        let running = state.lock().expect("state").running.clone();
+        return success(&format!("<result>{running}</result>"));
+    }
     if request_type == Some("config") && action == Some("set") {
         state.lock().expect("state").candidate =
             "<config><shared><address><entry name=\"phase3\"><ip-netmask>192.0.2.3</ip-netmask></entry></address></shared></config>".to_owned();
@@ -234,10 +238,25 @@ fn persisted_operation(fixture: &Fixture, operation_id: &str) -> serde_json::Val
     persisted["state"]["operations"][operation_id].clone()
 }
 
-fn recovered_service(fixture: &Fixture) -> PanosService {
+/// Rebuild a service from the persisted state file, simulating a process
+/// restart.
+///
+/// The state file now carries an advisory lock held for the life of the
+/// service that opened it (MEC-533), so a genuine restart -- the old process
+/// exiting before the new one starts -- must be modelled by releasing
+/// `fixture.service`'s lock first, not by opening a second live instance
+/// alongside it. `fixture.service` is replaced with the recovered instance so
+/// later calls in the same test keep working against it.
+fn recovered_service(fixture: &mut Fixture) -> PanosService {
+    let placeholder_inventory =
+        Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
+            .expect("placeholder inventory");
+    let placeholder = PanosService::new(placeholder_inventory).expect("unlocked placeholder");
+    drop(std::mem::replace(&mut fixture.service, placeholder));
+
     let inventory = Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
         .expect("recovered inventory");
-    PanosService::new_with_options(
+    let recovered = PanosService::new_with_options(
         inventory,
         Some(&fixture.state_path),
         false,
@@ -246,7 +265,9 @@ fn recovered_service(fixture: &Fixture) -> PanosService {
         true,
         None,
     )
-    .expect("recover persistent mutation state")
+    .expect("recover persistent mutation state");
+    fixture.service = recovered.clone();
+    recovered
 }
 
 #[tokio::test]
@@ -257,7 +278,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     let cap = CapturingWriter::default();
     let _guard = common::install_audit_capture(cap.clone());
 
-    let fixture = fixture(false, false).await;
+    let mut fixture = fixture(false, false).await;
     let initial = fixture
         .service
         .candidate_fingerprint(
@@ -396,7 +417,7 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     assert_eq!(approved.state, "approved");
     assert_eq!(approved.approver.as_deref(), Some("reviewer"));
 
-    let recovered = recovered_service(&fixture);
+    let recovered = recovered_service(&mut fixture);
 
     let apply = ApplyChangeSetInput {
         device: "mock-fw".to_owned(),
@@ -471,7 +492,11 @@ async fn change_set_requires_exact_independent_approval_and_applies_as_one_opera
     let persisted = persisted_operation(&fixture, &operation_id);
     assert_eq!(persisted["state"], "discarded");
     assert_eq!(persisted["config_lock_held"], false);
-    let restarted = recovered_service(&fixture);
+    // Drop this handle's clone of the state-file lock before recovering
+    // again -- `fixture.service` holds the other clone, and `recovered_service`
+    // only releases the one in `fixture.service`.
+    drop(recovered);
+    let restarted = recovered_service(&mut fixture);
     assert_eq!(
         restarted
             .operation_status(
@@ -572,7 +597,7 @@ async fn approve_change_set_by_agent_actor_is_refused() {
 #[tokio::test]
 async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
     let _serial = AUDIT_SERIAL.lock().await;
-    let fixture = fixture(false, false).await;
+    let mut fixture = fixture(false, false).await;
     let initial = fixture
         .service
         .candidate_fingerprint(
@@ -692,7 +717,7 @@ async fn stage_diff_validate_detached_commit_and_discard_are_guarded() {
     assert_eq!(committed["state"], "committed");
     assert_eq!(committed["config_lock_held"], false);
     assert_eq!(
-        recovered_service(&fixture)
+        recovered_service(&mut fixture)
             .operation_status(
                 OperationStatusInput {
                     device: "mock-fw".to_owned(),
@@ -978,7 +1003,7 @@ async fn failed_commit_remains_recoverable_by_discard() {
 #[tokio::test]
 async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
     let _serial = AUDIT_SERIAL.lock().await;
-    let fixture = fixture(false, true).await;
+    let mut fixture = fixture(false, true).await;
     let initial = fixture
         .service
         .candidate_fingerprint(
@@ -1034,7 +1059,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
             .expect("recovery details")
             .contains("discard succeeded but PAN-OS configuration lock release failed")
     );
-    let restarted = recovered_service(&fixture);
+    let restarted = recovered_service(&mut fixture);
     assert_eq!(
         restarted
             .operation_status(
@@ -1055,7 +1080,7 @@ async fn discard_lock_release_failure_is_persisted_as_indeterminate() {
 #[tokio::test]
 async fn committed_job_with_lock_release_failure_requires_reconciliation() {
     let _serial = AUDIT_SERIAL.lock().await;
-    let fixture = fixture(false, true).await;
+    let mut fixture = fixture(false, true).await;
     let initial = fixture
         .service
         .candidate_fingerprint(
@@ -1117,7 +1142,7 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
             .contains("commit succeeded but PAN-OS configuration lock release failed")
     );
     assert_eq!(
-        recovered_service(&fixture)
+        recovered_service(&mut fixture)
             .operation_status(
                 OperationStatusInput {
                     device: "mock-fw".to_owned(),
@@ -1130,5 +1155,98 @@ async fn committed_job_with_lock_release_failure_requires_reconciliation() {
             .expect("indeterminate commit after restart")
             .state,
         "indeterminate"
+    );
+}
+
+/// A candidate that already diverges from the running configuration --
+/// someone else's uncommitted edits sitting in the same candidate, outside
+/// this tool's own change tracking -- must refuse `stage_config` and
+/// `create_change_set` rather than stack a new change on top of them.
+///
+/// The caller's `expected_candidate_fingerprint` alone cannot catch this: it
+/// is captured by freshly reading the (already dirty) candidate, so it
+/// trivially matches. Only a comparison against the running configuration
+/// exposes the foreign edit.
+#[tokio::test]
+async fn dirty_candidate_with_foreign_pending_changes_is_refused() {
+    let _serial = AUDIT_SERIAL.lock().await;
+    let fixture = fixture(false, false).await;
+
+    // Simulate a foreign admin's uncommitted edit landing directly in the
+    // candidate, bypassing this service entirely (e.g. GUI or CLI session).
+    fixture.state.lock().expect("state").candidate =
+        "<config><shared><address><entry name=\"rogue\"><ip-netmask>192.0.2.9</ip-netmask></entry></address></shared></config>"
+            .to_owned();
+
+    // A caller who freshly observes the now-dirty candidate gets a
+    // fingerprint that matches it exactly -- the per-operation guard alone
+    // would let this through.
+    let dirty = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+
+    let stage_error = fixture
+        .service
+        .stage_config(
+            StageConfigInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: dirty.candidate_fingerprint.clone(),
+                action: StageAction::Set,
+                xpath: "/config/shared/address".to_owned(),
+                element: Some(
+                    "<entry name=\"legit\"><ip-netmask>192.0.2.10</ip-netmask></entry>".to_owned(),
+                ),
+                destructive_confirmation: None,
+            },
+            "token-a",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("stage_config must refuse a candidate with foreign pending changes");
+    assert!(
+        stage_error.to_string().contains("pending changes"),
+        "refusal must name the dirty candidate: {stage_error}"
+    );
+    assert_eq!(
+        fixture.state.lock().expect("state").candidate,
+        "<config><shared><address><entry name=\"rogue\"><ip-netmask>192.0.2.9</ip-netmask></entry></address></shared></config>",
+        "a refused stage must not touch the device"
+    );
+
+    let change_set_error = fixture
+        .service
+        .create_change_set(
+            CreateChangeSetInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: dirty.candidate_fingerprint,
+                actions: vec![ChangeSetAction {
+                    action: StageAction::Set,
+                    xpath: "/config/shared/address".to_owned(),
+                    element: Some(
+                        "<entry name=\"legit\"><ip-netmask>192.0.2.10</ip-netmask></entry>"
+                            .to_owned(),
+                    ),
+                    destructive_confirmation: None,
+                }],
+            },
+            None,
+            "token-a",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("create_change_set must refuse a candidate with foreign pending changes");
+    assert!(
+        change_set_error.to_string().contains("pending changes"),
+        "refusal must name the dirty candidate: {change_set_error}"
     );
 }
