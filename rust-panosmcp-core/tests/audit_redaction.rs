@@ -50,6 +50,9 @@ async fn api(
         let candidate = state.lock().expect("state").candidate.clone();
         return success(&format!("<result>{candidate}</result>"));
     }
+    if request_type == Some("config") && action == Some("show") {
+        return success("<result><config><shared><address/></shared></config></result>");
+    }
     if request_type == Some("config") && action == Some("set") {
         state.lock().expect("state").candidate =
             "<config><shared><address><entry name=\"test\"><ip-netmask>192.0.2.1</ip-netmask></entry></address></shared></config>".to_owned();
@@ -86,6 +89,9 @@ async fn api(
     }
     if command.contains("<revert><config><partial>") {
         return success("<result><msg>reverted</msg></result>");
+    }
+    if command == "<check><pending-changes></pending-changes></check>" {
+        return success("<result>no</result>");
     }
 
     r#"<response status="error"><msg><line>unknown request</line></msg></response>"#.to_owned()
@@ -204,8 +210,11 @@ async fn redaction_applies_to_newly_audited_tools() {
                         .to_owned(),
                 ),
                 destructive_confirmation: None,
+                move_position: None,
+                move_destination: None,
             },
             "test-owner",
+            None,
             None,
             cancel,
         )

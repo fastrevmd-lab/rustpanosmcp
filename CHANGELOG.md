@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Container images now publish to `ghcr.io/mechubsec/rustpanosmcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
+
+## [0.15.0] - 2026-09-29
+
 ### Added
 
+- **Panorama read-only tools: `list_panorama_device_groups`,
+  `list_panorama_templates`, `get_panorama_push_status`.** Structured reads
+  over the same audited/blocklist-checked config path `get_panos_config`
+  already uses — device groups and templates return typed summaries (name
+  plus member serials / declared variable names) instead of raw XML, and push
+  status parses a `show jobs id <id>` response into overall and
+  per-target-firewall state. No Panorama write or push-trigger path is added.
+  See the MCP tools reference in the README.
 - **CVE-2026-0310 version-floor advisory in `gather_device_facts`.** The
   response now includes a non-empty `advisories` list when the reported
   `sw-version` is below the published fix level for its release train
@@ -47,8 +63,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `authorization=denied` with `reason=direct_commit_disabled`, instead of a
   generic `result=error`.
 - Pinned the `mecmcp-*` crates to the released `v0.24.0` tag instead of an
-  unreleased commit.
+  unreleased commit, then moved to `v0.24.1` (default-on request rate limits).
 - Raised Rust MSRV from 1.88 to 1.89.
+- Fixed the Docker/compose setup docs and examples to match the image: the
+  ENTRYPOINT bakes in `--tokens-file` and `--state-file` as well as
+  `--device-mapping`, so passing any of the three again on `docker run` /
+  `command:` made the server refuse to start with clap's "cannot be used
+  multiple times" error. `packaging/container/compose.example.yaml` also
+  pinned a stale `0.2.2` image tag. See `docs/HOW-TO-SETUP-DOCKER.md`.
+- Fixed 14 other places where documentation had drifted from the code: the
+  README's advertised version, install-path token file locations, tool count,
+  the `--audit-format` default and accepted values, the CLI reference's
+  missing `token set-scopes` subcommand, `SECURITY.md`'s supported-version
+  range, and `docs/OPERATIONS.md`'s stale title and release-verification
+  example.
 
 ## [0.14.0] - 2026-09-16
 
@@ -437,7 +465,7 @@ terminal `committed` record with no lock held.
 
 ### Changed
 
-- **Rate limiting now uses a token-bucket algorithm instead of a fixed sliding window**, via the shared [`mecmcp-transport`](https://github.com/fastrevmd-lab/mecmcp) crate (`transport-v0.1.6`). The CLI flags `--ip-rate-per-minute` and `--token-rate-per-minute` are unchanged, but the enforcement is stricter: the old fixed-window implementation admitted up to 2× the nominal rate across a window boundary (a client bursting exactly at the edge of a 60-second window could send the full per-minute quota twice). The token bucket does not allow this — sustained requests are bounded to exactly the configured rate, and clients that previously survived a boundary burst will now receive HTTP 429. This matches `rust-junosmcp`'s behavior as of its v0.8.0 release.
+- **Rate limiting now uses a token-bucket algorithm instead of a fixed sliding window**, via the shared [`mecmcp-transport`](https://github.com/mechubsec/mecmcp) crate (`transport-v0.1.6`). The CLI flags `--ip-rate-per-minute` and `--token-rate-per-minute` are unchanged, but the enforcement is stricter: the old fixed-window implementation admitted up to 2× the nominal rate across a window boundary (a client bursting exactly at the edge of a 60-second window could send the full per-minute quota twice). The token bucket does not allow this — sustained requests are bounded to exactly the configured rate, and clients that previously survived a boundary burst will now receive HTTP 429. This matches `rust-junosmcp`'s behavior as of its v0.8.0 release.
 
   *(Moved here from the 0.4.0 section, where it was filed by mistake. v0.4.0's tree still contains `FixedWindowLimiter`; the token bucket landed afterwards in #54. Anyone reading 0.4.0's notes would have believed boundary bursts were already bounded.)*
 
@@ -466,7 +494,7 @@ terminal `committed` record with no lock held.
 
 ### Added
 
-- **Structured audit logging via the shared [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crate** (`audit-v0.1.5`). One event per tool call with caller attribution, target devices, outcome, and execution duration. Previously the server contained only an `AUDIT_TARGET` constant with no active logging.
+- **Structured audit logging via the shared [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crate** (`audit-v0.1.5`). One event per tool call with caller attribution, target devices, outcome, and execution duration. Previously the server contained only an `AUDIT_TARGET` constant with no active logging.
 - **Change-set lifecycle auditing.** `create_panos_change_set`, `approve_panos_change_set`, and `apply_panos_change_set` each emit an audit event. The approval event carries both the **change-set id and the fingerprint digest**, providing independent evidence that a second principal reviewed the exact digest later applied. Previously `mutation-state.json` — a file the server itself rewrites — was the only record of approval.
 - **New CLI flags for audit configuration:**
   - `--audit-format` — choose `json` (default, machine-parseable) or `pretty` (human-readable).
@@ -487,7 +515,7 @@ terminal `committed` record with no lock held.
 
 ### Changed
 
-- **Authentication now comes from the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate** (`auth-v0.1.4`), replacing this repo's own `token.rs`, `store.rs`, and `file.rs`. `rust-panosmcp-auth` is now a thin vendor layer holding the PAN-OS write grant (`MutationGrant`) and the tool registry. Roughly 1,200 lines of duplicated authentication code were removed. Token scopes, the change-set lifecycle, and the MCP tool surface are unchanged.
+- **Authentication now comes from the shared [`mecmcp-auth`](https://github.com/mechubsec/mecmcp) crate** (`auth-v0.1.4`), replacing this repo's own `token.rs`, `store.rs`, and `file.rs`. `rust-panosmcp-auth` is now a thin vendor layer holding the PAN-OS write grant (`MutationGrant`) and the tool registry. Roughly 1,200 lines of duplicated authentication code were removed. Token scopes, the change-set lifecycle, and the MCP tool surface are unchanged.
 - A **new** `tokens.json` is written with envelope `version` 1 rather than 2. Both are accepted on read, and prior releases accept either, so this is compatible in both directions.
 
 ### Fixed
@@ -515,7 +543,7 @@ No token needs to be reissued and no client needs a new credential.
 
 ## [0.2.2] - 2026-07-11
 
-[Release](https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.2)
+[Release](https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.2)
 
 ### Changed
 
@@ -530,7 +558,7 @@ No token needs to be reissued and no client needs a new credential.
 
 ## [0.2.1] - 2026-07-11
 
-[Release](https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.1)
+[Release](https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.1)
 
 ### Fixed
 
@@ -549,7 +577,7 @@ No token needs to be reissued and no client needs a new credential.
 
 ## [0.2.0] - 2026-07-11
 
-[Release](https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.0)
+[Release](https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.0)
 
 ### Added
 
@@ -578,7 +606,7 @@ No token needs to be reissued and no client needs a new credential.
 
 ## [0.1.0] - 2026-07-10
 
-[Release](https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.1.0)
+[Release](https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.1.0)
 
 Initial release.
 
@@ -620,7 +648,7 @@ Initial release.
 - Mutation guardrails: fingerprint drift refused, narrow XPath roots, explicit delete confirmation, admin-scoped operations, per-device serialization, config lock lifecycle.
 - Protected secrets: environment-variable and protected-file references keep credentials out of inventory JSON; file reads use `O_NOFOLLOW` and validate the opened descriptor on Unix.
 
-[0.2.2]: https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.2
-[0.2.1]: https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.1
-[0.2.0]: https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.2.0
-[0.1.0]: https://github.com/fastrevmd-lab/rustpanosmcp/releases/tag/v0.1.0
+[0.2.2]: https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.2
+[0.2.1]: https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.1
+[0.2.0]: https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.2.0
+[0.1.0]: https://github.com/mechubsec/rustpanosmcp/releases/tag/v0.1.0

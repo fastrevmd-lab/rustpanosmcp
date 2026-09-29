@@ -1,6 +1,6 @@
 services:
   rust-panosmcp:
-    image: ghcr.io/fastrevmd-lab/rust-panosmcp:0.2.2
+    image: ghcr.io/mechubsec/rustpanosmcp:0.15.0
     user: "65532:65532"
     read_only: true
     cap_drop: ["ALL"]
@@ -13,10 +13,13 @@ services:
       - ./state:/var/lib/rust-panosmcp:rw
     ports:
       - "30031:30031"
-    # --device-mapping is baked into the image's ENTRYPOINT — do not repeat it
-    # here. `command:` is appended to ENTRYPOINT (not merged with CMD), so
-    # passing it again duplicates the flag and rust-panosmcp refuses to start
-    # with a clap "cannot be used multiple times" error.
+    # --device-mapping, --tokens-file, and --state-file are all baked into the
+    # image's ENTRYPOINT — do not repeat any of them here. `command:` is
+    # appended to ENTRYPOINT (not merged with CMD), so passing one again
+    # duplicates the flag and rust-panosmcp refuses to start with a clap
+    # "cannot be used multiple times" error. tokens.json lives in ./state,
+    # alongside mutation-state.json, since ENTRYPOINT points --tokens-file at
+    # /var/lib/rust-panosmcp/tokens.json.
     command:
       - --transport
       - streamable-http
@@ -24,10 +27,6 @@ services:
       - 0.0.0.0
       - --port
       - "30031"
-      - --tokens-file
-      - /etc/rust-panosmcp/tokens.json
-      - --state-file
-      - /var/lib/rust-panosmcp/mutation-state.json
       - --tls-cert
       - /etc/rust-panosmcp/server.crt
       - --tls-key

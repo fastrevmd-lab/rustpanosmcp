@@ -172,6 +172,29 @@ async fn all_read_tools_reach_mock_https_and_mutating_op_is_refused() {
     assert!(!error);
     assert_eq!(config["source"], "candidate");
 
+    let (error, device_groups) = result_json(
+        &client,
+        "list_panorama_device_groups",
+        json!({"device":"e2e-fw"}),
+    )
+    .await;
+    assert!(!error);
+    assert_eq!(device_groups["device"], "e2e-fw");
+    assert_eq!(
+        device_groups["device_groups"],
+        Value::Array(Vec::new()),
+        "mock config response declares no device-group entries"
+    );
+
+    let (error, templates) = result_json(
+        &client,
+        "list_panorama_templates",
+        json!({"device":"e2e-fw"}),
+    )
+    .await;
+    assert!(!error);
+    assert_eq!(templates["templates"], Value::Array(Vec::new()));
+
     let before_denial = state.requests.load(Ordering::SeqCst);
     let (error, denial) = result_json(
         &client,
@@ -187,7 +210,7 @@ async fn all_read_tools_reach_mock_https_and_mutating_op_is_refused() {
     );
     assert_eq!(state.requests.load(Ordering::SeqCst), before_denial);
     assert_eq!(state.bad_headers.load(Ordering::SeqCst), 0);
-    assert_eq!(state.requests.load(Ordering::SeqCst), 3);
+    assert_eq!(state.requests.load(Ordering::SeqCst), 5);
 
     client.cancel().await.expect("MCP shutdown");
     mcp_server.abort();

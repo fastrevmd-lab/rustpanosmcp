@@ -51,6 +51,8 @@ async fn guarded_add_commit_delete_commit_round_trip() {
             "<entry name=\"{PROBE_NAME}\"><ip-netmask>192.0.2.3</ip-netmask><description>reversible rust-panosmcp Phase 3 lab probe</description></entry>"
         )),
         destructive_confirmation: None,
+        move_position: None,
+        move_destination: None,
     };
     run_commit(&service, set, "phase3-lab").await;
     assert!(
@@ -68,6 +70,8 @@ async fn guarded_add_commit_delete_commit_round_trip() {
         xpath: object_xpath.clone(),
         element: None,
         destructive_confirmation: Some(format!("DELETE {object_xpath}")),
+        move_position: None,
+        move_destination: None,
     };
     run_commit(&service, delete, "phase3-lab").await;
     assert!(
@@ -80,7 +84,7 @@ async fn guarded_add_commit_delete_commit_round_trip() {
 
 async fn run_commit(service: &PanosService, input: StageConfigInput, owner: &str) {
     let staged = service
-        .stage_config(input, owner, None, CancellationToken::new())
+        .stage_config(input, owner, None, None, CancellationToken::new())
         .await
         .expect("stage");
     assert!(

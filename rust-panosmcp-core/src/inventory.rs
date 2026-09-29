@@ -156,6 +156,19 @@ pub struct DeviceConfig {
 }
 
 /// Per-device blocklist rules for read-only tools.
+///
+/// This is not a confidentiality control on its own (MEC-528 F2): a rule
+/// denies an xpath that matches its glob literally, but reading an
+/// *ancestor* of a blocked subtree (`/config`, the default when no xpath is
+/// given, is an ancestor of every subtree) returns that subtree's content
+/// too, and no glob written against the descendant path can catch that --
+/// the ancestor request never contains the descendant's text. Rely on the
+/// PAN-OS admin role restriction (this server's role must not be able to
+/// read `<mgt-config>` or certificate private keys at all) and
+/// `redact_secret_material`'s structural/value-shape passes as the actual
+/// confidentiality controls; treat this blocklist as an operator-facing
+/// convenience for narrowing *intentional* reads, not a boundary a caller is
+/// prevented from reading past.
 #[derive(Debug, Clone)]
 pub(crate) struct BlocklistRules {
     /// Glob patterns denying operational commands (execute_panos_op).

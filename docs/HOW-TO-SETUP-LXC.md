@@ -42,12 +42,12 @@ the old binary has been replaced — an outage, not a build failure.
 Take the binary from the release image, which CI builds against the right glibc:
 
 ```bash
-docker create --name px ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0
+docker create --name px ghcr.io/mechubsec/rustpanosmcp:0.15.0
 docker cp px:/usr/local/bin/rust-panosmcp ./rust-panosmcp
 docker rm px
 ```
 
-No docker? `skopeo copy docker://ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0 dir:/tmp/img`
+No docker? `skopeo copy docker://ghcr.io/mechubsec/rustpanosmcp:0.15.0 dir:/tmp/img`
 then find the layer containing `usr/local/bin/rust-panosmcp` and untar it.
 
 ## 2. Assemble the install package
@@ -70,7 +70,7 @@ Assemble it:
 cd /path/to/rust-panosmcp
 mkdir -p bin
 install -m 0755 ./rust-panosmcp bin/rust-panosmcp
-tar czf rust-panosmcp_0.14.0.tar.gz \
+tar czf rust-panosmcp_0.15.0.tar.gz \
     bin/rust-panosmcp \
     packaging/systemd/rust-panosmcp.service \
     packaging/systemd/rust-panosmcp.sysusers \
@@ -113,7 +113,7 @@ IP `192.0.2.11`, and tag `labmode` instead of `twoperson`.
 `bash ./packaging/lxc/install.sh`.
 
 ```bash
-pct push 612 rust-panosmcp_0.14.0.tar.gz /tmp/pkg.tar.gz
+pct push 612 rust-panosmcp_0.15.0.tar.gz /tmp/pkg.tar.gz
 pct exec 612 -- bash -lc 'cd /tmp && tar xzf pkg.tar.gz && bash ./packaging/lxc/install.sh'
 ```
 
@@ -301,7 +301,7 @@ The drop-in has no origin allowlist. An off-loopback listener must supply at
 least one `--allowed-origin` value. This is the trusted browser application
 origin (the Origin header), including the scheme (`http://` or `https://`) and
 port (e.g., `--allowed-origin http://console.example.org`). The terse error
-format is tracked as fastrevmd-lab/mecmcp#358.
+format is tracked as mechubsec/mecmcp#358.
 
 **Service active but every call returns 421 `Host '<host>' is not allowed`** —
 `--allowed-host` does not match the address clients dial (the HTTP Host header).

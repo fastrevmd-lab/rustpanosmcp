@@ -12,7 +12,7 @@
 
 > **Unofficial / community project.** This is an independent community project and does not claim affiliation with or endorsement by Palo Alto Networks. Product names and trademarks are used only to identify the systems with which the software interoperates.
 
-The repository contains the v0.4.0 release: a bearer-protected server with structured audit logging, guarded PAN-OS candidate configuration lifecycle, and hardened release packaging, with authentication and auditing provided by the shared [`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) and [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crates.
+The repository contains the v0.15.0 release: a bearer-protected server with structured audit logging, guarded PAN-OS candidate configuration lifecycle, and hardened release packaging, with authentication and auditing provided by the shared [`mecmcp-auth`](https://github.com/mechubsec/mecmcp) and [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crates.
 
 The project goal is a small, fast, production-oriented server with the same
 security posture as `rust-junosmcp`: bearer-token authentication, per-token
@@ -44,17 +44,17 @@ Choose one of three install paths:
 
 #### Release tarball (Linux x86_64)
 
-Download the latest release from [GitHub releases](https://github.com/fastrevmd-lab/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
+Download the latest release from [GitHub releases](https://github.com/mechubsec/rustpanosmcp/releases). Assets follow the pattern `rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz` with a corresponding `.sha256` file.
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.15.0/rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.15.0/rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract
-tar xzf rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-cd rust-panosmcp-v0.4.0
+tar xzf rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.15.0
 
 # Install the binary and systemd assets
 sudo install -m 0755 bin/rust-panosmcp /usr/local/bin/rust-panosmcp
@@ -89,19 +89,19 @@ For a dedicated unprivileged LXC container on Proxmox or standalone systemd-nspa
 
 ```bash
 # Download and verify
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/fastrevmd-lab/rustpanosmcp/releases/download/v0.4.0/rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.15.0/rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/mechubsec/rustpanosmcp/releases/download/v0.15.0/rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 # Extract and run the installer
-tar xzf rust-panosmcp-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-cd rust-panosmcp-v0.4.0
+tar xzf rust-panosmcp-v0.15.0-x86_64-unknown-linux-gnu.tar.gz
+cd rust-panosmcp-v0.15.0
 sudo packaging/lxc/install.sh
 
 # Configure the inventory and mint the first token
 sudo vi /etc/rust-panosmcp/devices.json
 sudo rust-panosmcp token add \
-  --tokens-file /etc/rust-panosmcp/tokens.json \
+  --tokens-file /var/lib/rust-panosmcp/tokens.json \
   --name initial-token \
   --devices fw-example \
   --tools list_devices,gather_device_facts,execute_panos_op,get_panos_config
@@ -114,27 +114,27 @@ The installer creates the `rust-panosmcp` user and directories via `systemd-sysu
 
 #### Docker / GHCR
 
-Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline. For a complete setup guide including both two-person and lab modes, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
+Prebuilt images are published to `ghcr.io/mechubsec/rustpanosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline. For a complete setup guide including both two-person and lab modes, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
 
 ```bash
 # Pull the image
-docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:latest
-
-# Run with mounted config (see compose.example.yaml)
-docker run --rm -i \
-  -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
-  -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:latest
+docker pull ghcr.io/mechubsec/rustpanosmcp:latest
 ```
 
-A `compose.example.yaml` is included in the repository.
+The default `CMD` binds `127.0.0.1:30031` *inside* the container, so a bare
+`docker run` with no `-p` and no `--host`/`--allowed-host`/`--allowed-origin`
+starts cleanly but is not reachable from outside the container. Follow
+[HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for a working two-person
+or lab-mode `docker run` invocation (including the port publish and the flags
+the baked-in ENTRYPOINT already supplies) or use the included
+`compose.example.yaml`.
 
 #### Build from source
 
 Requires Rust 1.89 or newer (MSRV).
 
 ```bash
-git clone https://github.com/fastrevmd-lab/rustpanosmcp.git
+git clone https://github.com/mechubsec/rustpanosmcp.git
 cd rustpanosmcp
 cargo build --release --locked
 ./target/release/rust-panosmcp --version
@@ -191,8 +191,16 @@ typed errors, timeouts, cancellation, output caps, and a per-device semaphore.
 Phase 2 added digest-only bearer tokens, exact device/tool scopes, atomic
 inventory/token reload, TLS Streamable HTTP, Host/Origin validation, bounded
 request bodies, IP/token rate limits, and audit-safe request tracing. Both
-transports expose four read-only tools: `list_devices`,
-`gather_device_facts`, `execute_panos_op`, and `get_panos_config`.
+transports share the same 27 tools described in [MCP tools
+reference](#mcp-tools-reference) below; wildcard `*` token scopes reach only
+the 16 read-only ones (`list_devices`, `gather_device_facts`,
+`execute_panos_op`, `get_panos_config`, `list_panos_entries`,
+`get_panos_entry_digest`, `list_panorama_device_groups`,
+`list_panorama_templates`, `get_panorama_push_status`,
+`list_panos_rulebase_entries`, `get_panos_ha_state`, `get_panos_license_info`,
+`get_panos_content_status`, `get_panos_software_status`,
+`test_panos_security_policy_match`, `query_panos_logs`); the 11
+lifecycle/change tools must be named explicitly.
 
 Phase 3 adds opt-in candidate fingerprints, narrow XPath policy, PAN-OS config
 locks, per-device serialization, stage/diff/full validation, admin-scoped
@@ -224,7 +232,7 @@ interfaces. The published release and guarded lab rollout evidence is in
 Panorama work remains deferred.
 
 v0.3.0 moves authentication onto the shared
-[`mecmcp-auth`](https://github.com/fastrevmd-lab/mecmcp) crate, retiring this
+[`mecmcp-auth`](https://github.com/mechubsec/mecmcp) crate, retiring this
 repository's own token, store, and token-file implementations in favour of one
 shared, separately tested crate. The PAN-OS tool surface, authorization scopes,
 inventory, and mutation-state interfaces are unchanged. Two operator-visible
@@ -246,11 +254,14 @@ Phase 4 release evidence is in
 rotation, backup/recovery, and upgrades are covered by
 [docs/OPERATIONS.md](docs/OPERATIONS.md); see also
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md),
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and [SECURITY.md](SECURITY.md).
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and [SECURITY.md](SECURITY.md). For
+the PAN-OS-side least-privilege administrator accounts (distinct from the MCP
+bearer roles above), see
+[docs/PANOS_ADMIN_ROLES.md](docs/PANOS_ADMIN_ROLES.md).
 
 ## MCP tools reference
 
-The server exposes 15 MCP tools, grouped by operation type:
+The server exposes 27 MCP tools, grouped by operation type:
 
 ### Read-only tools
 
@@ -258,6 +269,18 @@ The server exposes 15 MCP tools, grouped by operation type:
 - **`gather_device_facts`** — Gather hostname, model, serial, version, management IP, and uptime from an authorized device.
 - **`execute_panos_op`** — Execute a read-only PAN-OS XML command rooted at `<show>` on an authorized device, with output caps.
 - **`get_panos_config`** — Read running or candidate PAN-OS configuration at a validated `/config` XPath on an authorized device.
+- **`list_panos_entries`** — Page through a rule or object list container's `<entry>` children as structured JSON, truncation-marked rather than erroring on a large rulebase.
+- **`get_panos_entry_digest`** — Fetch and hash exactly one PAN-OS config entry by XPath, for single-rule drift detection.
+- **`list_panorama_device_groups`** — List Panorama device groups and the serial numbers of their member firewalls.
+- **`list_panorama_templates`** — List Panorama templates and the names of their declared variables.
+- **`get_panorama_push_status`** — Read a Panorama commit-all/push job's overall and per-target-firewall status by job id.
+- **`list_panos_rulebase_entries`** — List security rules, NAT rules, address objects, or service objects for a vsys as structured JSON, paginated and truncation-marked.
+- **`get_panos_ha_state`** — Read PAN-OS high-availability state (enabled, mode, local and peer state) on an authorized device.
+- **`get_panos_license_info`** — Read PAN-OS license status (feature, serial, issued, expires, expired) on an authorized device.
+- **`get_panos_content_status`** — Read PAN-OS content version status (version, released, downloaded, current) on an authorized device.
+- **`get_panos_software_status`** — Read PAN-OS software version status (version, released, downloaded, current, latest) on an authorized device.
+- **`test_panos_security_policy_match`** — Test which PAN-OS security rule, if any, a simulated packet would match on an authorized device.
+- **`query_panos_logs`** — Fetch a bounded window of PAN-OS logs (traffic, threat, system, or config) on an authorized device; always capped, never unbounded.
 
 ### Candidate lifecycle tools (mutation)
 
@@ -334,13 +357,13 @@ code from the underlying policy library.
 
 ## Audit logging
 
-v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/fastrevmd-lab/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
+v0.4.0 introduces structured audit logging via the shared [`mecmcp-audit`](https://github.com/mechubsec/mecmcp) crate. One event is emitted per tool call with caller attribution, target devices, outcome, and execution duration.
 
 Change-set lifecycle auditing provides independent evidence of approval: the `approve_panos_change_set` event carries both the change-set id and the fingerprint digest, proving that a second principal reviewed the exact digest later applied via `apply_panos_change_set`.
 
 ### Audit configuration flags
 
-- **`--audit-format {json|pretty}`** — Choose `json` (default, machine-parseable) or `pretty` (human-readable).
+- **`--audit-format {text|json}`** — Choose `text` (default, human-readable) or `json` (machine-parseable).
 - **`--audit-log-file <PATH>`** — Write audit events to a file path.
 - **`--audit-journald`** — Emit audit events to the systemd journal.
 - **`--audit-redact`** — HMAC-pseudonymise declared fields (device names, caller identity) so the log can be shipped to a SIEM without leaking operational identifiers.
@@ -351,7 +374,7 @@ All audit targets are optional and can be combined. When no audit target is spec
 ### Forwarding to the event store
 
 The audit trail does not stay on this host. This server follows the family
-standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/fastrevmd-lab/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
+standard — [AUDIT-FORWARDING-STANDARD.md](https://github.com/mechubsec/mecmcp/blob/main/docs/AUDIT-FORWARDING-STANDARD.md).
 
 An audit record that only exists on the machine that produced it is not an audit
 trail: it is a log file on a box whose operator is the party the record is about.
@@ -371,7 +394,7 @@ server never truncates it.
 
 Records are written directly into SSDF's `ssdf.audit` as **hash-chained** rows,
 per SSDF's merged evidence contract, so that deleting or editing a row is
-detectable. Tracked in [mecmcp#292](https://github.com/fastrevmd-lab/mecmcp/issues/292).
+detectable. Tracked in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
 
 A cheaper syslog path was designed and rejected: it works, but the records are
 unchained, and every other link here is tamper-evident by construction — plan
@@ -424,6 +447,14 @@ Options:
           Absolute digest-only bearer-token file path
       --state-file <STATE_FILE>
           Absolute private JSON file for persistent change-set and operation state
+      --lab-mode
+          Run without two-person control: change sets are approved on creation
+      --approval-timeout-secs <APPROVAL_TIMEOUT_SECS>
+          Seconds a change-set approval stays valid before it expires [default: 900]
+      --allow-plane-owned-writes
+          Allow destructive operations on devices owned by a management plane
+      --allow-direct-commit
+          Allow committing an operation with no change-set approval at all
       --tls-cert <TLS_CERT>
           Absolute PEM certificate path; requires `--tls-key`
       --tls-key <TLS_KEY>
@@ -442,16 +473,63 @@ Options:
           Per-authenticated-token requests allowed per rolling minute window [default: 240]
       --request-body-limit <REQUEST_BODY_LIMIT>
           Maximum Streamable HTTP request body in bytes [default: 1048576]
+      --max-inflight-requests <MAX_INFLIGHT_REQUESTS>
+          Max concurrent in-flight requests across all callers. 0 = unlimited [default: 64]
+      --max-inflight-requests-per-token <MAX_INFLIGHT_REQUESTS_PER_TOKEN>
+          Max concurrent in-flight requests per bearer token. 0 = unlimited [default: 16]
+      --max-inflight-requests-per-target <MAX_INFLIGHT_REQUESTS_PER_TARGET>
+          Max concurrent in-flight requests per target device. 0 = unlimited [default: 4]
+      --max-sessions <MAX_SESSIONS>
+          Max concurrent MCP sessions. 0 = unlimited [default: 128]
+      --max-sessions-per-token <MAX_SESSIONS_PER_TOKEN>
+          Max concurrent MCP sessions per bearer token. 0 = unlimited [default: 16]
+      --enable-metrics
+          Expose unauthenticated Prometheus metrics at /metrics (streamable-http only)
+      --audit-format <AUDIT_FORMAT>
+          Audit log format: `text` or `json` [default: text]
+      --audit-log-file <AUDIT_LOG_FILE>
+          Optional dedicated JSON audit log file path
+      --audit-journald
+          Enable journald audit sink for `target="audit"` events
+      --audit-redact <AUDIT_REDACT>
+          Optional per-field redaction policy (e.g., `devices=hmac,host=drop`)
+      --audit-hmac-key-file <AUDIT_HMAC_KEY_FILE>
+          HMAC key file for audit redaction (required if audit-redact requests hmac)
+      --ssdf-audit-endpoint <SSDF_AUDIT_ENDPOINT>
+          ClickHouse endpoint for the SSDF evidence sink. Enables the pipeline
+      --ssdf-audit-server-id <SSDF_AUDIT_SERVER_ID>
+          This writer's chain identity. Required whenever the endpoint is set
+      --ssdf-audit-database <SSDF_AUDIT_DATABASE>
+          ClickHouse database holding the audit table [default: ssdf]
+      --ssdf-audit-user <SSDF_AUDIT_USER>
+          INSERT-only write identity [default: ssdf_audit]
+      --ssdf-audit-password-file <SSDF_AUDIT_PASSWORD_FILE>
+          File holding the write identity's password. Must be 0600
+      --ssdf-audit-verify-user <SSDF_AUDIT_VERIFY_USER>
+          SELECT-only read identity, used for the high-water and tail reads [default: ssdf_audit_verify]
+      --ssdf-audit-verify-password-file <SSDF_AUDIT_VERIFY_PASSWORD_FILE>
+          File holding the read identity's password. Must be 0600
+      --ssdf-audit-ca-file <SSDF_AUDIT_CA_FILE>
+          PEM trust anchor for the ClickHouse certificate. Required for `https://`
+      --ssdf-audit-outbox <SSDF_AUDIT_OUTBOX>
+          Durable outbox for closed segments. Required when the endpoint is set
+      --ssdf-audit-ledger <SSDF_AUDIT_LEDGER>
+          Delivery ledger. Required when the endpoint is set
+      --ssdf-audit-interval-secs <SSDF_AUDIT_INTERVAL_SECS>
+          Seconds between delivery attempts. Must be positive [default: 30]
+      --ssdf-audit-records-per-segment <SSDF_AUDIT_RECORDS_PER_SEGMENT>
+          Records per segment before one is closed and spooled [default: 64]
   -h, --help
-          Print help
+          Print help (see more with '--help')
   -V, --version
           Print version
 
 Token subcommands:
-  add     Mint a token, store only its digest, and print the secret once
-  list    List token names and scopes without secrets or digests
-  revoke  Revoke a named token
-  rotate  Replace a token secret while preserving its scopes
+  add         Mint a token, store only its digest, and print the secret once
+  list        List token names and scopes without secrets or digests
+  revoke      Revoke a named token
+  rotate      Replace a token secret while preserving its scopes
+  set-scopes  Replace a token's scopes or mutation grant, keeping its secret
 
 State subcommands:
   resolve  Mark an indeterminate operation terminal after manual PAN-OS reconciliation

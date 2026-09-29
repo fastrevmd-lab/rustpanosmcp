@@ -8,11 +8,11 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-repository = "https://github.com/fastrevmd-lab/rustpanosmcp"
+repository = "https://github.com/mechubsec/rustpanosmcp"
 authors = ["fastrevmd-lab"]
 
 [workspace.dependencies]
@@ -25,18 +25,23 @@ fastrand = "2"
 futures-util = "0.3"
 getrandom = "0.4"
 http = "1"
-# TEMPORARY: pinned to a rev on fastrevmd-lab/mecmcp's
-# mec-12-human-approver-direct-commit-gate branch, not a released tag. That
-# branch adds the ActorType::Human approver check and DirectCommitPolicy this
-# crate now depends on, and it has not shipped a tagged release yet. Replace
-# `rev` with the released `tag` once that PR merges and cuts a version.
-mecmcp-audit = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-auth = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-changeset = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-inventory = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-policy = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-runtime = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
-mecmcp-transport = { version = "0.24.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.24.0" }
+# TEMPORARY: pinned to a rev on mechubsec/mecmcp main, not a released tag.
+# mecmcp-redact (added by mecmcp#386, hardened by mecmcp#432) has not shipped
+# a tagged release yet -- the latest tag, v0.24.1, predates it. Cargo requires
+# every crate sourced from one git repo to resolve to the identical git ref,
+# so ALL mecmcp-* crates below are pinned to this same `rev`, not just the
+# one this server newly depends on -- pinning only mecmcp-redact to a later
+# rev while the rest stay on `tag = "v0.24.0"` would resolve two copies of
+# the mecmcp dependency graph (e.g. two incompatible `CallerCtx` types).
+# Replace `rev` with a released `tag` once that history ships one.
+mecmcp-audit = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-auth = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-changeset = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-inventory = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-policy = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-redact = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-runtime = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
+mecmcp-transport = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
 quick-xml = "0.42"
 reqwest = { version = "0.13", default-features = false, features = ["form", "rustls-no-provider", "stream"] }
 rmcp = { version = "3", default-features = false }

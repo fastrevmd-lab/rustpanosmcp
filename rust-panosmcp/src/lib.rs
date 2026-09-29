@@ -23,7 +23,14 @@ use rust_panosmcp_core::{
         ChangeSetStatusInput, CreateChangeSetInput, OperationInput, OperationStatusInput,
         StageConfigInput,
     },
-    tools::{ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, PanosService},
+    tools::{
+        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanoramaPushStatusInput,
+        GetPanosConfigInput, GetPanosContentStatusInput, GetPanosEntryDigestInput,
+        GetPanosHaStateInput, GetPanosLicenseInfoInput, GetPanosSoftwareStatusInput,
+        ListPanoramaDeviceGroupsInput, ListPanoramaTemplatesInput, ListPanosEntriesInput,
+        ListPanosRulebaseEntriesInput, PanosService, QueryPanosLogsInput,
+        TestPanosSecurityPolicyMatchInput,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -355,14 +362,14 @@ impl PanosMcpServer {
     }
 
     #[allow(clippy::result_large_err)]
-    fn change_set_identity(
+    fn mutation_identity(
         extensions: &Extensions,
     ) -> Result<(String, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
         let principal = Self::mutation_principal(extensions)?;
         let caller = Self::caller(extensions);
         if caller.as_ref().is_some_and(|caller| caller.grant.is_none()) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
-                "v0.2 change-set writes require a token-specific mutation grant",
+                "candidate mutations over HTTP require a token-specific mutation grant",
             )]));
         }
         Ok((principal, caller.and_then(|caller| caller.grant.clone())))
@@ -392,7 +399,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -478,7 +485,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -540,15 +547,28 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let principal = match Self::mutation_principal(&extensions) {
-            Ok(principal) => principal,
+        // MEC-528 F4: `stage_panos_config` is the v0.1 write tool and used to
+        // check only the device-wide mutation policy for an HTTP caller with
+        // no grant, passing `None` straight to `stage_config` -- unlike the
+        // v0.2 change-set tools (`create_panos_change_set`,
+        // `apply_panos_change_set`), which already refuse that caller via
+        // `mutation_identity`. Sharing the same identity check means both
+        // write paths fail closed on the same condition.
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
+            Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .stage_config(input, &principal, caller.as_ref(), cancellation)
+                .stage_config(
+                    input,
+                    &principal,
+                    grant.as_ref(),
+                    caller.as_ref(),
+                    cancellation,
+                )
                 .await,
         )
     }
@@ -556,7 +576,7 @@ impl PanosMcpServer {
     /// Read a bounded PAN-OS running/candidate change summary.
     #[tool(
         name = "diff_panos_candidate",
-        description = "Return a bounded PAN-OS change summary for the exact staged candidate fingerprint"
+        description = "Return a bounded PAN-OS change summary for the exact staged candidate fingerprint. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields are redacted; structure and non-secret change text remain"
     )]
     async fn diff_panos_candidate(
         &self,
@@ -754,7 +774,7 @@ impl PanosMcpServer {
     /// Execute only a single `<show>` operational command.
     #[tool(
         name = "execute_panos_op",
-        description = "Execute a read-only PAN-OS XML command rooted at <show> on an authorized device, with output caps"
+        description = "Execute a read-only PAN-OS XML command rooted at <show> on an authorized device, with output caps. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields (RADIUS/LDAP server secrets, SNMP community strings, etc.) are redacted; structure and non-secret output remain"
     )]
     async fn execute_panos_op(
         &self,
@@ -778,7 +798,7 @@ impl PanosMcpServer {
     /// Read running or candidate configuration under `/config`.
     #[tool(
         name = "get_panos_config",
-        description = "Read running or candidate PAN-OS configuration at a validated /config XPath on an authorized device"
+        description = "Read running or candidate PAN-OS configuration at a validated /config XPath on an authorized device. Output is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields (RADIUS/LDAP server secrets, SNMP community strings, etc.) are redacted; structure and non-secret configuration remain"
     )]
     async fn get_panos_config(
         &self,
@@ -795,6 +815,313 @@ impl PanosMcpServer {
         Self::to_call_result(
             service
                 .get_panos_config(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Page through a rule or object list container's entries.
+    #[tool(
+        name = "list_panos_entries",
+        description = "List <entry> children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked rather than erroring on a large rulebase. Each entry's XML is redacted: secret-shaped values such as phash, private keys, pre-shared keys, and shared-secret fields are redacted; structure and non-secret configuration remain. The per-entry digest is computed before redaction, so drift detection is unaffected"
+    )]
+    async fn list_panos_entries(
+        &self,
+        Parameters(input): Parameters<ListPanosEntriesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "list_panos_entries", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panos_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List Panorama device groups and their member firewall serials.
+    #[tool(
+        name = "list_panorama_device_groups",
+        description = "List Panorama device groups and the serial numbers of their member firewalls"
+    )]
+    async fn list_panorama_device_groups(
+        &self,
+        Parameters(input): Parameters<ListPanoramaDeviceGroupsInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "list_panorama_device_groups",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panorama_device_groups(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List Panorama templates and their declared variable names.
+    #[tool(
+        name = "list_panorama_templates",
+        description = "List Panorama templates and the names of their declared variables"
+    )]
+    async fn list_panorama_templates(
+        &self,
+        Parameters(input): Parameters<ListPanoramaTemplatesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "list_panorama_templates", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panorama_templates(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read a Panorama push job's overall and per-device status.
+    #[tool(
+        name = "get_panorama_push_status",
+        description = "Read a Panorama commit-all/push job's overall and per-target-firewall status by job id"
+    )]
+    async fn get_panorama_push_status(
+        &self,
+        Parameters(input): Parameters<GetPanoramaPushStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panorama_push_status", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panorama_push_status(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List a rulebase or object container's entries by typed kind and vsys.
+    #[tool(
+        name = "list_panos_rulebase_entries",
+        description = "List security rules, NAT rules, address objects, or service objects for a vsys as structured JSON, paginated and truncation-marked"
+    )]
+    async fn list_panos_rulebase_entries(
+        &self,
+        Parameters(input): Parameters<ListPanosRulebaseEntriesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "list_panos_rulebase_entries",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panos_rulebase_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read high-availability state.
+    #[tool(
+        name = "get_panos_ha_state",
+        description = "Read PAN-OS high-availability state (enabled, mode, local and peer state) on an authorized device"
+    )]
+    async fn get_panos_ha_state(
+        &self,
+        Parameters(input): Parameters<GetPanosHaStateInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_ha_state", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_ha_state(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read license status.
+    #[tool(
+        name = "get_panos_license_info",
+        description = "Read PAN-OS license status (feature, serial, issued, expires, expired) on an authorized device"
+    )]
+    async fn get_panos_license_info(
+        &self,
+        Parameters(input): Parameters<GetPanosLicenseInfoInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_license_info", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_license_info(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read content version status.
+    #[tool(
+        name = "get_panos_content_status",
+        description = "Read PAN-OS content version status (version, released, downloaded, current) on an authorized device"
+    )]
+    async fn get_panos_content_status(
+        &self,
+        Parameters(input): Parameters<GetPanosContentStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_content_status", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_content_status(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read software version status.
+    #[tool(
+        name = "get_panos_software_status",
+        description = "Read PAN-OS software version status (version, released, downloaded, current, latest) on an authorized device"
+    )]
+    async fn get_panos_software_status(
+        &self,
+        Parameters(input): Parameters<GetPanosSoftwareStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "get_panos_software_status",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_software_status(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Test which security rule a simulated packet would match.
+    #[tool(
+        name = "test_panos_security_policy_match",
+        description = "Test which PAN-OS security rule, if any, a simulated packet (source, destination, port, protocol, zones, application, user) would match on an authorized device"
+    )]
+    async fn test_panos_security_policy_match(
+        &self,
+        Parameters(input): Parameters<TestPanosSecurityPolicyMatchInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "test_panos_security_policy_match",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .test_panos_security_policy_match(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Fetch a bounded window of PAN-OS logs.
+    #[tool(
+        name = "query_panos_logs",
+        description = "Fetch a bounded window of PAN-OS logs (traffic, threat, system, or config) on an authorized device; always capped, never unbounded"
+    )]
+    async fn query_panos_logs(
+        &self,
+        Parameters(input): Parameters<QueryPanosLogsInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(&extensions, "query_panos_logs", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .query_panos_logs(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Digest one entry for single-rule drift detection.
+    #[tool(
+        name = "get_panos_entry_digest",
+        description = "Fetch and hash exactly one PAN-OS config entry by XPath, without reading the rest of the configuration -- for detecting drift on a single rule or object"
+    )]
+    async fn get_panos_entry_digest(
+        &self,
+        Parameters(input): Parameters<GetPanosEntryDigestInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_entry_digest", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_entry_digest(input, caller.as_ref(), cancellation)
                 .await,
         )
     }

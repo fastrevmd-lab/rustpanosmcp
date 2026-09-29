@@ -5,7 +5,7 @@ use crate::{
     inventory::{DeviceConfig, LoadedTlsTrust, MutationPolicy},
     xml::{
         JobStatus, PanosResponse, XmlLimits, parse_job_status, parse_panos_response,
-        validate_read_only_op_command, validate_read_xpath,
+        parse_pending_changes, validate_job_id, validate_read_only_op_command, validate_read_xpath,
     },
 };
 use futures_util::StreamExt;
@@ -17,12 +17,34 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 const API_PATH: &str = "api/";
-const JOB_ID_MAX_BYTES: usize = 32;
+
+/// PAN-OS XML API codes that mean the configured key stopped authenticating,
+/// as opposed to a transient transport failure or an unrelated API error.
+///
+/// `22` is "session timed out", which the XML API also raises for an expired
+/// API key. Code `16` ("unauthorized") is deliberately excluded: PAN-OS uses
+/// it when a *valid* key's role lacks rights for the specific command sent,
+/// which a correctly-scoped least-privilege key can trigger routinely. See
+/// [`crate::xml::panos_api_code_name`].
+const AUTH_FAILURE_CODES: [i32; 1] = [22];
+
+/// HTTP statuses PAN-OS uses to reject a request before it can even reach
+/// the XML API layer -- the shape a revoked, invalid, or otherwise
+/// credential-rejected key actually returns (an HTTP 200 wrapping an XML
+/// error code is not what a bad key produces).
+const AUTH_FAILURE_HTTP_STATUSES: [u16; 2] = [401, 403];
 
 /// Pooled PAN-OS API client for exactly one validated inventory device.
 #[derive(Clone)]
@@ -31,6 +53,11 @@ pub struct PanosClient {
     client: Client,
     api_url: reqwest::Url,
     concurrency: Arc<Semaphore>,
+    /// Set to `false` on the most recent request's PAN-OS auth failure
+    /// (unauthorized key or expired session), `true` on any successful
+    /// response. Other errors (timeout, transport, non-auth API error)
+    /// leave it unchanged -- they say nothing about the key's validity.
+    auth_healthy: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for PanosClient {
@@ -57,6 +84,7 @@ impl PanosClient {
             config,
             client,
             api_url,
+            auth_healthy: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -64,6 +92,15 @@ impl PanosClient {
     #[must_use]
     pub fn device_name(&self) -> &str {
         &self.config.metadata.name
+    }
+
+    /// Whether the most recent request against this device authenticated.
+    ///
+    /// Starts `true`: an unreached device has not yet proven its key is bad,
+    /// and `/readyz` should not fail before the first request goes out.
+    #[must_use]
+    pub fn is_auth_healthy(&self) -> bool {
+        self.auth_healthy.load(Ordering::Relaxed)
     }
 
     /// Explicit candidate-mutation policy, if the operator enabled writes.
@@ -117,6 +154,162 @@ impl PanosClient {
         .await
     }
 
+    /// Like [`configuration`](Self::configuration), but for entry listing:
+    /// stops reading at `max_response_bytes` and returns the partial body
+    /// with a truncation flag rather than failing the call.
+    ///
+    /// The caller scans the returned bytes for complete top-level `<entry>`
+    /// elements rather than parsing them as one document, so a response cut
+    /// mid-stream is exactly as useful as a complete one, just missing
+    /// whatever came after the cut -- unlike every other PAN-OS reader here,
+    /// which needs a well-formed document and must keep failing closed on
+    /// one that got only partway downloaded.
+    pub(crate) async fn configuration_entries(
+        &self,
+        candidate: bool,
+        xpath: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(Vec<u8>, bool)> {
+        validate_read_xpath(xpath)?;
+        self.send(
+            vec![
+                ("type", "config".to_owned()),
+                ("action", if candidate { "get" } else { "show" }.to_owned()),
+                ("xpath", xpath.to_owned()),
+            ],
+            cancellation,
+            true,
+        )
+        .await
+    }
+
+    /// Ask PAN-OS whether the dedicated admin has any uncommitted candidate
+    /// edit, anywhere in the configuration -- not just under the xpath roots
+    /// this tool manages.
+    ///
+    /// This is a fixed, caller-input-free constant command, so it bypasses
+    /// [`operational`](Self::operational)'s `<show>`-only validation rather
+    /// than widening it: `<check>` is a distinct PAN-OS operational root with
+    /// its own semantics, and accepting arbitrary `<check>` bodies from a
+    /// caller is not something Phase 1 needs.
+    pub(crate) async fn check_pending_changes(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<bool> {
+        let response = self
+            .post(
+                vec![
+                    ("type", "op".to_owned()),
+                    (
+                        "cmd",
+                        "<check><pending-changes></pending-changes></check>".to_owned(),
+                    ),
+                ],
+                cancellation,
+            )
+            .await?;
+        parse_pending_changes(&response)
+    }
+
+    /// Execute a fixed, parameter-free `<request>`-rooted operational
+    /// command.
+    ///
+    /// Same rationale as [`check_pending_changes`](Self::check_pending_changes):
+    /// `<request>` is a distinct PAN-OS operational root from `<show>`, and
+    /// this bypasses [`operational`](Self::operational)'s `<show>`-only gate
+    /// rather than widening it, because every caller here passes one of a
+    /// small set of `&'static str` constants -- never caller-supplied text.
+    pub(crate) async fn fixed_op(
+        &self,
+        command: &'static str,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        self.post(
+            vec![("type", "op".to_owned()), ("cmd", command.to_owned())],
+            cancellation,
+        )
+        .await
+    }
+
+    /// Poll a PAN-OS `type=log` job with cancellation and bounded backoff.
+    ///
+    /// A log job's terminal state is nested under `<result><job><status>...`
+    /// -- the same shape [`poll_job`](Self::poll_job)'s `parse_job_status`
+    /// expects for a config/commit job -- but this uses
+    /// [`crate::xml::log_job_is_finished`], which scans for `<status>`
+    /// anywhere in the document rather than requiring that exact nesting,
+    /// since the shape is based on documentation and hand-written fixtures,
+    /// not a verified live-device response.
+    ///
+    /// On timeout or cancellation, best-effort sends `action=finish` for
+    /// this job id so PAN-OS's small pool of concurrent log-query slots
+    /// does not stay occupied by an abandoned job.
+    pub(crate) async fn poll_log_job(
+        &self,
+        job_id: &str,
+        deadline: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        validate_job_id(job_id)?;
+        let operation = async {
+            let mut backoff = Duration::from_millis(200);
+            loop {
+                let response = self
+                    .post(
+                        vec![
+                            ("type", "log".to_owned()),
+                            ("action", "get".to_owned()),
+                            ("job-id", job_id.to_owned()),
+                        ],
+                        cancellation.clone(),
+                    )
+                    .await?;
+                if crate::xml::log_job_is_finished(&response)? {
+                    return Ok(response);
+                }
+                let jitter = fastrand::u64(0..=100);
+                tokio::select! {
+                    () = cancellation.cancelled() => return Err(PanosMcpError::Cancelled),
+                    () = time::sleep(backoff + Duration::from_millis(jitter)) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(3));
+            }
+        };
+        match time::timeout(deadline, operation).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(err)) => {
+                if matches!(err, PanosMcpError::Cancelled) {
+                    self.best_effort_finish_log_job(job_id).await;
+                }
+                Err(err)
+            }
+            Err(_) => {
+                self.best_effort_finish_log_job(job_id).await;
+                Err(PanosMcpError::Timeout {
+                    operation: "poll_log_job",
+                })
+            }
+        }
+    }
+
+    /// Best-effort release of a `type=log` job PAN-OS is still holding a
+    /// concurrent-query slot for, after this client gave up waiting on it.
+    /// Uses a fresh cancellation token and a short timeout of its own so a
+    /// wedged connection cannot turn an abandoned poll into a second hang;
+    /// any failure here is swallowed, since the caller is already reporting
+    /// the original timeout or cancellation.
+    async fn best_effort_finish_log_job(&self, job_id: &str) {
+        let finish = self.post(
+            vec![
+                ("type", "log".to_owned()),
+                ("action", "finish".to_owned()),
+                ("job-id", job_id.to_owned()),
+            ],
+            CancellationToken::new(),
+        );
+        let _ = time::timeout(Duration::from_secs(5), finish).await;
+    }
+
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.
     pub async fn poll_job(
         &self,
@@ -124,15 +317,7 @@ impl PanosClient {
         deadline: Duration,
         cancellation: CancellationToken,
     ) -> Result<JobStatus> {
-        if job_id.is_empty()
-            || job_id.len() > JOB_ID_MAX_BYTES
-            || !job_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(PanosMcpError::Policy {
-                field: "job_id",
-                reason: "job identifier must contain only 1-32 ASCII digits".to_owned(),
-            });
-        }
+        validate_job_id(job_id)?;
         let command = format!("<show><jobs><id>{job_id}</id></jobs></show>");
         let operation = async {
             let mut backoff = Duration::from_millis(200);
@@ -158,6 +343,22 @@ impl PanosClient {
         }
     }
 
+    /// Fetch a PAN-OS job's current response in one read, with no polling loop.
+    ///
+    /// Unlike [`poll_job`](Self::poll_job) this returns the full envelope
+    /// rather than the summarized [`JobStatus`], so a caller that needs
+    /// PAN-OS-specific nested detail -- such as a Panorama push job's
+    /// per-target-firewall `<devices>` breakdown -- can parse it directly.
+    pub async fn job_response(
+        &self,
+        job_id: &str,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        validate_job_id(job_id)?;
+        let command = format!("<show><jobs><id>{job_id}</id></jobs></show>");
+        self.operational(&command, cancellation).await
+    }
+
     /// Submit already-validated fields for guarded configuration lifecycle operations.
     pub(crate) async fn post_fields(
         &self,
@@ -169,9 +370,44 @@ impl PanosClient {
 
     async fn post(
         &self,
-        mut fields: Vec<(&'static str, String)>,
+        fields: Vec<(&'static str, String)>,
         cancellation: CancellationToken,
     ) -> Result<PanosResponse> {
+        let outcome = async {
+            let (bytes, _truncated) = self.send(fields, cancellation, false).await?;
+            parse_panos_response(
+                &bytes,
+                XmlLimits {
+                    max_bytes: self.config.max_response_bytes,
+                    max_depth: 64,
+                },
+            )?
+            .ensure_success(self.device_name())
+        }
+        .await;
+        // `send`'s own bookkeeping only sees the transport layer, so it
+        // cannot notice an API-level auth failure (code 22) that arrives as
+        // a 200 OK wrapping an XML error. Re-record here with the fully
+        // parsed outcome so that case still flips `auth_healthy`.
+        self.record_auth_result(&outcome);
+        outcome
+    }
+
+    /// Shared request/response plumbing behind [`post`](Self::post) and
+    /// [`configuration_entries`](Self::configuration_entries).
+    ///
+    /// `truncate = false` reproduces `post`'s original behavior exactly: a
+    /// response over `max_response_bytes` -- by header or by the stream
+    /// actually exceeding it -- is `ResponseTooLarge`, never partial data.
+    /// `truncate = true` instead stops at the limit and returns what was read
+    /// so far with the flag set; callers of that mode must not treat the
+    /// bytes as a complete document.
+    async fn send(
+        &self,
+        mut fields: Vec<(&'static str, String)>,
+        cancellation: CancellationToken,
+        truncate: bool,
+    ) -> Result<(Vec<u8>, bool)> {
         if let Some(vsys) = &self.config.metadata.vsys {
             fields.push(("vsys", vsys.clone()));
         }
@@ -205,9 +441,10 @@ impl PanosClient {
                     status: response.status().as_u16(),
                 });
             }
-            if response
-                .content_length()
-                .is_some_and(|length| length > self.config.max_response_bytes as u64)
+            if !truncate
+                && response
+                    .content_length()
+                    .is_some_and(|length| length > self.config.max_response_bytes as u64)
             {
                 return Err(PanosMcpError::ResponseTooLarge {
                     device: self.device_name().to_owned(),
@@ -216,10 +453,17 @@ impl PanosClient {
             }
 
             let mut bytes = Vec::new();
+            let mut truncated = false;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|error| classify_transport(error, self.device_name()))?;
                 if bytes.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
+                    if truncate {
+                        let remaining = self.config.max_response_bytes - bytes.len();
+                        bytes.extend_from_slice(&chunk[..remaining]);
+                        truncated = true;
+                        break;
+                    }
                     return Err(PanosMcpError::ResponseTooLarge {
                         device: self.device_name().to_owned(),
                         limit: self.config.max_response_bytes,
@@ -228,17 +472,10 @@ impl PanosClient {
                 bytes.extend_from_slice(&chunk);
             }
 
-            parse_panos_response(
-                &bytes,
-                XmlLimits {
-                    max_bytes: self.config.max_response_bytes,
-                    max_depth: 64,
-                },
-            )?
-            .ensure_success(self.device_name())
+            Ok((bytes, truncated))
         };
 
-        tokio::select! {
+        let outcome = tokio::select! {
             () = cancellation.cancelled() => Err(PanosMcpError::Cancelled),
             result = time::timeout(self.config.request_timeout, operation) => {
                 match result {
@@ -246,6 +483,42 @@ impl PanosClient {
                     Err(_) => Err(PanosMcpError::Timeout { operation: "panos_api" }),
                 }
             }
+        };
+        // `send` only sees the transport layer: a 2xx here does not mean the
+        // request authenticated, since PAN-OS can wrap an unrelated API
+        // error (or even an auth failure such as code 22) inside an HTTP 200
+        // body that `send` never parses. So only react to a failure here --
+        // an `HttpStatus` rejection is itself proof of a bad credential --
+        // and leave marking `auth_healthy` back to `true` to `post`, which
+        // sees the fully parsed result.
+        if let Err(error) = &outcome {
+            self.record_auth_failure(error);
+        }
+        outcome
+    }
+
+    /// Update `auth_healthy` from a completed request's fully parsed outcome.
+    fn record_auth_result<T>(&self, outcome: &Result<T>) {
+        match outcome {
+            Ok(_) => self.auth_healthy.store(true, Ordering::Relaxed),
+            Err(error) => self.record_auth_failure(error),
+        }
+    }
+
+    /// Flip `auth_healthy` to `false` if `error` is one of the specific
+    /// shapes PAN-OS uses to reject a bad credential; leave it unchanged for
+    /// every other error (timeout, transport, unrelated API error).
+    fn record_auth_failure(&self, error: &PanosMcpError) {
+        match error {
+            PanosMcpError::Api { code, .. } if AUTH_FAILURE_CODES.contains(code) => {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            PanosMcpError::HttpStatus { status, .. }
+                if AUTH_FAILURE_HTTP_STATUSES.contains(status) =>
+            {
+                self.auth_healthy.store(false, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }

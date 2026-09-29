@@ -22,25 +22,36 @@ If you see that line and did not intend it, stop and fix the flag.
 ## The headline gotcha for this image
 
 The Dockerfile is
-`ENTRYPOINT ["/usr/local/bin/rust-panosmcp", "--device-mapping", "/etc/rust-panosmcp/devices.json"]`
-with `CMD []`.
 
-`--device-mapping` is baked into ENTRYPOINT precisely so it survives when you
-pass other arguments — Docker **appends** caller arguments to ENTRYPOINT but
-**replaces CMD entirely**, so a flag reachable only through CMD used to vanish
-the moment you set the bind address or anything else.
+```
+ENTRYPOINT ["/usr/local/bin/rust-panosmcp", \
+    "--device-mapping", "/etc/rust-panosmcp/devices.json", \
+    "--tokens-file", "/var/lib/rust-panosmcp/tokens.json", \
+    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json"]
+CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30031"]
+```
 
-**Do not pass `--device-mapping` yourself on `docker run` / `command:`.**
-Doing so duplicates the flag (once from ENTRYPOINT, once from your argument),
-and the server refuses to start:
+All three of `--device-mapping`, `--tokens-file`, and `--state-file` are baked
+into ENTRYPOINT precisely so they survive when you pass other arguments —
+Docker **appends** caller arguments to ENTRYPOINT but **replaces CMD
+entirely**, so a flag reachable only through CMD used to vanish the moment you
+set the bind address or anything else.
+
+**Do not pass `--device-mapping`, `--tokens-file`, or `--state-file` yourself
+on `docker run` / `command:`.** Doing so duplicates the flag (once from
+ENTRYPOINT, once from your argument), and the server refuses to start:
 
 ```
 error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times
 ```
 
-If you need a different inventory path than `/etc/rust-panosmcp/devices.json`,
-mount your file at that path rather than passing the flag — the path is fixed
-in the image, only the file backing it changes.
+(the same error, naming the repeated flag, for `--tokens-file` or
+`--state-file`). If you need different paths than the three baked in, mount
+your files at those paths rather than passing the flags — the paths are fixed
+in the image, only the files backing them change. `--tokens-file` and
+`--state-file` share one directory, `/var/lib/rust-panosmcp`, so mount that
+directory once and place `tokens.json` inside it; `mutation-state.json` is
+created there by the server.
 
 ## 1. Prepare host paths
 
@@ -70,10 +81,13 @@ the environment:
 }
 ```
 
-Mint a bearer token. The binary can do this on the host — no container needed:
+Mint a bearer token. The binary can do this on the host — no container needed.
+`tokens.json` goes inside `state/`, because the image's ENTRYPOINT reads it
+from `/var/lib/rust-panosmcp/tokens.json`, the same directory as the mutation
+state:
 
 ```bash
-rust-panosmcp token add --tokens-file ./tokens.json --name my-client \
+rust-panosmcp token add --tokens-file ./state/tokens.json --name my-client \
     --devices '*' --tools '*' -f ./devices.json
 ```
 
@@ -84,7 +98,7 @@ calling `create_panos_change_set` gets `insufficient_scope`. That is deliberate.
 Then lock the modes down:
 
 ```bash
-chmod 0600 devices.json tokens.json
+chmod 0600 devices.json state/tokens.json
 ```
 
 ## 2. Ownership: two options
@@ -95,7 +109,7 @@ directory.
 **For a real deployment**, give it ownership:
 
 ```bash
-sudo chown -R 65532:65532 devices.json tokens.json state
+sudo chown -R 65532:65532 devices.json state
 sudo chmod 0700 state
 ```
 
@@ -114,8 +128,8 @@ Both are shown below. The second is what the examples here were verified with.
 first:
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0
-image=$(docker inspect ghcr.io/fastrevmd-lab/rust-panosmcp:0.14.0 \
+docker pull ghcr.io/mechubsec/rustpanosmcp:0.15.0
+image=$(docker inspect ghcr.io/mechubsec/rustpanosmcp:0.15.0 \
     --format '{{index .RepoDigests 0}}')
 ```
 
@@ -130,19 +144,19 @@ docker run -d --name panos-twoperson \
   -p 127.0.0.1:30031:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
-  -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
   "$image" \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
-  --tokens-file /etc/rust-panosmcp/tokens.json \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30031 --allowed-host localhost:30031 \
   --allowed-origin http://127.0.0.1:30031 --allowed-origin http://localhost:30031
 ```
 
-Configuration and tokens are mounted read-only; only the state directory is
-writable. It holds the change-set lifecycle state at `mutation-state.json` —
-do not delete that file while a server is running.
+`--tokens-file` and `--state-file` are already baked into ENTRYPOINT (see [The
+headline gotcha](#the-headline-gotcha-for-this-image)) — do not pass them here.
+The inventory is mounted read-only; the state directory (which holds both
+`tokens.json` and the change-set lifecycle state in `mutation-state.json`) is
+writable. Do not delete `mutation-state.json` while a server is running.
 
 The `--allowed-origin http://127.0.0.1:30031` values are a working local default
 for non-browser clients. A browser-based MCP client served from a different port
@@ -159,11 +173,9 @@ docker run -d --name panos-labmode \
   -p 127.0.0.1:30041:30031 \
   -e PANOS_DEMO_API_KEY=... \
   -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
-  -v "$PWD/tokens.json:/etc/rust-panosmcp/tokens.json:ro" \
   -v "$PWD/state:/var/lib/rust-panosmcp" \
   "$image" \
   --transport streamable-http --host 0.0.0.0 --port 30031 \
-  --tokens-file /etc/rust-panosmcp/tokens.json \
   --allow-insecure-bind \
   --allowed-host 127.0.0.1:30041 --allowed-host localhost:30041 \
   --allowed-origin http://127.0.0.1:30041 --allowed-origin http://localhost:30041 \
@@ -232,11 +244,12 @@ caller finds the device blocked.
 All three of these were hit while writing this document.
 
 **`error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times`**
-You passed `--device-mapping` explicitly. It is already baked into the image's
-ENTRYPOINT, so a caller-supplied copy duplicates it. Drop it from your `docker
-run` arguments or compose `command:` — mount your inventory file at
-`/etc/rust-panosmcp/devices.json` instead. See [The headline gotcha for this
-image](#the-headline-gotcha-for-this-image).
+(or the same error naming `--tokens-file` or `--state-file`)
+You passed one of the three ENTRYPOINT-baked flags explicitly. Drop it from
+your `docker run` arguments or compose `command:` — mount your inventory file
+at `/etc/rust-panosmcp/devices.json`, and put `tokens.json` inside the
+directory mounted at `/var/lib/rust-panosmcp`, instead of passing the flags.
+See [The headline gotcha for this image](#the-headline-gotcha-for-this-image).
 
 **Service returns 421 `Host '<host>' is not allowed`**
 `--allowed-host` does not match the address the client dials (the HTTP Host
