@@ -6,7 +6,7 @@ use crate::{
     mutation::{
         ChangeSetAction, candidate_fingerprint, release_config_lock, revert_admin_candidate,
     },
-    xml::parse_job_id,
+    xml::{parse_job_id, redact_secret_material},
 };
 
 const MAX_DIFF_BYTES: usize = 256 * 1024;
@@ -204,6 +204,7 @@ impl DeviceTransaction for PanosClient {
             )
             .await?;
         let (change_summary, truncated) = truncate_utf8(response.xml, MAX_DIFF_BYTES);
+        let change_summary = redact_secret_material(&change_summary);
         Ok(PanosDiff {
             change_summary,
             truncated,

@@ -7,8 +7,8 @@ use crate::{
     observability::AuditScope,
     xml::{
         ConfigEntry, DeviceFacts, collect_text_for_elements, panos_api_code_name,
-        parse_device_facts, scan_config_entries, validate_read_only_op_command,
-        validate_read_xpath,
+        parse_device_facts, redact_secret_material, scan_config_entries,
+        validate_read_only_op_command, validate_read_xpath,
     },
 };
 use mecmcp_policy::{
@@ -211,11 +211,39 @@ impl PanosService {
 
                 if !blocklist.xpath.is_empty() {
                     has_any_rules = true;
-                    let rules: Vec<(Action, String)> = blocklist
-                        .xpath
-                        .iter()
-                        .map(|pattern| (Action::Deny, pattern.clone()))
-                        .collect();
+                    // Canonicalise the operator's pattern to the same quote
+                    // style `get_panos_config` canonicalises the candidate
+                    // xpath to before matching, so a rule written with `'`
+                    // still catches a request spelled with `"` (MEC-528
+                    // class 3), then escape the glob metacharacters an XPath
+                    // predicate is made of but does not mean as wildcards
+                    // (see `escape_xpath_glob_metacharacters`).
+                    let mut rules: Vec<(Action, String)> =
+                        Vec::with_capacity(blocklist.xpath.len());
+                    for pattern in &blocklist.xpath {
+                        // MEC-528 F2: `escape_xpath_glob_metacharacters` also
+                        // escapes a literal `\` (globset's own escape
+                        // character) so it cannot combine with an adjacent
+                        // `[`/`]`/`?` it did not intend to escape. That is
+                        // correct for a pattern with no `\` in it, but it
+                        // silently mangles a pattern an operator hand-escaped
+                        // themselves (`\[` meant as a literal bracket):
+                        // double-escaping turns it into something that
+                        // matches a different, narrower or wider, set of
+                        // xpaths than either the operator or this function
+                        // intended -- a blocklist rule that fails open with
+                        // no error at load time. Reject it instead: `\` has
+                        // no meaning in an XPath predicate, so a rule cannot
+                        // legitimately need one.
+                        if pattern.contains('\\') {
+                            return Err(PanosMcpError::Inventory(format!(
+                                "device '{}' blocklist xpath pattern '{pattern}' must not contain '\\'",
+                                device.metadata.name
+                            )));
+                        }
+                        let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(pattern);
+                        rules.push((Action::Deny, escape_xpath_glob_metacharacters(&canonical)));
+                    }
                     let compiled = compile_rules(
                         &rules,
                         &device.metadata.name,
@@ -371,11 +399,12 @@ impl PanosService {
             let limits = OutputLimits::resolve(input.max_bytes, input.max_lines)?;
             let client = self.client(&input.device)?;
             let response = client.operational(&input.command, cancellation).await?;
+            let redacted = redact_secret_material(&response.xml);
             Ok(XmlToolOutput {
                 device: input.device,
                 status: response.status,
                 code: response.code,
-                output: bounded_text(&response.xml, limits),
+                output: bounded_text(&redacted, limits),
             })
         }
         .await;
@@ -416,13 +445,14 @@ impl PanosService {
                     cancellation,
                 )
                 .await?;
+            let redacted = redact_secret_material(&response.xml);
             Ok(ConfigToolOutput {
                 device: input.device,
                 source: input.source,
                 xpath,
                 status: response.status,
                 code: response.code,
-                output: bounded_text(&response.xml, limits),
+                output: bounded_text(&redacted, limits),
             })
         }
         .await;
@@ -584,7 +614,13 @@ impl PanosService {
             return Ok(());
         };
         use mecmcp_policy::{evaluate, normalize_input};
-        let normalized = normalize_input(xpath);
+        // Canonicalise quote style before matching, as `validate_write_xpath`
+        // does: `'` and `"` are the same XPath predicate to PAN-OS, so a
+        // blocklist rule written with one quote style must still catch a read
+        // spelled with the other (MEC-528 class 3). Applies to every read path
+        // that goes through this helper, including the paginated ones.
+        let canonical = rust_panosmcp_auth::canonicalize_xpath_quotes(xpath);
+        let normalized = normalize_input(&canonical);
         let rules = policy.config_rules_for(device);
         match evaluate(&rules, &normalized) {
             Some(rule) if rule.action == Action::Deny => Err(PanosMcpError::Policy {
@@ -842,6 +878,31 @@ impl OutputLimits {
     }
 }
 
+/// Escape glob metacharacters that occur naturally in an XPath predicate but
+/// are not the wildcard an operator means when writing a blocklist rule.
+///
+/// `compile_rules` compiles xpath blocklist patterns as globs (the `globset`
+/// crate). Globs treat a bare `[...]` as a character class, so a pattern like
+/// `.../entry[@name='secret']*` is not matched literally: `[@name='secret']`
+/// is parsed as "one character from the set `@name='secret`", which either
+/// fails to compile (e.g. the value contains characters globset reads as an
+/// invalid range, silently refusing to enforce the rule at startup) or
+/// compiles into a character class the operator never intended, matching a
+/// different set of xpaths than the literal predicate they wrote (MEC-528
+/// class 3). `*` is left untouched since it is the one wildcard operators
+/// are expected to use; `?` is also escaped since XPath has no single-char
+/// wildcard of its own but globset would still treat it as one.
+fn escape_xpath_glob_metacharacters(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if matches!(ch, '[' | ']' | '?' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Turn a failed PAN-OS envelope observed mid-scan into a typed API error.
 ///
 /// The entry scan never buffers a full [`PanosResponse`], so it cannot reuse
@@ -911,5 +972,54 @@ mod tests {
     fn output_limits_refuse_zero_and_excessive_values() {
         assert!(OutputLimits::resolve(Some(0), None).is_err());
         assert!(OutputLimits::resolve(None, Some(MAX_OUTPUT_LINES + 1)).is_err());
+    }
+
+    /// MEC-528 class 3: an xpath predicate compiled as a raw glob either
+    /// fails outright (an invalid character range, as here) or silently
+    /// matches something other than the literal predicate the operator
+    /// wrote. Escaping the brackets must make the pattern match the literal
+    /// text of the predicate and nothing else.
+    #[test]
+    fn escaping_makes_a_bracketed_predicate_a_literal_match() {
+        let pattern = "*/address/entry[@name='secret-object']*";
+        // Unescaped, this glob fails to compile: globset reads `t' > 'o` in
+        // `[@name='secret-object']` as an invalid descending character range.
+        assert!(
+            compile_rules(
+                &[(Action::Deny, pattern.to_owned())],
+                "test",
+                RuleSource::Device,
+                |_scope, _pattern, error| error,
+            )
+            .is_err()
+        );
+
+        let escaped = escape_xpath_glob_metacharacters(pattern);
+        let compiled = compile_rules(
+            &[(Action::Deny, escaped)],
+            "test",
+            RuleSource::Device,
+            |_scope, _pattern, error| error,
+        )
+        .expect("escaped pattern compiles");
+        let rules: Vec<_> = compiled.iter().collect();
+        assert!(mecmcp_policy::evaluate(
+            &rules,
+            "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address/entry[@name='secret-object']"
+        )
+        .is_some());
+        assert!(mecmcp_policy::evaluate(
+            &rules,
+            "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address/entry[@name='other-object']"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn escaping_leaves_the_wildcard_asterisk_alone() {
+        assert_eq!(
+            escape_xpath_glob_metacharacters("*/hostname*"),
+            "*/hostname*"
+        );
     }
 }
