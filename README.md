@@ -253,7 +253,7 @@ bearer roles above), see
 
 ## MCP tools reference
 
-The server exposes 15 MCP tools, grouped by operation type:
+The server exposes 20 MCP tools, grouped by operation type:
 
 ### Read-only tools
 
@@ -261,6 +261,11 @@ The server exposes 15 MCP tools, grouped by operation type:
 - **`gather_device_facts`** — Gather hostname, model, serial, version, management IP, and uptime from an authorized device.
 - **`execute_panos_op`** — Execute a read-only PAN-OS XML command rooted at `<show>` on an authorized device, with output caps.
 - **`get_panos_config`** — Read running or candidate PAN-OS configuration at a validated `/config` XPath on an authorized device.
+- **`list_panos_entries`** — Page through a rule or object list container's `<entry>` children as structured JSON, truncation-marked rather than erroring on a large rulebase.
+- **`get_panos_entry_digest`** — Fetch and hash exactly one PAN-OS config entry by XPath, for single-rule drift detection.
+- **`list_panorama_device_groups`** — List Panorama device groups and the serial numbers of their member firewalls.
+- **`list_panorama_templates`** — List Panorama templates and the names of their declared variables.
+- **`get_panorama_push_status`** — Read a Panorama commit-all/push job's overall and per-target-firewall status by job id.
 
 ### Candidate lifecycle tools (mutation)
 

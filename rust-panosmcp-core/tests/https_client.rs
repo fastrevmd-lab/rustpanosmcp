@@ -12,7 +12,7 @@ use rust_panosmcp_core::{
     PanosMcpError,
     client::PanosClient,
     inventory::{Environment, Inventory},
-    xml::parse_device_facts,
+    xml::{parse_device_facts, parse_device_groups, parse_push_job_status, parse_templates},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -207,6 +207,10 @@ async fn api(
     if command.contains("<badkey") {
         return (StatusCode::FORBIDDEN, "<response status=\"error\" code=\"403\"><msg><line>Invalid Credential</line></msg></response>".to_owned());
     }
+    if command.contains("<id>777</id>") {
+        // A Panorama push (CommitAll) job: overall state plus a per-target-firewall breakdown.
+        return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><id>777</id><type>CommitAll</type><status>FIN</status><result>OK</result><progress>100</progress><devices><entry name=\"0011C1\"><devicename>fw-01</devicename><status>FIN</status><result>OK</result><progress>100</progress></entry></devices></job></result></response>".to_owned());
+    }
     if command.contains("<jobs>") {
         if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
             return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><status>ACT</status><progress>25</progress></job></result></response>".to_owned());
@@ -214,6 +218,13 @@ async fn api(
         return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><job><status>FIN</status><result>OK</result><progress>100</progress></job></result></response>".to_owned());
     }
     if form.get("type").map(String::as_str) == Some("config") {
+        let xpath = form.get("xpath").map(String::as_str).unwrap_or_default();
+        if xpath.ends_with("/device-group") {
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><device-group><entry name=\"DG-Branch\"><devices><entry name=\"0011C1\"/></devices></entry></device-group></result></response>".to_owned());
+        }
+        if xpath.ends_with("/template") {
+            return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><template><entry name=\"TMPL-Base\"><variable><entry name=\"$var1\"/></variable></entry></template></result></response>".to_owned());
+        }
         return (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><config><devices/></config></result></response>".to_owned());
     }
     (StatusCode::OK, "<response status=\"success\" code=\"19\"><result><system><hostname>mock-fw</hostname><ip-address>192.0.2.10</ip-address><model>PA-VM</model><serial>012345</serial><sw-version>11.2.4</sw-version><uptime>1 day</uptime></system></result></response>".to_owned())
@@ -494,4 +505,50 @@ async fn benchmark_warm_pooled_https_read_latency() {
 fn percentile(samples: &[Duration], percentile: usize) -> Duration {
     let index = (samples.len() * percentile).div_ceil(100).saturating_sub(1);
     samples[index]
+}
+
+/// MEC-536: Panorama device-group/template/push-status reads, end to end
+/// through the real HTTPS transport -- not just the XML parser in isolation.
+#[tokio::test]
+async fn panorama_device_groups_templates_and_push_status_read_over_https() {
+    let mock = MockHttps::start().await;
+    let client = mock.client("custom_ca", "\"max_concurrency\":1");
+
+    let response = client
+        .configuration(
+            false,
+            "/config/devices/entry[@name='localhost.localdomain']/device-group",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("device-group read");
+    let groups = parse_device_groups(&response).expect("device groups parse");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].name, "DG-Branch");
+    assert_eq!(groups[0].member_serials, vec!["0011C1".to_owned()]);
+
+    let response = client
+        .configuration(
+            false,
+            "/config/devices/entry[@name='localhost.localdomain']/template",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("template read");
+    let templates = parse_templates(&response).expect("templates parse");
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "TMPL-Base");
+    assert_eq!(templates[0].variables, vec!["$var1".to_owned()]);
+
+    let response = client
+        .job_response("777", CancellationToken::new())
+        .await
+        .expect("push job status read");
+    let status = parse_push_job_status(&response).expect("push status parses");
+    assert_eq!(status.job.status.as_deref(), Some("FIN"));
+    assert_eq!(status.job.result.as_deref(), Some("OK"));
+    assert_eq!(status.devices.len(), 1);
+    assert_eq!(status.devices[0].serial, "0011C1");
+    assert_eq!(status.devices[0].device_name.as_deref(), Some("fw-01"));
+    assert_eq!(status.devices[0].status.as_deref(), Some("FIN"));
 }

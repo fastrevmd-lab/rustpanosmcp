@@ -20,8 +20,9 @@ use rust_panosmcp_core::{
         CreateChangeSetInput, OperationInput, OperationStatusInput, StageAction, StageConfigInput,
     },
     tools::{
-        ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput,
-        GetPanosEntryDigestInput, ListPanosEntriesInput, PanosService,
+        ConfigSource, ExecutePanosOpInput, GatherDeviceFactsInput, GetPanoramaPushStatusInput,
+        GetPanosConfigInput, GetPanosEntryDigestInput, ListPanoramaDeviceGroupsInput,
+        ListPanoramaTemplatesInput, ListPanosEntriesInput, PanosService,
     },
 };
 use std::{
@@ -66,6 +67,17 @@ async fn api(
         return success(&format!("<result>{candidate}</result>"));
     }
     if request_type == Some("config") && action == Some("show") {
+        let xpath = form.get("xpath").map(String::as_str).unwrap_or_default();
+        if xpath.ends_with("/device-group") {
+            return success(
+                "<result><device-group><entry name=\"DG-1\"><devices><entry name=\"0011C1\"/></devices></entry></device-group></result>",
+            );
+        }
+        if xpath.ends_with("/template") {
+            return success(
+                "<result><template><entry name=\"TMPL-1\"><variable><entry name=\"$v\"/></variable></entry></template></result>",
+            );
+        }
         return success("<result><config><shared><address/></shared></config></result>");
     }
     if request_type == Some("config") && action == Some("set") {
@@ -97,6 +109,11 @@ async fn api(
     if command.contains("<show><jobs><id>102</id>") {
         return success(
             "<result><job><status>FIN</status><result>OK</result><progress>100</progress></job></result>",
+        );
+    }
+    if command.contains("<show><jobs><id>777</id>") {
+        return success(
+            "<result><job><status>FIN</status><result>OK</result><progress>100</progress><devices><entry name=\"0011C1\"><devicename>fw-01</devicename><status>FIN</status><result>OK</result></entry></devices></job></result>",
         );
     }
     if request_type == Some("commit") && action == Some("partial") {
@@ -256,6 +273,46 @@ async fn all_tools_emit_audit_events() {
             cancel.clone(),
         )
         .await;
+
+    let device_groups = service
+        .list_panorama_device_groups(
+            ListPanoramaDeviceGroupsInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await
+        .expect("list_panorama_device_groups");
+    assert_eq!(device_groups.device_groups.len(), 1);
+    assert_eq!(device_groups.device_groups[0].name, "DG-1");
+
+    let templates = service
+        .list_panorama_templates(
+            ListPanoramaTemplatesInput {
+                device: "test-fw".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await
+        .expect("list_panorama_templates");
+    assert_eq!(templates.templates.len(), 1);
+    assert_eq!(templates.templates[0].name, "TMPL-1");
+
+    let push_status = service
+        .get_panorama_push_status(
+            GetPanoramaPushStatusInput {
+                device: "test-fw".to_owned(),
+                job_id: "777".to_owned(),
+            },
+            None,
+            cancel.clone(),
+        )
+        .await
+        .expect("get_panorama_push_status");
+    assert_eq!(push_status.job.status.as_deref(), Some("FIN"));
+    assert_eq!(push_status.devices.len(), 1);
 
     let fp = service
         .candidate_fingerprint(

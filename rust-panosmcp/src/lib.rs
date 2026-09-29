@@ -24,8 +24,9 @@ use rust_panosmcp_core::{
         StageConfigInput,
     },
     tools::{
-        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, GetPanosEntryDigestInput,
-        ListPanosEntriesInput, PanosService,
+        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanoramaPushStatusInput,
+        GetPanosConfigInput, GetPanosEntryDigestInput, ListPanoramaDeviceGroupsInput,
+        ListPanoramaTemplatesInput, ListPanosEntriesInput, PanosService,
     },
 };
 use schemars::JsonSchema;
@@ -836,6 +837,83 @@ impl PanosMcpServer {
         Self::to_call_result(
             service
                 .list_panos_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List Panorama device groups and their member firewall serials.
+    #[tool(
+        name = "list_panorama_device_groups",
+        description = "List Panorama device groups and the serial numbers of their member firewalls"
+    )]
+    async fn list_panorama_device_groups(
+        &self,
+        Parameters(input): Parameters<ListPanoramaDeviceGroupsInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) = Self::authorize(
+            &extensions,
+            "list_panorama_device_groups",
+            Some(&input.device),
+        ) {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panorama_device_groups(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// List Panorama templates and their declared variable names.
+    #[tool(
+        name = "list_panorama_templates",
+        description = "List Panorama templates and the names of their declared variables"
+    )]
+    async fn list_panorama_templates(
+        &self,
+        Parameters(input): Parameters<ListPanoramaTemplatesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "list_panorama_templates", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panorama_templates(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Read a Panorama push job's overall and per-device status.
+    #[tool(
+        name = "get_panorama_push_status",
+        description = "Read a Panorama commit-all/push job's overall and per-target-firewall status by job id"
+    )]
+    async fn get_panorama_push_status(
+        &self,
+        Parameters(input): Parameters<GetPanoramaPushStatusInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panorama_push_status", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panorama_push_status(input, caller.as_ref(), cancellation)
                 .await,
         )
     }

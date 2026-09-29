@@ -14,6 +14,14 @@ pub const MAX_XPATH_BYTES: usize = 4096;
 pub const MAX_CONFIG_ELEMENT_BYTES: usize = 256 * 1024;
 const MAX_EXTRACTED_TEXT_BYTES: usize = 4096;
 const MAX_ENVELOPE_ATTRIBUTE_BYTES: usize = 64;
+/// Maximum accepted PAN-OS job identifier length (ASCII digits only).
+const MAX_JOB_ID_BYTES: usize = 32;
+/// Maximum `name` attribute accepted from a Panorama device-group/template/push entry.
+const MAX_ENTRY_NAME_BYTES: usize = 256;
+/// Maximum top-level entries (device-groups, templates, pushed devices) parsed from one response.
+const MAX_LIST_ENTRIES: usize = 4096;
+/// Maximum nested members (member firewalls, template variables) parsed per entry.
+const MAX_MEMBERS_PER_ENTRY: usize = 4096;
 
 /// Parser limits applied before semantic response processing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,7 +355,7 @@ fn read_status_and_code(
 }
 
 /// Terminal and intermediate state from a PAN-OS asynchronous job.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct JobStatus {
     /// PAN-OS job state, such as `PEND`, `ACT`, or `FIN`.
     pub status: Option<String>,
@@ -888,6 +896,366 @@ fn redact_pem_private_keys(input: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Validate a caller-supplied PAN-OS asynchronous job identifier.
+pub fn validate_job_id(job_id: &str) -> Result<()> {
+    if job_id.is_empty()
+        || job_id.len() > MAX_JOB_ID_BYTES
+        || !job_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(PanosMcpError::Policy {
+            field: "job_id",
+            reason: format!("job identifier must contain only 1-{MAX_JOB_ID_BYTES} ASCII digits"),
+        });
+    }
+    Ok(())
+}
+
+/// One Panorama device-group and the serials of its member firewalls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct DeviceGroupSummary {
+    /// Device-group name.
+    pub name: String,
+    /// Serial numbers of firewalls assigned to this device-group.
+    pub member_serials: Vec<String>,
+}
+
+/// One Panorama template and the names of its declared variables.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct TemplateSummary {
+    /// Template name.
+    pub name: String,
+    /// Names of variables declared on this template.
+    pub variables: Vec<String>,
+}
+
+/// Per-device result inside a Panorama push (`CommitAll`) job.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PushDeviceStatus {
+    /// Target firewall serial number.
+    pub serial: String,
+    /// Firewall name, when PAN-OS reports one.
+    pub device_name: Option<String>,
+    /// Per-device job state, such as `PEND`, `ACT`, or `FIN`.
+    pub status: Option<String>,
+    /// Per-device terminal result, such as `OK` or `FAIL`.
+    pub result: Option<String>,
+    /// Integer completion percentage when supplied.
+    pub progress: Option<u8>,
+    /// Bounded per-device details.
+    pub details: Option<String>,
+}
+
+/// Overall and per-device state of a Panorama push job.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct PushJobStatus {
+    /// Overall push job state.
+    pub job: JobStatus,
+    /// Per-target-firewall push results, in document order.
+    pub devices: Vec<PushDeviceStatus>,
+}
+
+/// Parse `/config/devices/entry[@name='localhost.localdomain']/device-group`
+/// into structured summaries.
+pub fn parse_device_groups(response: &PanosResponse) -> Result<Vec<DeviceGroupSummary>> {
+    let entries = parse_grouped_entries(response.xml.as_bytes(), b"device-group", b"devices")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| DeviceGroupSummary {
+            name: entry.name,
+            member_serials: entry.members,
+        })
+        .collect())
+}
+
+/// Parse `/config/devices/entry[@name='localhost.localdomain']/template`
+/// into structured summaries.
+pub fn parse_templates(response: &PanosResponse) -> Result<Vec<TemplateSummary>> {
+    let entries = parse_grouped_entries(response.xml.as_bytes(), b"template", b"variable")?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| TemplateSummary {
+            name: entry.name,
+            variables: entry.members,
+        })
+        .collect())
+}
+
+/// Parse a `show jobs id <id>` response for a Panorama push (`CommitAll`) job,
+/// including the per-target-firewall `<devices>` breakdown PAN-OS nests inside it.
+pub fn parse_push_job_status(response: &PanosResponse) -> Result<PushJobStatus> {
+    let job = parse_job_status(response)?;
+    let devices = parse_push_devices(response.xml.as_bytes())?;
+    Ok(PushJobStatus { job, devices })
+}
+
+/// One `<parent><entry name="...">...<nested_container><entry name="..."/>...</nested_container></entry></parent>`
+/// grouping, reduced to the outer name and the inner entries' names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GroupedEntries {
+    name: String,
+    members: Vec<String>,
+}
+
+/// Whether the tail of `stack` equals `tail`, element for element.
+fn stack_ends_with(stack: &[Vec<u8>], tail: &[&[u8]]) -> bool {
+    if stack.len() < tail.len() {
+        return false;
+    }
+    stack[stack.len() - tail.len()..]
+        .iter()
+        .zip(tail)
+        .all(|(actual, expected)| actual.as_slice() == *expected)
+}
+
+/// The `name` attribute of an XML start/empty element, bounded and validated.
+fn entry_name_attribute(element: &quick_xml::events::BytesStart<'_>) -> Result<Option<String>> {
+    for attribute in element.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+        if attribute.key.as_ref() == "name" {
+            let value = attribute
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(|error| PanosMcpError::Xml(error.to_string()))?
+                .into_owned();
+            if value.len() > MAX_ENTRY_NAME_BYTES {
+                return Err(PanosMcpError::Xml(format!(
+                    "entry name attribute exceeds {MAX_ENTRY_NAME_BYTES} bytes"
+                )));
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+/// Record a `<entry>` open (`Start` or `Empty`) against the two shapes this
+/// parser understands: a top-level entry directly under `list_element`, or a
+/// nested member entry under `list_element/entry/nested_container`.
+fn record_entry_open(
+    stack: &[Vec<u8>],
+    element: &quick_xml::events::BytesStart<'_>,
+    list_element: &[u8],
+    nested_container: &[u8],
+    results: &mut Vec<GroupedEntries>,
+) -> Result<()> {
+    if element.name().as_ref().as_bytes() != b"entry" {
+        return Ok(());
+    }
+    if stack_ends_with(stack, &[list_element]) {
+        if results.len() >= MAX_LIST_ENTRIES {
+            return Err(PanosMcpError::Xml(format!(
+                "response contains more than {MAX_LIST_ENTRIES} entries"
+            )));
+        }
+        results.push(GroupedEntries {
+            name: entry_name_attribute(element)?.unwrap_or_default(),
+            members: Vec::new(),
+        });
+    } else if stack_ends_with(stack, &[list_element, b"entry", nested_container])
+        && let Some(current) = results.last_mut()
+    {
+        if current.members.len() >= MAX_MEMBERS_PER_ENTRY {
+            return Err(PanosMcpError::Xml(format!(
+                "entry '{}' contains more than {MAX_MEMBERS_PER_ENTRY} members",
+                current.name
+            )));
+        }
+        current
+            .members
+            .push(entry_name_attribute(element)?.unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Parse `<list_element><entry name="X"><nested_container><entry name="Y"/>...
+/// </nested_container></entry>...</list_element>` groupings anywhere in the
+/// document, keyed by ancestor path rather than absolute position -- the
+/// caller already scoped the request to one XPath, so the shape is exact.
+fn parse_grouped_entries(
+    input: &[u8],
+    list_element: &[u8],
+    nested_container: &[u8],
+) -> Result<Vec<GroupedEntries>> {
+    let mut reader = Reader::from_reader(input);
+    reader.config_mut().trim_text(true);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut results: Vec<GroupedEntries> = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                record_entry_open(
+                    &stack,
+                    &element,
+                    list_element,
+                    nested_container,
+                    &mut results,
+                )?;
+                stack.push(element.name().as_ref().as_bytes().to_vec());
+            }
+            Ok(Event::Empty(element)) => {
+                record_entry_open(
+                    &stack,
+                    &element,
+                    list_element,
+                    nested_container,
+                    &mut results,
+                )?;
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
+        }
+    }
+    Ok(results)
+}
+
+/// Parse the `<job><devices><entry name="serial">...</entry></devices></job>`
+/// per-target-firewall breakdown PAN-OS attaches to a push (`CommitAll`) job.
+fn parse_push_devices(input: &[u8]) -> Result<Vec<PushDeviceStatus>> {
+    // Unlike a device-group/template's `<entry><container><entry/></container></entry>`
+    // nesting, `<devices>` entries under a job are the container's *direct*
+    // children -- there is no extra wrapper level to skip.
+    let names = list_child_entry_names(input, b"devices")?;
+    // Each device entry's status/result/progress/details live as its own
+    // children. Slicing out that entry's own XML and re-running the already
+    // depth-correct `first_element_text`/`first_child_text` over the slice
+    // reuses their tested handling of entities and nested `<line>` children in
+    // `details` instead of re-deriving it here.
+    let mut devices = Vec::with_capacity(names.len());
+    for name in names {
+        let slice = extract_entry_slice(input, b"devices", &name)?.unwrap_or_default();
+        let progress = first_element_text(&slice, b"progress")?
+            .map(|value| value.parse::<u8>())
+            .transpose()
+            .map_err(|_| PanosMcpError::Xml("push device progress is not an integer".to_owned()))?;
+        devices.push(PushDeviceStatus {
+            serial: name,
+            device_name: first_element_text(&slice, b"devicename")?,
+            status: first_element_text(&slice, b"status")?,
+            result: first_element_text(&slice, b"result")?,
+            progress,
+            details: first_child_text(&slice, b"entry", b"details")?,
+        });
+    }
+    Ok(devices)
+}
+
+/// Return the `name` attributes of `<entry>` elements that are direct
+/// children of `parent`, in document order.
+fn list_child_entry_names(input: &[u8], parent: &[u8]) -> Result<Vec<String>> {
+    let mut reader = Reader::from_reader(input);
+    reader.config_mut().trim_text(true);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut names = Vec::new();
+
+    let record = |stack: &[Vec<u8>],
+                  element: &quick_xml::events::BytesStart<'_>,
+                  names: &mut Vec<String>|
+     -> Result<()> {
+        if element.name().as_ref().as_bytes() == b"entry" && stack_ends_with(stack, &[parent]) {
+            if names.len() >= MAX_LIST_ENTRIES {
+                return Err(PanosMcpError::Xml(format!(
+                    "response contains more than {MAX_LIST_ENTRIES} entries"
+                )));
+            }
+            names.push(entry_name_attribute(element)?.unwrap_or_default());
+        }
+        Ok(())
+    };
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                record(&stack, &element, &mut names)?;
+                stack.push(element.name().as_ref().as_bytes().to_vec());
+            }
+            Ok(Event::Empty(element)) => {
+                record(&stack, &element, &mut names)?;
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
+        }
+    }
+    Ok(names)
+}
+
+/// Return the raw XML bytes of the `<entry name="entry_name">...</entry>`
+/// (or self-closing `<entry .../>`) that is a direct child of `container`,
+/// or `None` when no such entry is present.
+fn extract_entry_slice(
+    input: &[u8],
+    container: &[u8],
+    entry_name: &str,
+) -> Result<Option<Vec<u8>>> {
+    let mut reader = Reader::from_reader(input);
+    reader.config_mut().trim_text(false);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut entry_depth: Option<usize> = None;
+    let mut start = 0_u64;
+
+    loop {
+        let position_before = reader.buffer_position();
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if entry_depth.is_none()
+                    && name == b"entry"
+                    && stack_ends_with(&stack, &[container])
+                    && entry_name_attribute(&element)?.as_deref() == Some(entry_name)
+                {
+                    start = position_before;
+                    stack.push(name);
+                    entry_depth = Some(stack.len());
+                    continue;
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(element)) => {
+                if entry_depth.is_none()
+                    && element.name().as_ref().as_bytes() == b"entry"
+                    && stack_ends_with(&stack, &[container])
+                    && entry_name_attribute(&element)?.as_deref() == Some(entry_name)
+                {
+                    let end = reader.buffer_position();
+                    return Ok(Some(input[position_before as usize..end as usize].to_vec()));
+                }
+            }
+            Ok(Event::End(_)) => {
+                if entry_depth == Some(stack.len()) {
+                    let end = reader.buffer_position();
+                    return Ok(Some(input[start as usize..end as usize].to_vec()));
+                }
+                stack.pop();
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Ok(Event::Eof) => return Ok(None),
+            Ok(_) => {}
+            Err(error) => return Err(PanosMcpError::Xml(error.to_string())),
+        }
+    }
 }
 
 /// Stable name for the documented PAN-OS XML API response code.
@@ -2058,5 +2426,168 @@ mod entry_scan_tests {
     fn rejects_doctype_even_mid_scan() {
         let xml = br#"<response status="success"><result><rules><!DOCTYPE x><entry name="r1"/></rules></result></response>"#;
         assert!(scan_config_entries(xml, 0, 10, 3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod panorama_tests {
+    use super::*;
+
+    fn response(xml: &str) -> PanosResponse {
+        parse_panos_response(xml.as_bytes(), XmlLimits::default()).expect("valid envelope")
+    }
+
+    #[test]
+    fn validates_job_id_shape() {
+        validate_job_id("10").expect("plain digits accepted");
+        assert!(validate_job_id("").is_err());
+        assert!(validate_job_id("12x").is_err());
+        assert!(validate_job_id(&"1".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn parses_device_groups_with_members_and_an_empty_group() {
+        let response = response(
+            r#"<response status="success"><result><device-group>
+                <entry name="DG-Branch"><devices><entry name="0011C1"/><entry name="0011C2"/></devices></entry>
+                <entry name="DG-Empty"/>
+            </device-group></result></response>"#,
+        );
+        let groups = parse_device_groups(&response).expect("device groups parse");
+        assert_eq!(
+            groups,
+            vec![
+                DeviceGroupSummary {
+                    name: "DG-Branch".to_owned(),
+                    member_serials: vec!["0011C1".to_owned(), "0011C2".to_owned()],
+                },
+                DeviceGroupSummary {
+                    name: "DG-Empty".to_owned(),
+                    member_serials: vec![],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_templates_with_variables_and_none() {
+        let response = response(
+            r#"<response status="success"><result><template>
+                <entry name="TMPL-Base"><variable><entry name="$var1"/><entry name="$var2"/></variable></entry>
+                <entry name="TMPL-NoVars"/>
+            </template></result></response>"#,
+        );
+        let templates = parse_templates(&response).expect("templates parse");
+        assert_eq!(
+            templates,
+            vec![
+                TemplateSummary {
+                    name: "TMPL-Base".to_owned(),
+                    variables: vec!["$var1".to_owned(), "$var2".to_owned()],
+                },
+                TemplateSummary {
+                    name: "TMPL-NoVars".to_owned(),
+                    variables: vec![],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_device_group_container_yields_no_entries() {
+        let response =
+            response(r#"<response status="success"><result><device-group/></result></response>"#);
+        assert_eq!(parse_device_groups(&response).expect("parses"), vec![]);
+    }
+
+    #[test]
+    fn parses_push_job_status_with_overall_and_per_device_state() {
+        let response = response(
+            r#"<response status="success"><result><job>
+                <id>10</id>
+                <type>CommitAll</type>
+                <status>FIN</status>
+                <result>OK</result>
+                <progress>100</progress>
+                <details><line>Configuration committed successfully</line></details>
+                <devices>
+                    <entry name="0011C1">
+                        <devicename>fw-01</devicename>
+                        <status>FIN</status>
+                        <result>OK</result>
+                        <progress>100</progress>
+                        <details><line>commit succeeded</line></details>
+                    </entry>
+                    <entry name="0011C2">
+                        <devicename>fw-02</devicename>
+                        <status>ACT</status>
+                        <result></result>
+                        <progress>42</progress>
+                    </entry>
+                </devices>
+            </job></result></response>"#,
+        );
+        let status = parse_push_job_status(&response).expect("push status parses");
+        assert_eq!(status.job.status.as_deref(), Some("FIN"));
+        assert_eq!(status.job.result.as_deref(), Some("OK"));
+        assert_eq!(status.job.progress, Some(100));
+        assert_eq!(
+            status.devices,
+            vec![
+                PushDeviceStatus {
+                    serial: "0011C1".to_owned(),
+                    device_name: Some("fw-01".to_owned()),
+                    status: Some("FIN".to_owned()),
+                    result: Some("OK".to_owned()),
+                    progress: Some(100),
+                    details: Some("commit succeeded".to_owned()),
+                },
+                PushDeviceStatus {
+                    serial: "0011C2".to_owned(),
+                    device_name: Some("fw-02".to_owned()),
+                    status: Some("ACT".to_owned()),
+                    result: Some(String::new()),
+                    progress: Some(42),
+                    details: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn push_job_with_no_devices_yields_an_empty_device_list() {
+        let response = response(
+            r#"<response status="success"><result><job>
+                <id>11</id><status>ACT</status><progress>10</progress>
+            </job></result></response>"#,
+        );
+        let status = parse_push_job_status(&response).expect("parses");
+        assert_eq!(status.job.status.as_deref(), Some("ACT"));
+        assert!(status.devices.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_push_device_progress() {
+        let response = response(
+            r#"<response status="success"><result><job><devices>
+                <entry name="0011C1"><progress>not-a-number</progress></entry>
+            </devices></job></result></response>"#,
+        );
+        let error = parse_push_job_status(&response).expect_err("bad progress must be refused");
+        assert!(error.to_string().contains("integer"));
+    }
+
+    #[test]
+    fn device_group_member_count_is_bounded() {
+        let mut members = String::new();
+        for index in 0..=MAX_MEMBERS_PER_ENTRY {
+            members.push_str(&format!("<entry name=\"serial-{index}\"/>"));
+        }
+        let xml = format!(
+            r#"<response status="success"><result><device-group><entry name="DG"><devices>{members}</devices></entry></device-group></result></response>"#
+        );
+        let response = response(&xml);
+        let error = parse_device_groups(&response).expect_err("excess members must be refused");
+        assert!(error.to_string().contains("more than"));
     }
 }

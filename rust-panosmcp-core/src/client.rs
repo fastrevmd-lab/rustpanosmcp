@@ -5,7 +5,7 @@ use crate::{
     inventory::{DeviceConfig, LoadedTlsTrust, MutationPolicy},
     xml::{
         JobStatus, PanosResponse, XmlLimits, parse_job_status, parse_panos_response,
-        parse_pending_changes, validate_read_only_op_command, validate_read_xpath,
+        parse_pending_changes, validate_job_id, validate_read_only_op_command, validate_read_xpath,
     },
 };
 use futures_util::StreamExt;
@@ -29,7 +29,6 @@ use tokio::{sync::Semaphore, time};
 use tokio_util::sync::CancellationToken;
 
 const API_PATH: &str = "api/";
-const JOB_ID_MAX_BYTES: usize = 32;
 
 /// PAN-OS XML API codes that mean the configured key stopped authenticating,
 /// as opposed to a transient transport failure or an unrelated API error.
@@ -219,15 +218,7 @@ impl PanosClient {
         deadline: Duration,
         cancellation: CancellationToken,
     ) -> Result<JobStatus> {
-        if job_id.is_empty()
-            || job_id.len() > JOB_ID_MAX_BYTES
-            || !job_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(PanosMcpError::Policy {
-                field: "job_id",
-                reason: "job identifier must contain only 1-32 ASCII digits".to_owned(),
-            });
-        }
+        validate_job_id(job_id)?;
         let command = format!("<show><jobs><id>{job_id}</id></jobs></show>");
         let operation = async {
             let mut backoff = Duration::from_millis(200);
@@ -251,6 +242,22 @@ impl PanosClient {
                 operation: "poll_job",
             }),
         }
+    }
+
+    /// Fetch a PAN-OS job's current response in one read, with no polling loop.
+    ///
+    /// Unlike [`poll_job`](Self::poll_job) this returns the full envelope
+    /// rather than the summarized [`JobStatus`], so a caller that needs
+    /// PAN-OS-specific nested detail -- such as a Panorama push job's
+    /// per-target-firewall `<devices>` breakdown -- can parse it directly.
+    pub async fn job_response(
+        &self,
+        job_id: &str,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        validate_job_id(job_id)?;
+        let command = format!("<show><jobs><id>{job_id}</id></jobs></show>");
+        self.operational(&command, cancellation).await
     }
 
     /// Submit already-validated fields for guarded configuration lifecycle operations.
