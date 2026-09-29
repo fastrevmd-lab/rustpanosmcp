@@ -93,6 +93,12 @@ pub fn build_router(
         max_inflight_requests: options.max_inflight_requests,
         max_inflight_requests_per_token: options.max_inflight_requests_per_token,
         max_inflight_requests_per_device: options.max_inflight_requests_per_target,
+        // This server exposes no operator flag for a trusted reverse-proxy
+        // CIDR list yet (mecmcp-transport#410 added the field). Empty keeps
+        // prior behavior: the rate limiter keys on the direct peer address,
+        // never an `X-Forwarded-For` header, which is the safe default in
+        // the absence of a configured trusted proxy.
+        trusted_proxies: Vec::new(),
         session_idle_timeout_secs: 300,
         session_max_lifetime_secs: 3600,
     };
