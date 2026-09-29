@@ -1,0 +1,29 @@
+#
+# Install as /etc/logrotate.d/rustpanosmcp-audit (root:root, mode 0644).
+# Enable the sink by passing --audit-log-file (or the equivalent CLI flag).
+# The path below matches the packaged systemd unit, which runs as
+# rust-panosmcp:rust-panosmcp with StateDirectory=rust-panosmcp
+# (/var/lib/rust-panosmcp writable under ProtectSystem=strict). Adjust
+# paths/retention to your policy.
+#
+# Rename + reopen, not copytruncate:
+#   The server keeps the AuditFileSink handle mecmcp_audit::init_tracing
+#   returns and reopens it by path on SIGHUP, alongside the existing
+#   devices.json/tokens.json hot reload. logrotate renames the file below,
+#   sends SIGHUP through `postrotate`, and every write after that point goes
+#   to a fresh inode at the same path. Nothing written before the rename is
+#   truncated and nothing written after it is lost — unlike copytruncate,
+#   which drops whatever lands between its copy and its truncate.
+
+/var/lib/rust-panosmcp/audit.jsonl {
+    daily
+    rotate 30
+    missingok
+    notifempty
+    compress
+    delaycompress
+    su rust-panosmcp rust-panosmcp
+    postrotate
+        systemctl kill -s HUP rust-panosmcp.service >/dev/null 2>&1 || true
+    endscript
+}
