@@ -23,7 +23,10 @@ use rust_panosmcp_core::{
         ChangeSetStatusInput, CreateChangeSetInput, OperationInput, OperationStatusInput,
         StageConfigInput,
     },
-    tools::{ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, PanosService},
+    tools::{
+        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, GetPanosEntryDigestInput,
+        ListPanosEntriesInput, PanosService,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -795,6 +798,56 @@ impl PanosMcpServer {
         Self::to_call_result(
             service
                 .get_panos_config(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Page through a rule or object list container's entries.
+    #[tool(
+        name = "list_panos_entries",
+        description = "List <entry> children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked rather than erroring on a large rulebase"
+    )]
+    async fn list_panos_entries(
+        &self,
+        Parameters(input): Parameters<ListPanosEntriesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "list_panos_entries", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panos_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Digest one entry for single-rule drift detection.
+    #[tool(
+        name = "get_panos_entry_digest",
+        description = "Fetch and hash exactly one PAN-OS config entry by XPath, without reading the rest of the configuration -- for detecting drift on a single rule or object"
+    )]
+    async fn get_panos_entry_digest(
+        &self,
+        Parameters(input): Parameters<GetPanosEntryDigestInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_entry_digest", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_entry_digest(input, caller.as_ref(), cancellation)
                 .await,
         )
     }

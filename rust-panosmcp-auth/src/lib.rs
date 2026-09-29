@@ -38,8 +38,10 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_candidate_fingerprint",
     "get_panos_change_set",
     "get_panos_config",
+    "get_panos_entry_digest",
     "get_panos_operation",
     "list_devices",
+    "list_panos_entries",
     "stage_panos_config",
     "validate_panos_candidate",
 ];
