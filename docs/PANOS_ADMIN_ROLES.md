@@ -43,13 +43,17 @@ role does not.
 
 The PAN-OS admin role is the *coarse*, per-account gate: it grants or
 withholds entire XML API categories (Operational Requests, Configuration,
-Commit, …), not individual commands. The finer-grained control — which
-specific `<show>`/operational commands `execute_panos_op` will actually
-forward to a given device — is this server's own inventory-level op-command
-allowlist (`config/devices.example.json`'s per-device policy), not the
-PAN-OS role. Treat the two as layered: the server's allowlist narrows what a
-request can ask for, and the PAN-OS role is the backstop if that allowlist
-is ever misconfigured or bypassed.
+Commit, …), not individual commands. The server layers a second, structural
+gate on top of that for `execute_panos_op`
+(`validate_read_only_op_command` in `rust-panosmcp-core/src/xml.rs`): the
+submitted command must parse as exactly one `<show>` root element, carry no
+attributes on that root, and fit within a size and nesting-depth limit. This
+rejects malformed or non-`<show>` XML outright, but it is not a per-command
+or per-device allowlist — any well-formed `<show>...</show>` body passes it,
+so within that shape the PAN-OS admin role above is the only thing deciding
+which specific operational commands the account may actually run. Do not
+treat the server-side check as a substitute for scoping the PAN-OS role
+tightly.
 
 Rationale for splitting rather than sharing one account across both MCP
 connections:

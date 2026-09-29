@@ -162,19 +162,21 @@ never grants mutation tools.
 ## PAN-OS API-key lifetime and rotation
 
 An API key's lifetime is governed by the firewall's **API Key Lifetime**
-setting (Device > Setup > Management > Authentication Settings, or
-`set mgt-config authentication-profile <name> api-key-lifetime <minutes>`
-on modern releases): a positive value expires the key that many minutes
-after it was generated, and `0` — the factory default — means the key never
-expires on its own. Do not rely on the default; set an explicit lifetime
-under change control so a leaked or forgotten key is not valid forever.
+setting (Device > Setup > Management > Authentication Settings): a positive
+value expires the key that many minutes after it was generated, and `0` —
+the factory default — means the key never expires on its own. Do not rely on
+the default; set an explicit lifetime under change control so a leaked or
+forgotten key is not valid forever. The CLI/Panorama-template equivalent of
+this setting varies by PAN-OS release; confirm the exact command against
+your device's PAN-OS documentation rather than assuming one form works
+across releases.
 
 Independent of that setting, a key also stops working when: the issuing
 administrator account is disabled/deleted; its password changes (the key is
 derived from the account credential); an administrator explicitly revokes it
-(`request api-key revoke` on modern PAN-OS, or the equivalent Web UI/Panorama
-**Expire All API Keys** action, which revokes every key on the device at
-once); or the API Key Certificate switch below invalidates it. In every one
+(via the **Expire All API Keys** Web UI/Panorama action, which revokes every
+key on the device at once); or the API Key Certificate switch below
+invalidates it. In every one
 of these cases the firewall rejects the key with an HTTP-level 401/403 (not
 an HTTP 200 wrapping an XML error code), which this server's `panos_auth`
 `/readyz` check treats as an auth failure (see below) — so an expired or
