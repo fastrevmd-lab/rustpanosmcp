@@ -212,6 +212,79 @@ impl PanosClient {
         parse_pending_changes(&response)
     }
 
+    /// Execute a fixed, parameter-free `<request>`-rooted operational
+    /// command.
+    ///
+    /// Same rationale as [`check_pending_changes`](Self::check_pending_changes):
+    /// `<request>` is a distinct PAN-OS operational root from `<show>`, and
+    /// this bypasses [`operational`](Self::operational)'s `<show>`-only gate
+    /// rather than widening it, because every caller here passes one of a
+    /// small set of `&'static str` constants -- never caller-supplied text.
+    pub(crate) async fn fixed_op(
+        &self,
+        command: &'static str,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        self.post(
+            vec![("type", "op".to_owned()), ("cmd", command.to_owned())],
+            cancellation,
+        )
+        .await
+    }
+
+    /// Poll a PAN-OS `type=log` job with cancellation and bounded backoff.
+    ///
+    /// A log job's terminal state lives directly under `<result>`, not under
+    /// a `<job>` element the way a config/commit job does, so this cannot
+    /// share [`poll_job`](Self::poll_job)'s `parse_job_status` call -- see
+    /// [`crate::xml::log_job_is_finished`].
+    pub(crate) async fn poll_log_job(
+        &self,
+        job_id: &str,
+        deadline: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<PanosResponse> {
+        if job_id.is_empty()
+            || job_id.len() > JOB_ID_MAX_BYTES
+            || !job_id.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(PanosMcpError::Policy {
+                field: "job_id",
+                reason: "job identifier must contain only 1-32 ASCII digits".to_owned(),
+            });
+        }
+        let operation = async {
+            let mut backoff = Duration::from_millis(200);
+            loop {
+                let response = self
+                    .post(
+                        vec![
+                            ("type", "log".to_owned()),
+                            ("action", "get".to_owned()),
+                            ("job-id", job_id.to_owned()),
+                        ],
+                        cancellation.clone(),
+                    )
+                    .await?;
+                if crate::xml::log_job_is_finished(&response)? {
+                    return Ok(response);
+                }
+                let jitter = fastrand::u64(0..=100);
+                tokio::select! {
+                    () = cancellation.cancelled() => return Err(PanosMcpError::Cancelled),
+                    () = time::sleep(backoff + Duration::from_millis(jitter)) => {}
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(3));
+            }
+        };
+        match time::timeout(deadline, operation).await {
+            Ok(result) => result,
+            Err(_) => Err(PanosMcpError::Timeout {
+                operation: "poll_log_job",
+            }),
+        }
+    }
+
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.
     pub async fn poll_job(
         &self,
