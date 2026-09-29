@@ -246,7 +246,10 @@ Phase 4 release evidence is in
 rotation, backup/recovery, and upgrades are covered by
 [docs/OPERATIONS.md](docs/OPERATIONS.md); see also
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md),
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and [SECURITY.md](SECURITY.md).
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and [SECURITY.md](SECURITY.md). For
+the PAN-OS-side least-privilege administrator accounts (distinct from the MCP
+bearer roles above), see
+[docs/PANOS_ADMIN_ROLES.md](docs/PANOS_ADMIN_ROLES.md).
 
 ## MCP tools reference
 
