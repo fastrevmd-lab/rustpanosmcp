@@ -48,6 +48,21 @@ pub struct HttpOptions {
     pub max_sessions_per_token: usize,
 }
 
+/// Convert a documented per-minute request quota into the per-second
+/// sustained refill rate mecmcp-transport's token bucket expects.
+///
+/// Rounds up rather than truncating, so a quota below 60/minute is never
+/// silently disabled by integer division to zero (`0` means "unlimited" to
+/// the bucket, i.e. fail open) -- the sustained rate this yields is within
+/// one request/second of the documented quota, never coarser (MEC-528
+/// class 4: passing the per-minute value straight through as the
+/// per-second rate previously made the sustained limit up to 60x looser
+/// than documented).
+#[must_use]
+fn per_minute_to_per_second(per_minute: u32) -> u64 {
+    u64::from(per_minute).div_ceil(60)
+}
+
 /// Build the complete shared HTTP router with PAN-OS-owned identity and scope fields.
 pub fn build_router(
     runtime: RuntimeState,
@@ -58,13 +73,20 @@ pub fn build_router(
     let identity =
         TransportIdentity::new("panosmcp", "panos", "rust-panosmcp", ["device", "devices"]);
 
-    // Convert per-minute rates to per-second for mecmcp-transport's token bucket.
-    // Burst = rate to allow the full per-minute quota within the first second.
+    // mecmcp-transport's token bucket takes a per-second refill rate, but
+    // `--ip-rate-per-minute`/`--token-rate-per-minute` are documented and
+    // configured as a per-*minute* quota. Passing the per-minute value
+    // straight through as the per-second rate (as this used to) makes the
+    // sustained limit 60x looser than documented -- e.g. the default
+    // `ip_rate_per_minute = 120` became a 120-requests-per-*second* bucket
+    // (MEC-528 class 4). Burst stays the full per-minute quota so a caller
+    // can still spend it all in less than a minute; only the sustained
+    // refill rate is converted.
     let limits = LimitsConfig {
         max_request_body_bytes: options.request_body_limit,
-        max_requests_per_second_per_ip: u64::from(options.ip_rate_per_minute),
+        max_requests_per_second_per_ip: per_minute_to_per_second(options.ip_rate_per_minute),
         max_request_burst_per_ip: u64::from(options.ip_rate_per_minute),
-        max_requests_per_second_per_token: u64::from(options.token_rate_per_minute),
+        max_requests_per_second_per_token: per_minute_to_per_second(options.token_rate_per_minute),
         max_request_burst_per_token: u64::from(options.token_rate_per_minute),
         max_sessions: options.max_sessions,
         max_sessions_per_token: options.max_sessions_per_token,
@@ -206,7 +228,46 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    use super::per_minute_to_per_second;
     use mecmcp_auth::{ScopeSet, TokenDigest, TokenEntry, TokenStore};
+
+    /// MEC-528 class 4: the documented default of 120 requests/minute must
+    /// become a 2-requests/second sustained rate (120/min), not 120/sec
+    /// (7200/min) as it did when the per-minute value was passed straight
+    /// through as the per-second rate.
+    #[test]
+    fn converts_documented_default_rates_exactly() {
+        assert_eq!(per_minute_to_per_second(120), 2, "ip default: 120/min");
+        assert_eq!(per_minute_to_per_second(240), 4, "token default: 240/min");
+    }
+
+    #[test]
+    fn zero_stays_zero_so_the_dimension_stays_disabled() {
+        assert_eq!(per_minute_to_per_second(0), 0);
+    }
+
+    /// A quota below 60/minute must round up to a nonzero per-second rate --
+    /// truncating division would silently disable rate limiting entirely.
+    #[test]
+    fn sub_minute_quota_rounds_up_instead_of_disabling() {
+        assert_eq!(per_minute_to_per_second(1), 1);
+        assert_eq!(per_minute_to_per_second(30), 1);
+        assert_eq!(per_minute_to_per_second(59), 1);
+    }
+
+    #[test]
+    fn never_exceeds_a_60x_blowup_regardless_of_input() {
+        for per_minute in [1_u32, 30, 59, 60, 61, 100, 120, 240, 1_000, u32::MAX] {
+            let per_second = per_minute_to_per_second(per_minute);
+            assert!(
+                per_second.saturating_mul(60) < u64::from(per_minute) + 60,
+                "per_minute={per_minute} converted to per_second={per_second}, \
+                 sustained rate {}/min is more than one bucket-granularity step \
+                 looser than documented",
+                per_second * 60
+            );
+        }
+    }
 
     #[test]
     fn token_store_fixture_authenticates_without_exposing_digest() {

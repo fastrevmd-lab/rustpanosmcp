@@ -27,4 +27,4 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Reached transitively through the path dependency on rust-panosmcp-auth.
 # Mirrors the root deny.toml.
-allow-git = ["https://github.com/fastrevmd-lab/mecmcp"]
+allow-git = ["https://github.com/mechubsec/mecmcp"]

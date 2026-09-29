@@ -225,6 +225,68 @@ async fn blocklist_denies_matching_xpath() {
     assert!(err.to_string().contains("blocklist rule"));
 }
 
+/// MEC-528 class 3: a blocklist rule written with single-quote predicates
+/// (as PAN-OS commonly emits, and as the earlier test above uses) must still
+/// catch a read request whose xpath spells the same predicate with double
+/// quotes -- `'` and `"` are the same XPath to PAN-OS. Before canonicalizing
+/// both sides to the same quote style, this request's normalized form never
+/// matched the rule's glob and the restricted read was silently allowed
+/// through (fail-open blocklist semantics treating "didn't match" the same
+/// as "not blocked").
+///
+/// This rule's pattern also contains `[@name='secret-object']`, so this
+/// integration test exercises both this fix and the separate glob-metachar
+/// escaping fix together (a pattern with brackets cannot compile at all
+/// without the latter, let alone match). It is intentionally *not* the
+/// isolated proof of quote canonicalization alone -- that lives in
+/// `rust-panosmcp-auth::grant::xpath_quote_tests`, which calls
+/// `canonicalize_xpath_quotes`/`allows_xpath` directly with no glob compile
+/// step in the way. This test's job is the end-to-end path: both fixes
+/// composed, as a real blocklist rule actually exercises them.
+#[tokio::test]
+async fn blocklist_denies_matching_xpath_spelled_with_a_different_quote_style() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                "blocklist": {
+                    "xpath": ["*/address/entry[@name='secret-object']*"]
+                }
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let service = PanosService::new(inventory).expect("build service");
+
+    let input = GetPanosConfigInput {
+        device: "fw".to_string(),
+        source: ConfigSource::Running,
+        // Same xpath as the blocked rule, but with double quotes instead of
+        // the single quotes the rule was written with.
+        xpath: Some(
+            "/config/devices/entry[@name=\"localhost.localdomain\"]/vsys/entry[@name=\"vsys1\"]/address/entry[@name=\"secret-object\"]"
+                .to_string(),
+        ),
+        max_bytes: None,
+        max_lines: None,
+    };
+
+    let result = service
+        .get_panos_config(input, None, CancellationToken::new())
+        .await;
+    let err = result.expect_err("a different quote style must not bypass the blocklist");
+    assert!(err.to_string().contains("blocked by"));
+    assert!(err.to_string().contains("blocklist rule"));
+}
+
 /// The engine is fail-open: a command matching no rule is allowed.
 #[tokio::test]
 async fn fail_open_allows_unmatched_commands() {
@@ -267,4 +329,41 @@ async fn fail_open_allows_unmatched_commands() {
             "fail-open should allow unmatched: {err_str}"
         );
     }
+}
+
+/// MEC-528 F2: a `\` in an operator's xpath blocklist pattern must be
+/// rejected at load time, not silently double-escaped into a rule that
+/// matches something other than what the operator wrote. `escape_xpath_glob_metacharacters`
+/// escapes `\` (globset's own escape character) precisely so it can combine
+/// correctly with an adjacent `[`/`]`/`?` -- but that means a pattern an
+/// operator hand-escaped themselves (`\[` meant as a literal bracket) gets
+/// mangled into `\\[`, which is not the rule the operator intended and
+/// fails open with no error. `\` has no meaning in an XPath predicate, so a
+/// blocklist pattern should never need one.
+#[tokio::test]
+async fn blocklist_xpath_pattern_with_backslash_is_rejected_at_load_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let path = write_inventory(
+        &dir,
+        r#"{
+            "version": 1,
+            "devices": [{
+                "name": "fw",
+                "endpoint": "https://fw.test",
+                "api_key": {"type": "env", "name": "PANOS_TEST_KEY"},
+                "blocklist": {
+                    "xpath": ["*/address/entry\\[@name='secret-object']*"]
+                }
+            }]
+        }"#,
+    );
+
+    let inventory =
+        Inventory::load_with_environment(&path, &TestEnvironment).expect("load inventory");
+    let error = PanosService::new(inventory).expect_err("a `\\` pattern must be refused");
+    assert!(
+        error.to_string().contains('\\'),
+        "error should name the offending character: {error}"
+    );
 }

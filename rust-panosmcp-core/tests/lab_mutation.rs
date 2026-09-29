@@ -80,7 +80,7 @@ async fn guarded_add_commit_delete_commit_round_trip() {
 
 async fn run_commit(service: &PanosService, input: StageConfigInput, owner: &str) {
     let staged = service
-        .stage_config(input, owner, None, CancellationToken::new())
+        .stage_config(input, owner, None, None, CancellationToken::new())
         .await
         .expect("stage");
     assert!(
