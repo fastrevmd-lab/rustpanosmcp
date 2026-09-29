@@ -104,6 +104,7 @@ pub fn run(action: TokenAction, known_devices: &[String]) -> Result<(), TokenCom
                             .map(|action| match action {
                                 MutationAction::Set => "set",
                                 MutationAction::Delete => "delete",
+                                MutationAction::Move => "move",
                             })
                             .collect::<Vec<_>>()
                             .join(",");
@@ -213,9 +214,10 @@ fn parse_mutation_grant(
         .map(|action| match action.as_str() {
             "set" => Ok(MutationAction::Set),
             "delete" => Ok(MutationAction::Delete),
+            "move" => Ok(MutationAction::Move),
             _ => Err(TokenCommandError::Scope {
                 field: "mutation_actions",
-                message: "only 'set' and 'delete' are supported".to_owned(),
+                message: "only 'set', 'delete', and 'move' are supported".to_owned(),
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;
