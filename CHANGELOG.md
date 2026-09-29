@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CVE-2026-0310 version-floor advisory in `gather_device_facts`.** The
+  response now includes a non-empty `advisories` list when the reported
+  `sw-version` is below the published fix level for its release train
+  (10.2.18-h10, 11.1.16-h2, 11.2.13-h2, 12.1.10, 12.2.3). Advisory only: it
+  never blocks the call or changes device behavior, and is also recorded on
+  the audit event so it is visible without inspecting the tool output. See
+  `docs/COMPATIBILITY.md`.
+- PAN-OS 12.2 added to the parser compatibility matrix and the opt-in
+  `scripts/test-panos-matrix.sh` lab matrix.
 - **`--allow-direct-commit`, off by default.** `commit_panos_candidate` on an
   operation with no `change_set_id` (created by `stage_config` directly, not
   through `create_panos_change_set` / `approve_panos_change_set` /
