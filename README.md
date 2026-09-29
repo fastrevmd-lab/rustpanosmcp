@@ -119,20 +119,15 @@ Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every 
 ```bash
 # Pull the image
 docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:latest
-
-# Run with mounted config (see compose.example.yaml).
-# The image's ENTRYPOINT already bakes in --tokens-file and --state-file at
-# /var/lib/rust-panosmcp, so tokens.json lives inside the state directory, not /etc.
-docker run --rm -i \
-  -v "$PWD/devices.json:/etc/rust-panosmcp/devices.json:ro" \
-  -v "$PWD/state:/var/lib/rust-panosmcp" \
-  ghcr.io/fastrevmd-lab/rust-panosmcp:latest
 ```
 
-Place `tokens.json` inside `./state` before starting. See
-[HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for the full two-person
-and lab-mode setup, including the flags the baked-in ENTRYPOINT already
-supplies. A `compose.example.yaml` is included in the repository.
+The default `CMD` binds `127.0.0.1:30031` *inside* the container, so a bare
+`docker run` with no `-p` and no `--host`/`--allowed-host`/`--allowed-origin`
+starts cleanly but is not reachable from outside the container. Follow
+[HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for a working two-person
+or lab-mode `docker run` invocation (including the port publish and the flags
+the baked-in ENTRYPOINT already supplies) or use the included
+`compose.example.yaml`.
 
 #### Build from source
 
@@ -196,9 +191,12 @@ typed errors, timeouts, cancellation, output caps, and a per-device semaphore.
 Phase 2 added digest-only bearer tokens, exact device/tool scopes, atomic
 inventory/token reload, TLS Streamable HTTP, Host/Origin validation, bounded
 request bodies, IP/token rate limits, and audit-safe request tracing. Both
-transports share the same 15 tools described in [MCP tools
-reference](#mcp-tools-reference) below; wildcard `*` token scopes resolve to
-the 4 read-only ones.
+transports share the same 17 tools described in [MCP tools
+reference](#mcp-tools-reference) below; wildcard `*` token scopes reach only
+the 6 read-only ones (`list_devices`, `gather_device_facts`,
+`execute_panos_op`, `get_panos_config`, `list_panos_entries`,
+`get_panos_entry_digest`); the 11 lifecycle/change tools must be named
+explicitly.
 
 Phase 3 adds opt-in candidate fingerprints, narrow XPath policy, PAN-OS config
 locks, per-device serialization, stage/diff/full validation, admin-scoped
@@ -259,7 +257,7 @@ bearer roles above), see
 
 ## MCP tools reference
 
-The server exposes 15 MCP tools, grouped by operation type:
+The server exposes 17 MCP tools, grouped by operation type:
 
 ### Read-only tools
 
@@ -267,6 +265,8 @@ The server exposes 15 MCP tools, grouped by operation type:
 - **`gather_device_facts`** — Gather hostname, model, serial, version, management IP, and uptime from an authorized device.
 - **`execute_panos_op`** — Execute a read-only PAN-OS XML command rooted at `<show>` on an authorized device, with output caps.
 - **`get_panos_config`** — Read running or candidate PAN-OS configuration at a validated `/config` XPath on an authorized device.
+- **`list_panos_entries`** — List `<entry>` children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked.
+- **`get_panos_entry_digest`** — Fetch and hash exactly one PAN-OS config entry by XPath, without reading the rest of the configuration.
 
 ### Candidate lifecycle tools (mutation)
 
