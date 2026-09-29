@@ -114,11 +114,11 @@ The installer creates the `rust-panosmcp` user and directories via `systemd-sysu
 
 #### Docker / GHCR
 
-Prebuilt images are published to `ghcr.io/fastrevmd-lab/rust-panosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline. For a complete setup guide including both two-person and lab modes, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
+Prebuilt images are published to `ghcr.io/mechubsec/rustpanosmcp` on every release tag. See [.github/workflows/release-image.yml](.github/workflows/release-image.yml) for the build pipeline. For a complete setup guide including both two-person and lab modes, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
 
 ```bash
 # Pull the image
-docker pull ghcr.io/fastrevmd-lab/rust-panosmcp:latest
+docker pull ghcr.io/mechubsec/rustpanosmcp:latest
 ```
 
 The default `CMD` binds `127.0.0.1:30031` *inside* the container, so a bare

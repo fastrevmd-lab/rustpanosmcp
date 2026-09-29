@@ -258,7 +258,7 @@ pub enum TokenAction {
         /// Token-specific writable XPath root. Repeat for multiple roots.
         #[arg(long = "mutation-root", requires = "mutation_actions")]
         mutation_roots: Vec<String>,
-        /// Comma-separated token-specific actions (`set`, `delete`).
+        /// Comma-separated token-specific actions (`set`, `delete`, `move`).
         #[arg(long, value_delimiter = ',', requires = "mutation_roots")]
         mutation_actions: Vec<String>,
         /// Absolute Unix timestamp after which the token is rejected.
@@ -343,7 +343,7 @@ pub enum TokenAction {
         /// "I meant to replace it" must not silently mean "I added to it".
         #[arg(long = "mutation-root", requires = "mutation_actions")]
         mutation_roots: Vec<String>,
-        /// Comma-separated token-specific actions (`set`, `delete`).
+        /// Comma-separated token-specific actions (`set`, `delete`, `move`).
         #[arg(long, value_delimiter = ',', requires = "mutation_roots")]
         mutation_actions: Vec<String>,
         /// Apply a widening without the interactive confirmation.

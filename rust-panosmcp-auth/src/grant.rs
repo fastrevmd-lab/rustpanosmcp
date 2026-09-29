@@ -292,6 +292,8 @@ pub enum MutationAction {
     Set,
     /// Delete an exact XPath.
     Delete,
+    /// Reorder an exact rulebase entry relative to a sibling, or to the top/bottom.
+    Move,
 }
 
 #[cfg(test)]

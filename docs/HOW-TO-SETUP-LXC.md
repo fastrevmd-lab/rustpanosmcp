@@ -42,12 +42,12 @@ the old binary has been replaced — an outage, not a build failure.
 Take the binary from the release image, which CI builds against the right glibc:
 
 ```bash
-docker create --name px ghcr.io/fastrevmd-lab/rust-panosmcp:0.15.0
+docker create --name px ghcr.io/mechubsec/rustpanosmcp:0.15.0
 docker cp px:/usr/local/bin/rust-panosmcp ./rust-panosmcp
 docker rm px
 ```
 
-No docker? `skopeo copy docker://ghcr.io/fastrevmd-lab/rust-panosmcp:0.15.0 dir:/tmp/img`
+No docker? `skopeo copy docker://ghcr.io/mechubsec/rustpanosmcp:0.15.0 dir:/tmp/img`
 then find the layer containing `usr/local/bin/rust-panosmcp` and untar it.
 
 ## 2. Assemble the install package

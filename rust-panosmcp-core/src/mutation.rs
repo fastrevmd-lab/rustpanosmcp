@@ -4,8 +4,11 @@ use crate::{
     PanosMcpError, Result,
     client::PanosClient,
     observability::AuditScope,
-    tools::PanosService,
-    xml::{parse_job_id, redact_secret_material, validate_config_element, validate_write_xpath},
+    tools::{LIST_CONTAINER_ENTRY_DEPTH, PanosService},
+    xml::{
+        parse_job_id, redact_secret_material, scan_config_entries, validate_config_element,
+        validate_write_xpath,
+    },
 };
 use mecmcp_audit::Attribution;
 use quick_xml::escape::escape;
@@ -38,6 +41,13 @@ pub(crate) const APPROVAL_TTL_SECS: u64 = 15 * 60;
 const MAX_DIFF_BYTES: usize = 256 * 1024;
 const VALIDATE_DEADLINE: Duration = Duration::from_secs(300);
 const COMMIT_DEADLINE: Duration = Duration::from_secs(600);
+/// Maximum sibling entries scanned to confirm a `move` target and destination
+/// exist before anything is sent to PAN-OS. Bounded independently of
+/// `MAX_LIST_LIMIT` (which paginates a caller-facing read): this is an
+/// internal existence check over one full container response, and a
+/// container holding more entries than this cannot be validated -- the move
+/// is refused rather than silently checked against a partial view.
+const MAX_MOVE_SIBLING_ENTRIES: usize = 20_000;
 
 /// Maps `CoordinatorError` from the shared coordinator to this crate's error type.
 ///
@@ -150,6 +160,9 @@ pub enum StageAction {
     Set,
     /// Delete the exact XPath after policy and confirmation checks.
     Delete,
+    /// Reorder the exact rulebase entry at the XPath relative to a sibling,
+    /// or to the top/bottom of its container.
+    Move,
 }
 
 impl StageAction {
@@ -157,6 +170,7 @@ impl StageAction {
         match self {
             Self::Set => "set",
             Self::Delete => "delete",
+            Self::Move => "move",
         }
     }
 }
@@ -166,7 +180,39 @@ impl From<StageAction> for MutationAction {
         match value {
             StageAction::Set => Self::Set,
             StageAction::Delete => Self::Delete,
+            StageAction::Move => Self::Move,
         }
+    }
+}
+
+/// Position of a `move` action relative to a sibling entry, or the
+/// container's own top/bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MovePosition {
+    /// Immediately before `move_destination`.
+    Before,
+    /// Immediately after `move_destination`.
+    After,
+    /// First entry in the container; `move_destination` must be absent.
+    Top,
+    /// Last entry in the container; `move_destination` must be absent.
+    Bottom,
+}
+
+impl MovePosition {
+    pub(crate) const fn api_name(self) -> &'static str {
+        match self {
+            Self::Before => "before",
+            Self::After => "after",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    /// Whether this position names a sibling in `move_destination`.
+    const fn requires_destination(self) -> bool {
+        matches!(self, Self::Before | Self::After)
     }
 }
 
@@ -174,16 +220,24 @@ impl From<StageAction> for MutationAction {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetAction {
-    /// Set or delete.
+    /// Set, delete, or move.
     pub action: StageAction,
-    /// Exact XPath within both inventory and token policy.
+    /// Exact XPath within both inventory and token policy. For move, the
+    /// exact XPath of the entry being reordered.
     pub xpath: String,
-    /// One XML element; required for set and forbidden for delete.
+    /// One XML element; required for set and forbidden for delete or move.
     #[serde(default)]
     pub element: Option<String>,
-    /// For delete, must equal `DELETE <xpath>` exactly.
+    /// For delete, must equal `DELETE <xpath>` exactly. Forbidden for set and move.
     #[serde(default)]
     pub destructive_confirmation: Option<String>,
+    /// Required for move, forbidden otherwise.
+    #[serde(default)]
+    pub move_position: Option<MovePosition>,
+    /// Sibling entry name; required when `move_position` is before/after,
+    /// forbidden otherwise, and forbidden for set and delete.
+    #[serde(default)]
+    pub move_destination: Option<String>,
 }
 
 /// Input for planning a multi-action change set without mutating PAN-OS.
@@ -292,16 +346,24 @@ pub struct StageConfigInput {
     pub device: String,
     /// Candidate fingerprint observed immediately before staging.
     pub expected_candidate_fingerprint: String,
-    /// Set or delete.
+    /// Set, delete, or move.
     pub action: StageAction,
-    /// Exact XPath within an operator-configured root.
+    /// Exact XPath within an operator-configured root. For move, the exact
+    /// XPath of the entry being reordered.
     pub xpath: String,
-    /// One XML element; required for set and forbidden for delete.
+    /// One XML element; required for set and forbidden for delete or move.
     #[serde(default)]
     pub element: Option<String>,
-    /// For delete, must equal `DELETE <xpath>` exactly.
+    /// For delete, must equal `DELETE <xpath>` exactly. Forbidden for set and move.
     #[serde(default)]
     pub destructive_confirmation: Option<String>,
+    /// Required for move, forbidden otherwise.
+    #[serde(default)]
+    pub move_position: Option<MovePosition>,
+    /// Sibling entry name; required when `move_position` is before/after,
+    /// forbidden otherwise, and forbidden for set and delete.
+    #[serde(default)]
+    pub move_destination: Option<String>,
 }
 
 /// Result of staging one candidate change.
@@ -492,6 +554,7 @@ impl PanosService {
             let client = self.client(&input.device)?;
             let policy = require_policy(&client)?;
             validate_change_set_actions(&input.actions, policy, grant)?;
+            require_move_targets_exist(&client, &input.actions, cancellation.clone()).await?;
             let current = candidate_fingerprint(&client, cancellation.clone()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
             require_clean_candidate(&client, cancellation).await?;
@@ -983,6 +1046,12 @@ impl PanosService {
                 if let Some(element) = &action.element {
                     fields.push(("element", element.clone()));
                 }
+                if let Some(position) = action.move_position {
+                    fields.push(("where", position.api_name().to_owned()));
+                }
+                if let Some(destination) = &action.move_destination {
+                    fields.push(("dst", destination.clone()));
+                }
                 client.post_fields(fields, CancellationToken::new()).await?;
                 applied += 1;
             }
@@ -1118,6 +1187,27 @@ impl PanosService {
                 return Err(error);
             }
         }
+        if input.action == StageAction::Move {
+            let (container, moved_name) = match extract_move_target(&input.xpath) {
+                Ok(target) => target,
+                Err(error) => {
+                    audit.fail(&error);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = require_move_target_exists(
+                &client,
+                &container,
+                &moved_name,
+                input.move_destination.as_deref(),
+                cancellation.clone(),
+            )
+            .await
+            {
+                audit.fail(&error);
+                return Err(error);
+            }
+        }
         let _guard = self
             .mutations
             .device_guard(&client.mutation_lock_key(), &cancellation)
@@ -1136,6 +1226,8 @@ impl PanosService {
             xpath: input.xpath.clone(),
             element: input.element.clone(),
             destructive_confirmation: input.destructive_confirmation.clone(),
+            move_position: input.move_position,
+            move_destination: input.move_destination.clone(),
         })
         .map_err(|error| {
             PanosMcpError::Configuration(format!("could not serialize action: {error}"))
@@ -1184,6 +1276,12 @@ impl PanosService {
             ];
             if let Some(element) = &input.element {
                 fields.push(("element", element.clone()));
+            }
+            if let Some(position) = input.move_position {
+                fields.push(("where", position.api_name().to_owned()));
+            }
+            if let Some(destination) = &input.move_destination {
+                fields.push(("dst", destination.clone()));
             }
             client.post_fields(fields, CancellationToken::new()).await?;
             let after = candidate_fingerprint(&client, CancellationToken::new()).await?;
@@ -2004,6 +2102,8 @@ fn validate_change_set_actions(
             xpath: action.xpath.clone(),
             element: action.element.clone(),
             destructive_confirmation: action.destructive_confirmation.clone(),
+            move_position: action.move_position,
+            move_destination: action.move_destination.clone(),
         };
         validate_stage_payload(&stage, inventory_policy.allow_delete)?;
         if let Some(grant) = grant {
@@ -2059,6 +2159,7 @@ fn validate_stage_payload(input: &StageConfigInput, allow_delete: bool) -> Resul
                     "set must not carry delete confirmation",
                 ));
             }
+            require_no_move_fields(input, "set")?;
         }
         StageAction::Delete => {
             if !allow_delete {
@@ -2074,7 +2175,278 @@ fn validate_stage_payload(input: &StageConfigInput, allow_delete: bool) -> Resul
                     "delete requires exact 'DELETE <xpath>' confirmation",
                 ));
             }
+            require_no_move_fields(input, "delete")?;
         }
+        StageAction::Move => {
+            if input.element.is_some() {
+                return Err(policy("element", "move must not carry an XML element"));
+            }
+            if input.destructive_confirmation.is_some() {
+                return Err(policy(
+                    "destructive_confirmation",
+                    "move must not carry delete confirmation",
+                ));
+            }
+            let position = input
+                .move_position
+                .ok_or_else(|| policy("move_position", "move requires a position"))?;
+            match (position.requires_destination(), &input.move_destination) {
+                (true, None) => {
+                    return Err(policy(
+                        "move_destination",
+                        "before/after requires a sibling entry name",
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(policy(
+                        "move_destination",
+                        "top/bottom must not carry a sibling entry name",
+                    ));
+                }
+                _ => {}
+            }
+            let (_, moved_name) = extract_move_target(&input.xpath)?;
+            if let Some(destination) = &input.move_destination {
+                validate_move_destination_name(destination)?;
+                if destination == &moved_name {
+                    return Err(policy(
+                        "move_destination",
+                        "a rule cannot be moved relative to itself",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject `move_position`/`move_destination` on a non-move action.
+///
+/// Without this, a set or delete carrying stray move fields would pass
+/// unnoticed -- `deny_unknown_fields` only rejects fields the schema does not
+/// know about, and these two are legal fields of the same struct, just for a
+/// different `action`.
+fn require_no_move_fields(input: &StageConfigInput, action_name: &'static str) -> Result<()> {
+    if input.move_position.is_some() || input.move_destination.is_some() {
+        return Err(policy(
+            "move_position",
+            &format!("{action_name} must not carry move_position or move_destination"),
+        ));
+    }
+    Ok(())
+}
+
+/// Bound a `move_destination` sibling name to the same shape PAN-OS accepts
+/// for an entry's own `name` attribute, so it cannot smuggle XPath or XML
+/// syntax into a plain form field the device treats as an opaque string.
+fn validate_move_destination_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 63 {
+        return Err(policy("move_destination", "value must be 1-63 characters"));
+    }
+    if name.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(policy(
+            "move_destination",
+            "value must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Split a write XPath into its container prefix and the exact name of the
+/// trailing `entry[@name='...']` step, when the XPath has that shape.
+///
+/// Only ever called after [`validate_write_xpath`], which (via
+/// `is_strict_xpath_shape`) has already guaranteed every step is either a
+/// bare name or `name[@attr='literal']`/`name[@attr="literal"]` -- so the
+/// final step here is trusted to have that shape rather than re-validated.
+/// Returns `None` for a container-level XPath (for example a `set` whose
+/// element carries the new entry's name, rather than the XPath itself
+/// naming the entry) -- callers that only simulate entry-shaped actions
+/// treat that as "nothing to simulate", not an error.
+fn split_container_and_entry_name(xpath: &str) -> Option<(String, String)> {
+    let slash = xpath.rfind('/')?;
+    let (container, last_step) = xpath.split_at(slash);
+    let last_step = &last_step[1..];
+    let rest = last_step.strip_prefix("entry[@name=")?;
+    let rest = rest.strip_suffix(']')?;
+    let quote = rest.chars().next()?;
+    if (quote != '\'' && quote != '"') || !rest.ends_with(quote) || rest.len() < 2 {
+        return None;
+    }
+    let name = rest[quote.len_utf8()..rest.len() - quote.len_utf8()].to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    Some((container.to_owned(), name))
+}
+
+/// Split a validated write XPath into its container prefix and the exact
+/// name of the trailing `entry[@name='...']` step being moved.
+fn extract_move_target(xpath: &str) -> Result<(String, String)> {
+    split_container_and_entry_name(xpath).ok_or_else(|| {
+        policy(
+            "xpath",
+            "move requires an xpath ending in entry[@name='...']",
+        )
+    })
+}
+
+/// Per-container view of entry names used to check `move` actions in a plan,
+/// simulating the `set`/`delete` actions that precede them in the same plan.
+struct ContainerEntries {
+    names: std::collections::HashSet<String>,
+    /// Whether the live fetch this view is based on was too large to scan in
+    /// full -- see [`require_move_target_exists`].
+    truncated: bool,
+}
+
+/// Check every `move` action in a plan against the live rulebase container it
+/// targets, *as that container will look after every `set`/`delete` action
+/// earlier in the same plan has run* -- not just against what is live on the
+/// device right now.
+///
+/// Without this, `[set .../rules/entry[@name='new'], move new top]` -- adding
+/// a rule and immediately placing it, the most common real workflow -- would
+/// be refused at plan time because `new` does not exist yet on the device.
+/// And `[delete .../rules/entry[@name='B'], move A after B]` would pass
+/// planning and approval, then fail only when PAN-OS applies it, which is
+/// exactly the device-side error the existence check exists to avoid.
+///
+/// Called once per `create_change_set`, before the plan is persisted --
+/// nonexistent targets are refused at plan time, not discovered only when an
+/// already-approved change set is applied.
+async fn require_move_targets_exist(
+    client: &PanosClient,
+    actions: &[ChangeSetAction],
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let mut containers: std::collections::HashMap<String, ContainerEntries> =
+        std::collections::HashMap::new();
+    for action in actions {
+        if action.action != StageAction::Move {
+            continue;
+        }
+        let (container, _) = extract_move_target(&action.xpath)?;
+        if containers.contains_key(&container) {
+            continue;
+        }
+        let (bytes, response_truncated) = client
+            .configuration_entries(false, &container, cancellation.clone())
+            .await?;
+        let scan = scan_config_entries(
+            &bytes,
+            0,
+            MAX_MOVE_SIBLING_ENTRIES,
+            LIST_CONTAINER_ENTRY_DEPTH,
+        )?;
+        let truncated =
+            response_truncated || scan.truncated || scan.total_seen > scan.entries.len();
+        let names = scan.entries.into_iter().map(|entry| entry.name).collect();
+        containers.insert(container, ContainerEntries { names, truncated });
+    }
+
+    for action in actions {
+        let Some((container, name)) = split_container_and_entry_name(&action.xpath) else {
+            continue;
+        };
+        match action.action {
+            StageAction::Set => {
+                if let Some(state) = containers.get_mut(&container) {
+                    state.names.insert(name);
+                }
+            }
+            StageAction::Delete => {
+                if let Some(state) = containers.get_mut(&container) {
+                    state.names.remove(&name);
+                }
+            }
+            StageAction::Move => {
+                let state = containers
+                    .get(&container)
+                    .expect("every move's container was fetched above");
+                if !state.names.contains(name.as_str()) {
+                    return Err(policy(
+                        "xpath",
+                        if state.truncated {
+                            "the rule to move could not be confirmed to exist: the live \
+                             rulebase is too large to verify in full"
+                        } else {
+                            "the rule to move does not exist in the live rulebase"
+                        },
+                    ));
+                }
+                if let Some(destination) = action.move_destination.as_deref()
+                    && !state.names.contains(destination)
+                {
+                    return Err(policy(
+                        "move_destination",
+                        if state.truncated {
+                            "the destination sibling rule could not be confirmed to exist: \
+                             the live rulebase is too large to verify in full"
+                        } else {
+                            "the destination sibling rule does not exist in the live rulebase"
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Confirm, against the live device, that the entry a `move` action targets
+/// and its sibling destination (when named) both exist -- so a nonexistent
+/// target is refused here rather than surfacing only as a PAN-OS API error
+/// after the change set is already approved and applying.
+///
+/// Fails closed: a response too large to scan completely (`truncated`) is
+/// treated the same as "not found," since a container this check cannot see
+/// in full cannot be used to prove either name exists.
+async fn require_move_target_exists(
+    client: &PanosClient,
+    container_xpath: &str,
+    moved_name: &str,
+    destination: Option<&str>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let (bytes, response_truncated) = client
+        .configuration_entries(false, container_xpath, cancellation)
+        .await?;
+    let scan = scan_config_entries(
+        &bytes,
+        0,
+        MAX_MOVE_SIBLING_ENTRIES,
+        LIST_CONTAINER_ENTRY_DEPTH,
+    )?;
+    let truncated = response_truncated || scan.truncated || scan.total_seen > scan.entries.len();
+    let names: std::collections::HashSet<&str> = scan
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if !names.contains(moved_name) {
+        return Err(policy(
+            "xpath",
+            if truncated {
+                "the rule to move could not be confirmed to exist: the live rulebase is too \
+                 large to verify in full"
+            } else {
+                "the rule to move does not exist in the live rulebase"
+            },
+        ));
+    }
+    if let Some(destination) = destination
+        && !names.contains(destination)
+    {
+        return Err(policy(
+            "move_destination",
+            if truncated {
+                "the destination sibling rule could not be confirmed to exist: the live \
+                 rulebase is too large to verify in full"
+            } else {
+                "the destination sibling rule does not exist in the live rulebase"
+            },
+        ));
     }
     Ok(())
 }
@@ -2541,6 +2913,8 @@ mod tests {
             xpath: "/config/shared/address/entry[@name='x']".to_owned(),
             element: None,
             destructive_confirmation: None,
+            move_position: None,
+            move_destination: None,
         };
         assert!(validate_stage_payload(&input, false).is_err());
         assert!(validate_stage_payload(&input, true).is_err());
@@ -2554,6 +2928,107 @@ mod tests {
         input.element =
             Some("<entry name=\"x\"><ip-netmask>192.0.2.1</ip-netmask></entry>".to_owned());
         assert!(validate_stage_payload(&input, true).is_ok());
+    }
+
+    fn move_input(
+        xpath: &str,
+        position: Option<MovePosition>,
+        destination: Option<&str>,
+    ) -> StageConfigInput {
+        StageConfigInput {
+            device: "fw".to_owned(),
+            expected_candidate_fingerprint: "sha256:x".to_owned(),
+            action: StageAction::Move,
+            xpath: xpath.to_owned(),
+            element: None,
+            destructive_confirmation: None,
+            move_position: position,
+            move_destination: destination.map(str::to_owned),
+        }
+    }
+
+    const RULE_XPATH: &str = "/config/shared/rulebase/security/rules/entry[@name='rule1']";
+
+    #[test]
+    fn move_requires_a_position() {
+        let input = move_input(RULE_XPATH, None, None);
+        assert!(validate_stage_payload(&input, true).is_err());
+    }
+
+    #[test]
+    fn move_before_and_after_require_a_destination() {
+        for position in [MovePosition::Before, MovePosition::After] {
+            let input = move_input(RULE_XPATH, Some(position), None);
+            assert!(
+                validate_stage_payload(&input, true).is_err(),
+                "{position:?} without a destination must be refused"
+            );
+            let input = move_input(RULE_XPATH, Some(position), Some("rule2"));
+            assert!(
+                validate_stage_payload(&input, true).is_ok(),
+                "{position:?} with a destination must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn move_top_and_bottom_forbid_a_destination() {
+        for position in [MovePosition::Top, MovePosition::Bottom] {
+            let input = move_input(RULE_XPATH, Some(position), Some("rule2"));
+            assert!(
+                validate_stage_payload(&input, true).is_err(),
+                "{position:?} with a destination must be refused"
+            );
+            let input = move_input(RULE_XPATH, Some(position), None);
+            assert!(
+                validate_stage_payload(&input, true).is_ok(),
+                "{position:?} without a destination must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn move_cannot_target_itself() {
+        let input = move_input(RULE_XPATH, Some(MovePosition::After), Some("rule1"));
+        assert!(validate_stage_payload(&input, true).is_err());
+    }
+
+    #[test]
+    fn move_forbids_element_and_destructive_confirmation() {
+        let mut input = move_input(RULE_XPATH, Some(MovePosition::Top), None);
+        input.element = Some("<entry name=\"rule1\"/>".to_owned());
+        assert!(validate_stage_payload(&input, true).is_err());
+
+        let mut input = move_input(RULE_XPATH, Some(MovePosition::Top), None);
+        input.destructive_confirmation = Some(format!("DELETE {RULE_XPATH}"));
+        assert!(validate_stage_payload(&input, true).is_err());
+    }
+
+    #[test]
+    fn set_and_delete_forbid_move_fields() {
+        let mut input = move_input(RULE_XPATH, None, None);
+        input.action = StageAction::Set;
+        input.element = Some("<entry name=\"rule1\"/>".to_owned());
+        input.move_position = Some(MovePosition::Top);
+        assert!(validate_stage_payload(&input, true).is_err());
+
+        let mut input = move_input(RULE_XPATH, None, None);
+        input.action = StageAction::Delete;
+        input.destructive_confirmation = Some(format!("DELETE {RULE_XPATH}"));
+        input.move_destination = Some("rule2".to_owned());
+        assert!(validate_stage_payload(&input, true).is_err());
+    }
+
+    #[test]
+    fn extract_move_target_splits_container_and_name() {
+        let (container, name) = extract_move_target(RULE_XPATH).expect("extract");
+        assert_eq!(container, "/config/shared/rulebase/security/rules");
+        assert_eq!(name, "rule1");
+
+        assert!(extract_move_target("/config/shared/rulebase/security/rules").is_err());
+        assert!(
+            extract_move_target("/config/shared/rulebase/security/rules/entry[@name=]").is_err()
+        );
     }
 
     #[test]
@@ -2577,6 +3052,8 @@ mod tests {
                     xpath: "/config/shared/address".to_owned(),
                     element: Some("<entry name=\"x\"/>".to_owned()),
                     destructive_confirmation: None,
+                    move_position: None,
+                    move_destination: None,
                 })
                 .expect("action serializes"),
             ],

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Container images now publish to `ghcr.io/mechubsec/rustpanosmcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
+
 ## [0.15.0] - 2026-09-29
 
 ### Added

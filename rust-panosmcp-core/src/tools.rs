@@ -47,7 +47,10 @@ const LOG_JOB_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_LOG_QUERY_BYTES: usize = 4096;
 /// Depth, in tag-name-stack entries, at which a list container's `<entry>`
 /// children sit below `<response>`: `response`/`result`/`container`/`entry`.
-const LIST_CONTAINER_ENTRY_DEPTH: usize = 3;
+///
+/// `pub(crate)`: also used by `mutation::require_move_target_exists` to scan
+/// a rulebase container for the live sibling names a `move` action names.
+pub(crate) const LIST_CONTAINER_ENTRY_DEPTH: usize = 3;
 /// Depth for an XPath that already resolves to a single entry directly under
 /// `<result>`: `response`/`result`/`entry`.
 const SINGLE_ENTRY_DEPTH: usize = 2;
