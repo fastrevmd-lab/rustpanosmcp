@@ -55,6 +55,14 @@ struct MockState {
     lock_release_fails: bool,
     /// Commit requests the mock device received (Percy F4, MEC-352).
     commit_requests: usize,
+    /// Overrides `check pending-changes`'s answer regardless of whether
+    /// `candidate` differs from `running`.
+    ///
+    /// Models a foreign edit sitting outside every xpath root this tool
+    /// queries via `get`/`show` -- invisible to a per-root fingerprint
+    /// comparison, but still a real PAN-OS pending change (Percy F2,
+    /// MEC-533).
+    pending_changes_override: Option<bool>,
 }
 
 async fn api(
@@ -66,11 +74,28 @@ async fn api(
     let command = form.get("cmd").map(String::as_str).unwrap_or_default();
     if request_type == Some("config") && action == Some("get") {
         let candidate = state.lock().expect("state").candidate.clone();
-        return success(&format!("<result>{candidate}</result>"));
+        // Real PAN-OS `get` (candidate) carries `total`/`count` on `<result>`
+        // and a `code` attribute on `<response>` that `show` does not (Percy
+        // F1, MEC-533) -- differing deliberately from the `show` envelope
+        // below so a regression that hashes the full envelope instead of
+        // asking `check pending-changes` fails loudly again.
+        return format!(
+            r#"<response status="success" code="19"><result total="1" count="1">{candidate}</result></response>"#
+        );
     }
     if request_type == Some("config") && action == Some("show") {
         let running = state.lock().expect("state").running.clone();
-        return success(&format!("<result>{running}</result>"));
+        return format!(r#"<response status="success"><result>{running}</result></response>"#);
+    }
+    if command == "<check><pending-changes></pending-changes></check>" {
+        let state = state.lock().expect("state");
+        let pending = state
+            .pending_changes_override
+            .unwrap_or_else(|| state.candidate != state.running);
+        return success(&format!(
+            "<result>{}</result>",
+            if pending { "yes" } else { "no" }
+        ));
     }
     if request_type == Some("config") && action == Some("set") {
         state.lock().expect("state").candidate =
@@ -181,6 +206,7 @@ async fn fixture_with_direct_commit(
         commit_fails,
         lock_release_fails,
         commit_requests: 0,
+        pending_changes_override: None,
     }));
     let app = Router::new()
         .route("/api/", post(api))
@@ -1248,5 +1274,94 @@ async fn dirty_candidate_with_foreign_pending_changes_is_refused() {
     assert!(
         change_set_error.to_string().contains("pending changes"),
         "refusal must name the dirty candidate: {change_set_error}"
+    );
+}
+
+/// A foreign edit sitting entirely outside every root this tool manages
+/// still lands in the eventual partial commit, because PAN-OS scopes a
+/// partial commit by admin, not by xpath (Percy F2, MEC-533).
+///
+/// The candidate is byte-identical to running under `/config/shared/address`
+/// -- the only root this tool ever reads -- so a fingerprint comparison
+/// scoped to `allowed_xpath_roots` would see a clean diff and let this
+/// through. Only a whole-config `check pending-changes` catches it.
+#[tokio::test]
+async fn foreign_pending_change_outside_allowed_roots_is_refused() {
+    let _serial = AUDIT_SERIAL.lock().await;
+    let fixture = fixture(false, false).await;
+
+    // Simulate PAN-OS reporting a pending change (e.g. under `/config/devices`)
+    // that this mock's single candidate/running string can't represent
+    // directly, since `candidate` and `running` stay equal throughout.
+    fixture
+        .state
+        .lock()
+        .expect("state")
+        .pending_changes_override = Some(true);
+
+    let clean = fixture
+        .service
+        .candidate_fingerprint(
+            CandidateFingerprintInput {
+                device: "mock-fw".to_owned(),
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fingerprint");
+
+    let stage_error = fixture
+        .service
+        .stage_config(
+            StageConfigInput {
+                device: "mock-fw".to_owned(),
+                expected_candidate_fingerprint: clean.candidate_fingerprint,
+                action: StageAction::Set,
+                xpath: "/config/shared/address".to_owned(),
+                element: Some(
+                    "<entry name=\"legit\"><ip-netmask>192.0.2.11</ip-netmask></entry>".to_owned(),
+                ),
+                destructive_confirmation: None,
+            },
+            "token-a",
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err(
+            "stage_config must refuse when PAN-OS reports pending changes anywhere, \
+             even outside the roots this tool queries",
+        );
+    assert!(
+        stage_error.to_string().contains("pending changes"),
+        "refusal must name the dirty candidate: {stage_error}"
+    );
+}
+
+/// Percy F4 (MEC-533 re-review): `state_lock`'s own unit tests prove the
+/// `flock` primitive works in isolation. This proves the wiring -- that
+/// `PanosService::new_with_options` takes the lock before a second process
+/// (here, a second `PanosService` in this same process, indistinguishable to
+/// `flock`) can open the same state file while the first is still live.
+#[tokio::test]
+async fn second_service_on_the_same_state_file_is_refused() {
+    let _serial = AUDIT_SERIAL.lock().await;
+    let fixture = fixture(false, false).await;
+
+    let inventory = Inventory::load_with_environment(&fixture.inventory_path, &TestEnvironment)
+        .expect("second inventory");
+    let second = PanosService::new_with_options(
+        inventory,
+        Some(&fixture.state_path),
+        false,
+        None,
+        false,
+        true,
+        None,
+    );
+    assert!(
+        second.is_err(),
+        "a second PanosService must not be able to open the same state file while the first is live"
     );
 }

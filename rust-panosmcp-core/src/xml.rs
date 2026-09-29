@@ -620,6 +620,22 @@ pub fn parse_job_id(response: &PanosResponse) -> Result<String> {
     Ok(value)
 }
 
+/// Extract the `yes`/`no` answer from a `check pending-changes` response.
+///
+/// PAN-OS documents exactly these two values for `<result>`; anything else
+/// (a different word, a nested element, an empty result) is treated as an
+/// unrecognized response rather than guessed at, since a wrong guess here
+/// would let an operation proceed against a dirty candidate.
+pub(crate) fn parse_pending_changes(response: &PanosResponse) -> Result<bool> {
+    match first_element_text(response.xml.as_bytes(), b"result")?.as_deref() {
+        Some("yes") => Ok(true),
+        Some("no") => Ok(false),
+        other => Err(PanosMcpError::Xml(format!(
+            "check pending-changes returned an unrecognized result: {other:?}"
+        ))),
+    }
+}
+
 /// Extract common facts from a successful `show system info` response.
 pub fn parse_device_facts(response: &PanosResponse) -> Result<DeviceFacts> {
     let input = response.xml.as_bytes();

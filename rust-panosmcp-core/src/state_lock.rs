@@ -8,11 +8,17 @@
 //! clobbering the other's write with a last-writer-wins rename. This module
 //! closes that gap with an OS advisory lock taken once, for the lifetime of
 //! the service that opened the state file.
+//!
+//! `flock(2)` is advisory (a process that ignores it can still write past
+//! it) and, on some network filesystems, unreliable or entirely unenforced.
+//! Point `--state-path` at local disk, not an NFS mount, for this guarantee
+//! to hold.
 
 use crate::{PanosMcpError, Result};
 use std::{
     ffi::OsString,
-    fs::{File, OpenOptions},
+    fs::File,
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
 };
 
@@ -35,24 +41,42 @@ impl StateFileLock {
         if let Some(parent) = lock_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                PanosMcpError::Configuration(format!(
-                    "could not create directory for state lock file {}: {error}",
-                    lock_path.display()
-                ))
-            })?;
+            // `0o700`, not `create_dir_all`'s umask-default: the state
+            // directory can hold the (currently empty, but not always)
+            // mutation-state file, and a world/group-readable directory would
+            // undercut `read_hardened_file`'s own permission checks on it.
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|error| {
+                    PanosMcpError::Configuration(format!(
+                        "could not create directory {} for state lock file: {error}",
+                        parent.display()
+                    ))
+                })?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|error| {
-                PanosMcpError::Configuration(format!(
-                    "could not open state lock file {}: {error}",
-                    lock_path.display()
-                ))
-            })?;
+        // Mirrors `read_hardened_file`'s hardening (`#173`/`#187`): `NOFOLLOW`
+        // so a symlink planted at the lock path can't redirect the lock (or a
+        // future write) elsewhere, `CLOEXEC` so a forked child doesn't
+        // inherit the descriptor, and mode `0o600` so the lock file itself
+        // isn't group/world-readable.
+        let descriptor = rustix::fs::openat(
+            rustix::fs::CWD,
+            &lock_path,
+            rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| {
+            PanosMcpError::Configuration(format!(
+                "could not open state lock file {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+        let file = File::from(descriptor);
         rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
             |error| {
                 PanosMcpError::Configuration(format!(

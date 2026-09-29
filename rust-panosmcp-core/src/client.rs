@@ -5,7 +5,7 @@ use crate::{
     inventory::{DeviceConfig, LoadedTlsTrust, MutationPolicy},
     xml::{
         JobStatus, PanosResponse, XmlLimits, parse_job_status, parse_panos_response,
-        validate_read_only_op_command, validate_read_xpath,
+        parse_pending_changes, validate_read_only_op_command, validate_read_xpath,
     },
 };
 use futures_util::StreamExt;
@@ -182,6 +182,34 @@ impl PanosClient {
             true,
         )
         .await
+    }
+
+    /// Ask PAN-OS whether the dedicated admin has any uncommitted candidate
+    /// edit, anywhere in the configuration -- not just under the xpath roots
+    /// this tool manages.
+    ///
+    /// This is a fixed, caller-input-free constant command, so it bypasses
+    /// [`operational`](Self::operational)'s `<show>`-only validation rather
+    /// than widening it: `<check>` is a distinct PAN-OS operational root with
+    /// its own semantics, and accepting arbitrary `<check>` bodies from a
+    /// caller is not something Phase 1 needs.
+    pub(crate) async fn check_pending_changes(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<bool> {
+        let response = self
+            .post(
+                vec![
+                    ("type", "op".to_owned()),
+                    (
+                        "cmd",
+                        "<check><pending-changes></pending-changes></check>".to_owned(),
+                    ),
+                ],
+                cancellation,
+            )
+            .await?;
+        parse_pending_changes(&response)
     }
 
     /// Poll a PAN-OS asynchronous job with cancellation and bounded backoff.

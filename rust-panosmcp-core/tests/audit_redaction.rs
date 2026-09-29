@@ -90,6 +90,9 @@ async fn api(
     if command.contains("<revert><config><partial>") {
         return success("<result><msg>reverted</msg></result>");
     }
+    if command == "<check><pending-changes></pending-changes></check>" {
+        return success("<result>no</result>");
+    }
 
     r#"<response status="error"><msg><line>unknown request</line></msg></response>"#.to_owned()
 }

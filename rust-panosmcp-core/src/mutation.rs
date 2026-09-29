@@ -494,8 +494,7 @@ impl PanosService {
             validate_change_set_actions(&input.actions, policy, grant)?;
             let current = candidate_fingerprint(&client, cancellation.clone()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &current)?;
-            let running = running_fingerprint(&client, cancellation).await?;
-            require_clean_candidate(&current, &running)?;
+            require_clean_candidate(&client, cancellation).await?;
             let now = now_unix()?;
             let id = new_operation_id()?;
 
@@ -899,17 +898,7 @@ impl PanosService {
             self.mutations.remove(&operation_id).await;
             return Err(error);
         }
-        let running = match running_fingerprint(&client, CancellationToken::new()).await {
-            Ok(value) => value,
-            Err(error) => {
-                if config_lock_held {
-                    release_config_lock_best_effort(&client).await;
-                }
-                self.mutations.remove(&operation_id).await;
-                return Err(error);
-            }
-        };
-        if let Err(error) = require_clean_candidate(&before, &running) {
+        if let Err(error) = require_clean_candidate(&client, CancellationToken::new()).await {
             if config_lock_held {
                 release_config_lock_best_effort(&client).await;
             }
@@ -1187,8 +1176,7 @@ impl PanosService {
         let result = async {
             let before = candidate_fingerprint(&client, CancellationToken::new()).await?;
             require_fingerprint(&input.expected_candidate_fingerprint, &before)?;
-            let running = running_fingerprint(&client, CancellationToken::new()).await?;
-            require_clean_candidate(&before, &running)?;
+            require_clean_candidate(&client, CancellationToken::new()).await?;
             let mut fields = vec![
                 ("type", "config".to_owned()),
                 ("action", input.action.api_name().to_owned()),
@@ -2112,47 +2100,40 @@ pub(crate) async fn candidate_fingerprint(
     Ok(format!("sha256:{}", bytes_hex(&digest.finalize())))
 }
 
-/// Fingerprint the running (committed) configuration at every
-/// operator-authorized subtree, using the same digest construction as
-/// [`candidate_fingerprint`] so the two are directly comparable.
-pub(crate) async fn running_fingerprint(
+/// Refuse to build on a candidate that already diverges from the running
+/// configuration before this operation has staged anything of its own.
+///
+/// `expected_candidate_fingerprint` optimistic-concurrency checks
+/// ([`require_fingerprint`], [`require_operation_fingerprint`]) only catch a
+/// candidate that changes *after* the caller observed it -- they treat
+/// whatever was live at that moment as the trusted baseline. If the dedicated
+/// admin's candidate already held pending edits from outside this tool (a
+/// human in the GUI, a second concurrent operator, a stuck prior session),
+/// those edits become that baseline and ride along into the eventual partial
+/// commit, since PAN-OS scopes a partial commit by admin, not by xpath.
+///
+/// This asks PAN-OS directly via `check pending-changes` rather than
+/// comparing a candidate fingerprint against a running-config fingerprint:
+/// `get` (candidate) and `show` (running) return different response
+/// envelopes on a real device (the candidate response carries `code`/
+/// `total`/`count` attributes the running response does not), so hashing the
+/// full envelope of each -- as an earlier version of this check did -- can
+/// never match even on a byte-identical candidate. `check pending-changes` is
+/// also deliberately global rather than scoped to `allowed_xpath_roots`: a
+/// foreign edit sitting outside every root this tool manages still lands in
+/// the same partial commit and must still be refused.
+async fn require_clean_candidate(
     client: &PanosClient,
     cancellation: CancellationToken,
-) -> Result<String> {
-    let policy = require_policy(client)?;
-    let mut digest = Sha256::new();
-    for root in &policy.allowed_xpath_roots {
-        if cancellation.is_cancelled() {
-            return Err(PanosMcpError::Cancelled);
-        }
-        let response = client
-            .configuration(false, root, cancellation.clone())
-            .await?;
-        digest.update((root.len() as u64).to_be_bytes());
-        digest.update(root.as_bytes());
-        digest.update((response.xml.len() as u64).to_be_bytes());
-        digest.update(response.xml.as_bytes());
-    }
-    Ok(format!("sha256:{}", bytes_hex(&digest.finalize())))
-}
-
-/// Refuse a candidate that already diverges from the running configuration
-/// before this operation has written anything.
-///
-/// A caller's `expected_candidate_fingerprint` only proves the candidate has
-/// not changed since *they* observed it -- it says nothing about whether that
-/// observation was already dirty from another admin's uncommitted edits sitting
-/// in the same candidate. Comparing against the running configuration closes
-/// that gap: a clean candidate is byte-identical to what is already committed.
-fn require_clean_candidate(candidate_fp: &str, running_fp: &str) -> Result<()> {
-    if candidate_fp == running_fp {
-        Ok(())
-    } else {
+) -> Result<()> {
+    if client.check_pending_changes(cancellation).await? {
         Err(policy(
             "candidate",
             "candidate configuration already has pending changes outside this operation; \
              commit or discard them before staging a new change",
         ))
+    } else {
+        Ok(())
     }
 }
 
