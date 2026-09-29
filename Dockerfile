@@ -36,7 +36,7 @@ LABEL org.opencontainers.image.title="rust-panosmcp" \
       org.opencontainers.image.description="Secure async MCP server for PAN-OS firewalls" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustpanosmcp" \
+      org.opencontainers.image.source="https://github.com/mechubsec/rustpanosmcp" \
       org.opencontainers.image.licenses="MIT"
 
 COPY --from=builder --chown=nonroot:nonroot /src/target/release/rust-panosmcp /usr/local/bin/rust-panosmcp

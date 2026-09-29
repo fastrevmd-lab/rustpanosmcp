@@ -5,7 +5,7 @@ mod grant;
 pub mod secret;
 
 pub use bearer::{BearerHeaderError, parse_bearer_header};
-pub use grant::{MutationAction, MutationGrant, canonicalize_xpath_quotes};
+pub use grant::{MutationAction, MutationGrant, canonicalize_xpath_quotes, is_strict_xpath_shape};
 pub use secret::SecretString;
 
 // Shared core, re-exported so downstream `use rust_panosmcp_auth::…` paths
@@ -38,8 +38,10 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "get_candidate_fingerprint",
     "get_panos_change_set",
     "get_panos_config",
+    "get_panos_entry_digest",
     "get_panos_operation",
     "list_devices",
+    "list_panos_entries",
     "stage_panos_config",
     "validate_panos_candidate",
 ];

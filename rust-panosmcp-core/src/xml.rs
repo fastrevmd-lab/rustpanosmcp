@@ -4,6 +4,7 @@ use crate::{PanosMcpError, Result};
 use quick_xml::{Reader, XmlVersion, events::Event};
 use schemars::JsonSchema;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// Maximum accepted operational command body.
 pub const MAX_OP_COMMAND_BYTES: usize = 64 * 1024;
@@ -102,6 +103,247 @@ pub struct DeviceFacts {
     pub uptime: Option<String>,
     /// Device family when supplied by the release.
     pub family: Option<String>,
+}
+
+/// One `<entry>` captured from a PAN-OS list container, with its exact source
+/// bytes preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ConfigEntry {
+    /// Value of the entry's `name` attribute, or empty when absent.
+    pub name: String,
+    /// The entry's exact source XML, including its own `<entry>` tags.
+    pub xml: String,
+    /// `sha256:<hex>` over `xml`. Changes if and only if this entry's source
+    /// XML changes -- the point of hashing per entry rather than hashing the
+    /// whole config root just to notice one rule moved.
+    pub digest: String,
+}
+
+/// Result of scanning a PAN-OS list response for its top-level `<entry>`
+/// children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryScanResult {
+    /// PAN-OS envelope status.
+    pub status: String,
+    /// PAN-OS numeric response code, when supplied.
+    pub code: Option<i32>,
+    /// Entries within the requested `[offset, offset + limit)` window.
+    pub entries: Vec<ConfigEntry>,
+    /// Count of complete entries observed in the (possibly truncated) response.
+    pub total_seen: usize,
+    /// True when the response ended before its root element closed.
+    pub truncated: bool,
+}
+
+/// Maximum nesting depth the entry scanner will track before refusing input.
+///
+/// Not `XmlLimits::max_depth`: that guards a strict single-document parse,
+/// this guards a stack of owned tag names built up over a scan that
+/// deliberately tolerates a truncated tail, so it needs its own bound.
+const MAX_SCAN_DEPTH: usize = 128;
+
+/// Scan a PAN-OS `<response><result>...</result></response>` document for the
+/// `<entry>` elements nested at least `min_depth` levels below the root --
+/// `3` for a container fetch (`response`/`result`/`container`/`entry`), `2`
+/// for an XPath that already resolves to one entry directly under `<result>`.
+///
+/// Only complete entries are returned, sliced out of `raw` byte-for-byte, and
+/// only those inside `[offset, offset + limit)` are materialized; entries
+/// outside the window are counted but never copied, so a huge rulebase costs
+/// one pass over the bytes rather than one allocation per rule.
+///
+/// Tolerant of a response the caller intentionally truncated mid-stream to
+/// stay under a byte budget: once the envelope's root start tag has been
+/// read, a read error or an early `Eof` ends the scan rather than failing it,
+/// and any entry still open at that point is dropped rather than
+/// half-reported. A read error or missing envelope *before* the root's own
+/// start tag closes is still a hard failure -- that is not a size problem,
+/// it is not PAN-OS XML.
+pub fn scan_config_entries(
+    raw: &[u8],
+    offset: usize,
+    limit: usize,
+    min_depth: usize,
+) -> Result<EntryScanResult> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(true);
+    reader.config_mut().check_end_names = true;
+
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut status: Option<String> = None;
+    let mut code: Option<String> = None;
+    let mut saw_root = false;
+    let mut root_closed = false;
+    let mut entries = Vec::new();
+    let mut total_seen = 0_usize;
+    // (depth before the entry's own tag was pushed, start byte offset, name)
+    let mut pending: Option<(usize, usize, String)> = None;
+    let end_truncated;
+    let window_end = offset.saturating_add(limit);
+
+    loop {
+        let pos_before = reader.buffer_position() as usize;
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(error) => {
+                if saw_root {
+                    end_truncated = true;
+                    break;
+                }
+                return Err(PanosMcpError::Xml(error.to_string()));
+            }
+        };
+        match event {
+            Event::DocType(_) => {
+                return Err(PanosMcpError::Xml(
+                    "DOCTYPE declarations are forbidden".to_owned(),
+                ));
+            }
+            Event::Start(element) => {
+                if stack.len() >= MAX_SCAN_DEPTH {
+                    return Err(PanosMcpError::Xml(format!(
+                        "element depth exceeds the {MAX_SCAN_DEPTH}-level limit"
+                    )));
+                }
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if !saw_root {
+                    if name != b"response" {
+                        return Err(PanosMcpError::Xml(
+                            "root element must be 'response'".to_owned(),
+                        ));
+                    }
+                    saw_root = true;
+                    read_status_and_code(&element, &mut status, &mut code)?;
+                } else if pending.is_none() && name == b"entry" && stack.len() >= min_depth {
+                    let entry_name = read_name_attribute(&element)?;
+                    pending = Some((stack.len(), pos_before, entry_name));
+                }
+                stack.push(name);
+            }
+            Event::Empty(element) => {
+                if stack.len() >= MAX_SCAN_DEPTH {
+                    return Err(PanosMcpError::Xml(format!(
+                        "element depth exceeds the {MAX_SCAN_DEPTH}-level limit"
+                    )));
+                }
+                let name = element.name().as_ref().as_bytes().to_vec();
+                if !saw_root {
+                    if name != b"response" {
+                        return Err(PanosMcpError::Xml(
+                            "root element must be 'response'".to_owned(),
+                        ));
+                    }
+                    saw_root = true;
+                    root_closed = true;
+                    read_status_and_code(&element, &mut status, &mut code)?;
+                } else if pending.is_none() && name == b"entry" && stack.len() >= min_depth {
+                    let index = total_seen;
+                    total_seen += 1;
+                    if index >= offset && index < window_end {
+                        let entry_name = read_name_attribute(&element)?;
+                        let end = reader.buffer_position() as usize;
+                        entries.push(owned_entry(raw, pos_before, end, entry_name)?);
+                    }
+                }
+            }
+            Event::End(element) => {
+                let name = element.name().as_ref().as_bytes().to_vec();
+                match stack.pop() {
+                    Some(open) if open == name => {}
+                    _ => {
+                        return Err(PanosMcpError::Xml(
+                            "input contains a mismatched closing element".to_owned(),
+                        ));
+                    }
+                }
+                if let Some((depth, start, entry_name)) = &pending
+                    && stack.len() == *depth
+                    && name == b"entry"
+                {
+                    let index = total_seen;
+                    total_seen += 1;
+                    if index >= offset && index < window_end {
+                        let end = reader.buffer_position() as usize;
+                        entries.push(owned_entry(raw, *start, end, entry_name.clone())?);
+                    }
+                    pending = None;
+                }
+                if saw_root && stack.is_empty() {
+                    root_closed = true;
+                }
+            }
+            Event::Eof => {
+                end_truncated = !root_closed;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let code = code
+        .as_deref()
+        .map(str::parse::<i32>)
+        .transpose()
+        .map_err(|_| PanosMcpError::Xml("response code is not an integer".to_owned()))?;
+
+    Ok(EntryScanResult {
+        status: status.unwrap_or_default(),
+        code,
+        entries,
+        total_seen,
+        truncated: end_truncated || pending.is_some(),
+    })
+}
+
+fn owned_entry(raw: &[u8], start: usize, end: usize, name: String) -> Result<ConfigEntry> {
+    let xml = std::str::from_utf8(&raw[start..end])
+        .map_err(|_| PanosMcpError::Xml("entry is not valid UTF-8".to_owned()))?
+        .to_owned();
+    let digest = format!("sha256:{}", hex_digest(&Sha256::digest(xml.as_bytes())));
+    Ok(ConfigEntry { name, xml, digest })
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn read_name_attribute(element: &quick_xml::events::BytesStart<'_>) -> Result<String> {
+    for attribute in element.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+        if attribute.key.as_ref() == "name" {
+            let value = attribute
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(|error| PanosMcpError::Xml(error.to_string()))?
+                .into_owned();
+            return Ok(value);
+        }
+    }
+    Ok(String::new())
+}
+
+fn read_status_and_code(
+    element: &quick_xml::events::BytesStart<'_>,
+    status: &mut Option<String>,
+    code: &mut Option<String>,
+) -> Result<()> {
+    for attribute in element.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| PanosMcpError::Xml(error.to_string()))?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| PanosMcpError::Xml(error.to_string()))?
+            .into_owned();
+        match attribute.key.as_ref() {
+            "status" => *status = Some(value),
+            "code" => *code = Some(value),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Terminal and intermediate state from a PAN-OS asynchronous job.
@@ -279,6 +521,20 @@ pub fn validate_read_xpath(xpath: &str) -> Result<()> {
             reason: "quotes or predicate brackets are unbalanced".to_owned(),
         });
     }
+    // The character allowlist above permits `:` (for `[@attr=...]`-adjacent
+    // syntax) and lets brackets balance in pairs, which is not tight enough
+    // to reject XPath axis steps (`parent::`, `ancestor::`, ...) or
+    // predicates that are not a single attribute equality. Both pass the
+    // checks above as plain text while addressing a different node once an
+    // XPath engine evaluates them -- shared with `validate_write_xpath` and
+    // `MutationGrant::allows_xpath` so none of the three can disagree about
+    // what an xpath addresses (MEC-528 F1).
+    if !rust_panosmcp_auth::is_strict_xpath_shape(xpath) {
+        return Err(PanosMcpError::Policy {
+            field: "xpath",
+            reason: "value contains unsupported XPath syntax".to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -393,6 +649,229 @@ pub fn parse_job_status(response: &PanosResponse) -> Result<JobStatus> {
         progress,
         details: first_child_text(input, b"job", b"details")?,
     })
+}
+
+/// Redact PAN-OS secret material that would otherwise be echoed back
+/// verbatim in a read tool's output.
+///
+/// The intended control is that this server's PAN-OS admin role cannot read
+/// `<mgt-config>` (admin password hashes) or certificate private keys at
+/// all. This is defense in depth for the case where that role restriction is
+/// missing or an xpath/op-command blocklist has not been configured to cover
+/// them: `<show><config><running/></config></show>` and `get_panos_config`
+/// on `/config/mgt-config` or a certificate xpath both return this material
+/// verbatim otherwise (MEC-528 class 1).
+///
+/// Three layers, in order: two value-shape passes catch PAN-OS's actual
+/// on-wire secret formats (a PEM private-key block; a `$<id>$...` crypt-style
+/// hash such as an admin `<phash>` -- `$1$`/`$5$`/`$6$` on newer releases, not
+/// only the `$8$`/`$9$` Junos/Cisco shapes this used to match; a master-key
+/// blob starting `-AQ==`, PAN-OS's format for a stored IKE PSK, bind
+/// password, or SNMPv3 key), then a structural pass blanks the text of a
+/// fixed set of secret element names outright, regardless of value shape --
+/// catching a secret pasted as free text, which no shape pattern can (MEC-528
+/// F3).
+#[must_use]
+pub fn redact_secret_material(input: &str) -> String {
+    // Structural first: once a named secret element's text is blanked, the
+    // shape passes below find nothing left inside it to match, so every
+    // value under a known secret element name gets one consistent marker
+    // regardless of what it happened to contain. The shape passes then
+    // cover the same secret formats wherever they appear *outside* a named
+    // secret element (an op-command diagnostic line, an element name this
+    // list doesn't happen to enumerate, ...).
+    let structural = redact_structural_secret_elements(input);
+    redact_master_key_blobs(&redact_crypt_hashes(&redact_pem_private_keys(&structural)))
+}
+
+/// Redact PAN-OS crypt-style password hash tokens: `$<id>$...`, where `id`
+/// is the short alphanumeric algorithm tag crypt(3) and PAN-OS both use --
+/// `1` (MD5), `5`/`6` (SHA-256/512, newer PAN-OS releases), `8`/`9`
+/// (Junos/Cisco type-8/9, kept for compatibility with earlier fixtures).
+fn redact_crypt_hashes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(dollar_at) = rest.find('$') {
+        out.push_str(&rest[..dollar_at]);
+        let after_dollar = &rest[dollar_at + 1..];
+        let id_end = after_dollar
+            .find(|c: char| c == '$' || c == '<' || c == '>' || c == '"' || c.is_whitespace())
+            .unwrap_or(after_dollar.len());
+        let id = &after_dollar[..id_end];
+        let is_crypt_prefix = !id.is_empty()
+            && id.len() <= 8
+            && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && after_dollar.as_bytes().get(id_end) == Some(&b'$');
+        if is_crypt_prefix {
+            let token_body = &after_dollar[id_end + 1..];
+            let token_end = token_body
+                .find(|c: char| c == '<' || c == '>' || c == '"' || c.is_whitespace())
+                .unwrap_or(token_body.len());
+            out.push_str("[REDACTED-HASH]");
+            rest = &token_body[token_end..];
+        } else {
+            out.push('$');
+            rest = after_dollar;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Redact a PAN-OS master-key-encrypted secret blob (a stored IKE PSK, bind
+/// password, or SNMPv3 key): a base64-shaped token starting `-AQ==`.
+fn redact_master_key_blobs(input: &str) -> String {
+    const MARKER: &str = "-AQ==";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(marker_at) = rest.find(MARKER) {
+        out.push_str(&rest[..marker_at]);
+        let after_marker = &rest[marker_at + MARKER.len()..];
+        let token_end = after_marker
+            .find(|c: char| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+            })
+            .unwrap_or(after_marker.len());
+        out.push_str("[REDACTED-SECRET]");
+        rest = &after_marker[token_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// PAN-OS/mecmcp element names whose text is blanked outright, whatever the
+/// value looks like -- the shape-based passes above only catch a value in a
+/// format they recognise; a secret pasted as free text (an SNMP community
+/// string, a PSK typed directly into a VPN gateway config) has no fixed
+/// shape, but its element name is a stable signal.
+const SECRET_ELEMENT_NAMES: &[&[u8]] = &[
+    b"phash",
+    b"password",
+    b"private-key",
+    b"key",
+    b"secret",
+    b"bind-password",
+    b"auth-password",
+    b"priv-password",
+    b"passphrase",
+    b"community",
+];
+
+fn is_secret_element_name(name: &[u8]) -> bool {
+    SECRET_ELEMENT_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+/// Blank the text of any element named in [`SECRET_ELEMENT_NAMES`], whatever
+/// the value looks like (MEC-528 F3).
+///
+/// This is a text transform, not a security gate: if the input is not
+/// well-formed XML at some point, the unparsed remainder is copied through
+/// unchanged rather than dropped or panicking. Malformed input reaching here
+/// has already passed the caller's own XML validation in every real path;
+/// this fallback exists so a redaction bug can never turn into a data-loss
+/// or availability bug.
+fn redact_structural_secret_elements(input: &str) -> String {
+    let mut reader = Reader::from_reader(input.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut out = String::with_capacity(input.len());
+    let mut depth = 0usize;
+    let mut secret_depth: Option<usize> = None;
+    // One marker per contiguous run of secret content, however quick-xml
+    // chunks it (text, CDATA and entity references arrive as separate events).
+    let mut marker_open = false;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(_) => {
+                out.push_str(&input[start.min(input.len())..]);
+                break;
+            }
+        };
+        let end = reader.buffer_position() as usize;
+        let secret_content = secret_depth.is_some()
+            && matches!(
+                event,
+                Event::Text(_) | Event::CData(_) | Event::GeneralRef(_)
+            );
+        if !secret_content {
+            marker_open = false;
+        }
+        match event {
+            Event::Eof => {
+                out.push_str(&input[start..end.min(input.len())]);
+                break;
+            }
+            Event::Start(element) => {
+                depth += 1;
+                if secret_depth.is_none()
+                    && is_secret_element_name(element.name().as_ref().as_bytes())
+                {
+                    secret_depth = Some(depth);
+                }
+                out.push_str(&input[start..end]);
+            }
+            Event::End(_) => {
+                if secret_depth == Some(depth) {
+                    secret_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+                out.push_str(&input[start..end]);
+            }
+            // MEC-528 N2: quick-xml reports `&amp;` / `&#x70;` as GeneralRef;
+            // inside a secret element they are secret content too.
+            Event::Text(_) | Event::CData(_) | Event::GeneralRef(_) if secret_depth.is_some() => {
+                if !marker_open {
+                    out.push_str("[REDACTED-SECRET]");
+                    marker_open = true;
+                }
+                continue;
+            }
+            _ => {
+                out.push_str(&input[start..end]);
+            }
+        }
+    }
+    out
+}
+
+/// Redact PEM `-----BEGIN ... PRIVATE KEY-----` blocks in their entirety.
+fn redact_pem_private_keys(input: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const DASHES: &str = "-----";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(begin_at) = rest.find(BEGIN) {
+        let after_begin = &rest[begin_at + BEGIN.len()..];
+        let Some(dashes_at) = after_begin.find(DASHES) else {
+            out.push_str(&rest[..begin_at + BEGIN.len()]);
+            rest = after_begin;
+            continue;
+        };
+        let label = &after_begin[..dashes_at];
+        if !label.ends_with("PRIVATE KEY") {
+            let consumed = dashes_at + DASHES.len();
+            out.push_str(&rest[..begin_at + BEGIN.len() + consumed]);
+            rest = &after_begin[consumed..];
+            continue;
+        }
+        out.push_str(&rest[..begin_at]);
+        let body = &after_begin[dashes_at + DASHES.len()..];
+        let end_marker = format!("-----END {label}-----");
+        if let Some(end_at) = body.find(&end_marker) {
+            out.push_str("[REDACTED-PRIVATE-KEY]");
+            rest = &body[end_at + end_marker.len()..];
+        } else {
+            // No matching END found within this response; redact to the end
+            // rather than risk leaking a truncated key (fail closed).
+            out.push_str("[REDACTED-PRIVATE-KEY]");
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Stable name for the documented PAN-OS XML API response code.
@@ -818,7 +1297,11 @@ fn first_child_text(input: &[u8], parent: &[u8], wanted: &[u8]) -> Result<Option
     }
 }
 
-fn collect_text_for_elements(input: &[u8], wanted: &[&[u8]], max_bytes: usize) -> Result<String> {
+pub(crate) fn collect_text_for_elements(
+    input: &[u8],
+    wanted: &[&[u8]],
+    max_bytes: usize,
+) -> Result<String> {
     let mut reader = Reader::from_reader(input);
     // Not `trim_text(true)`: that trims every *run*, and an entity splits one
     // value into several runs. `done &amp; dusted` arrives as "done ", "&",
@@ -995,6 +1478,93 @@ mod tests {
         assert!(validate_read_xpath("/config/*").is_err());
     }
 
+    /// MEC-528 F1: an XPath axis step (`name::`, including axes that move
+    /// *up* the tree, such as `parent::` or `ancestor::`) passed the old
+    /// character-allowlist-plus-prefix check as plain text while addressing
+    /// a node outside the path the string appears to name. `mgt-config` is
+    /// otherwise blocked by device role restriction and the xpath
+    /// blocklist -- an axis step must not be a way around either.
+    /// MEC-528 N1: interface names contain `/`; both validators must accept
+    /// them (the strict grammar used to split inside the quoted value).
+    #[test]
+    fn accepts_interface_xpaths_with_slashes() {
+        let base =
+            "/config/devices/entry[@name='localhost.localdomain']/network/interface/ethernet";
+        let roots = vec![base.to_owned()];
+        for xpath in [
+            format!("{base}/entry[@name='ethernet1/1']"),
+            format!(
+                "{base}/entry[@name='ethernet1/1']/layer3/units/entry[@name='ethernet1/1.100']"
+            ),
+        ] {
+            assert!(
+                validate_read_xpath(&xpath).is_ok(),
+                "read must accept: {xpath}"
+            );
+            assert!(
+                validate_write_xpath(&xpath, &roots).is_ok(),
+                "write must accept: {xpath}"
+            );
+        }
+    }
+
+    /// MEC-528 N2: entity references inside a secret element are redacted
+    /// with the surrounding text, not passed through.
+    #[test]
+    fn entity_references_inside_secret_elements_are_redacted() {
+        let out = redact_structural_secret_elements("<password>ab&amp;cd</password>");
+        assert_eq!(out, "<password>[REDACTED-SECRET]</password>");
+        let out = redact_structural_secret_elements("<community>&#x70;&#x77;</community>");
+        assert_eq!(out, "<community>[REDACTED-SECRET]</community>");
+        let out = redact_structural_secret_elements("<x>a&amp;b</x>");
+        assert_eq!(out, "<x>a&amp;b</x>", "non-secret elements are untouched");
+    }
+
+    #[test]
+    fn rejects_axis_steps_on_read() {
+        for xpath in [
+            "/config/devices/parent::node()",
+            "/config/shared/address/entry[@name='x']/ancestor::config",
+            "/config/shared/address/entry[@name='x']/following-sibling::entry",
+        ] {
+            assert!(
+                validate_read_xpath(xpath).is_err(),
+                "axis syntax must be rejected: {xpath}"
+            );
+        }
+    }
+
+    /// MEC-528 F1: a predicate that is not a single `@attr='literal'`
+    /// equality -- an attribute existence test, or comparing one attribute
+    /// to another -- matches every sibling under a step, not the one entry
+    /// the granted root's own predicate names.
+    #[test]
+    fn rejects_non_equality_predicates_on_read() {
+        for xpath in [
+            "/config/shared/address/entry[@name]",
+            "/config/shared/address/entry[@name=@other]",
+            "/config/shared/address/entry[position()=1]",
+        ] {
+            assert!(
+                validate_read_xpath(xpath).is_err(),
+                "a non-equality predicate must be rejected: {xpath}"
+            );
+        }
+    }
+
+    /// The same axis escape must be refused on the write path, even when the
+    /// axis step appears after every character of an operator's granted
+    /// root -- a text-prefix match alone cannot see that the axis moves the
+    /// evaluated node outside that root (MEC-528 F1).
+    #[test]
+    fn rejects_axis_escape_on_write() {
+        let roots = vec![
+            "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book".to_owned(),
+        ];
+        let escape = "/config/devices/entry[@name='fw']/vsys/entry[@name='vsys1']/address-book/entry[@name='x']/parent::node()/entry[@name='y']";
+        assert!(validate_write_xpath(escape, &roots).is_err());
+    }
+
     #[test]
     fn extracts_facts_and_job_status() {
         let response = parse_panos_response(
@@ -1012,6 +1582,13 @@ mod tests {
         let job = parse_job_status(&response).expect("job");
         assert!(job.succeeded());
     }
+
+    // `redact_secret_material` unit tests live in
+    // `tests/xml_redact_secret_material.rs`, not here: they need
+    // secret-shaped fixture strings (fake PAN-OS phashes, a fake PEM private
+    // key block) that are gitleaks-allowlisted for that dedicated fixture
+    // file. Keeping them out of this file means the rest of `xml.rs` -- real
+    // XML-handling code -- stays under full gitleaks coverage.
 }
 
 #[cfg(test)]
@@ -1334,5 +1911,136 @@ mod bound_and_trim_tests {
             .expect("parses")
             .expect("present");
         assert_eq!(got, "fw01");
+    }
+}
+
+#[cfg(test)]
+mod entry_scan_tests {
+    use super::*;
+
+    fn rules_response(rules: &str) -> String {
+        format!(r#"<response status="success"><result><rules>{rules}</rules></result></response>"#)
+    }
+
+    #[test]
+    fn lists_entries_with_names_and_stable_digests() {
+        let xml = rules_response(
+            r#"<entry name="allow-dns"><action>allow</action></entry><entry name="deny-all"><action>deny</action></entry>"#,
+        );
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.status, "success");
+        assert_eq!(scan.total_seen, 2);
+        assert!(!scan.truncated);
+        assert_eq!(scan.entries.len(), 2);
+        assert_eq!(scan.entries[0].name, "allow-dns");
+        assert_eq!(scan.entries[1].name, "deny-all");
+        assert!(scan.entries[0].digest.starts_with("sha256:"));
+        assert_ne!(scan.entries[0].digest, scan.entries[1].digest);
+
+        // Same entry, fetched again unchanged, hashes identically.
+        let again = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(again.entries[0].digest, scan.entries[0].digest);
+    }
+
+    #[test]
+    fn a_changed_entry_changes_only_its_own_digest() {
+        let before = rules_response(r#"<entry name="r1"><action>allow</action></entry>"#);
+        let after = rules_response(r#"<entry name="r1"><action>deny</action></entry>"#);
+        let before_digest = scan_config_entries(before.as_bytes(), 0, 10, 3)
+            .expect("scan")
+            .entries
+            .remove(0)
+            .digest;
+        let after_digest = scan_config_entries(after.as_bytes(), 0, 10, 3)
+            .expect("scan")
+            .entries
+            .remove(0)
+            .digest;
+        assert_ne!(before_digest, after_digest);
+    }
+
+    #[test]
+    fn self_closing_entries_are_captured_like_open_ones() {
+        let xml = rules_response(r#"<entry name="empty-rule"/>"#);
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries[0].name, "empty-rule");
+        assert_eq!(scan.entries[0].xml, r#"<entry name="empty-rule"/>"#);
+    }
+
+    #[test]
+    fn pagination_returns_only_the_requested_window() {
+        let rules: String = (0..25)
+            .map(|i| format!(r#"<entry name="r{i}"/>"#))
+            .collect();
+        let xml = rules_response(&rules);
+
+        let page = scan_config_entries(xml.as_bytes(), 10, 5, 3).expect("scan");
+        assert_eq!(page.total_seen, 25);
+        assert_eq!(page.entries.len(), 5);
+        assert_eq!(page.entries[0].name, "r10");
+        assert_eq!(page.entries[4].name, "r14");
+        // "N of M shown": more entries exist beyond this page.
+        assert!(10 + page.entries.len() < page.total_seen);
+    }
+
+    #[test]
+    fn a_response_truncated_mid_entry_drops_the_partial_entry_and_is_marked() {
+        let full = rules_response(
+            r#"<entry name="r1"/><entry name="r2"><action>allow</action></entry><entry name="r3"/>"#,
+        );
+        // Cut the byte stream partway through r2's body, well before its
+        // closing tag -- this is what a byte-capped device fetch produces.
+        let cut = full.find("<action>").expect("marker") + 4;
+        let truncated = &full.as_bytes()[..cut];
+
+        let scan = scan_config_entries(truncated, 0, 10, 3).expect("scan");
+        assert!(scan.truncated);
+        // r1 completed before the cut; r2 was still open and must not appear.
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "r1");
+    }
+
+    #[test]
+    fn a_response_truncated_before_the_envelope_opens_is_an_error() {
+        let truncated = br#"<respo"#;
+        assert!(scan_config_entries(truncated, 0, 10, 3).is_err());
+    }
+
+    #[test]
+    fn an_error_envelope_is_still_reported() {
+        let xml = r#"<response status="error" code="7"><msg><line>Object not present</line></msg></response>"#;
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.status, "error");
+        assert_eq!(scan.code, Some(7));
+        assert!(scan.entries.is_empty());
+    }
+
+    #[test]
+    fn min_depth_two_finds_an_entry_resolved_directly_by_its_own_xpath() {
+        let xml = r#"<response status="success"><result><entry name="allow-dns"><action>allow</action></entry></result></response>"#;
+        let scan = scan_config_entries(xml.as_bytes(), 0, 1, 2).expect("scan");
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "allow-dns");
+    }
+
+    #[test]
+    fn nested_entries_inside_a_captured_entry_are_not_double_counted() {
+        // Defensive: a rule containing something that itself looks like an
+        // <entry> must not be treated as a second top-level list entry.
+        let xml = rules_response(
+            r#"<entry name="outer"><profile-setting><entry name="inner"/></profile-setting></entry>"#,
+        );
+        let scan = scan_config_entries(xml.as_bytes(), 0, 10, 3).expect("scan");
+        assert_eq!(scan.total_seen, 1);
+        assert_eq!(scan.entries[0].name, "outer");
+        assert!(scan.entries[0].xml.contains("inner"));
+    }
+
+    #[test]
+    fn rejects_doctype_even_mid_scan() {
+        let xml = br#"<response status="success"><result><rules><!DOCTYPE x><entry name="r1"/></rules></result></response>"#;
+        assert!(scan_config_entries(xml, 0, 10, 3).is_err());
     }
 }

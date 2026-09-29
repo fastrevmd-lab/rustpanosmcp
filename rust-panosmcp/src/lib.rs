@@ -23,7 +23,10 @@ use rust_panosmcp_core::{
         ChangeSetStatusInput, CreateChangeSetInput, OperationInput, OperationStatusInput,
         StageConfigInput,
     },
-    tools::{ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, PanosService},
+    tools::{
+        ExecutePanosOpInput, GatherDeviceFactsInput, GetPanosConfigInput, GetPanosEntryDigestInput,
+        ListPanosEntriesInput, PanosService,
+    },
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -355,14 +358,14 @@ impl PanosMcpServer {
     }
 
     #[allow(clippy::result_large_err)]
-    fn change_set_identity(
+    fn mutation_identity(
         extensions: &Extensions,
     ) -> Result<(String, Option<rust_panosmcp_auth::MutationGrant>), CallToolResult> {
         let principal = Self::mutation_principal(extensions)?;
         let caller = Self::caller(extensions);
         if caller.as_ref().is_some_and(|caller| caller.grant.is_none()) {
             return Err(CallToolResult::error(vec![ContentBlock::text(
-                "v0.2 change-set writes require a token-specific mutation grant",
+                "candidate mutations over HTTP require a token-specific mutation grant",
             )]));
         }
         Ok((principal, caller.and_then(|caller| caller.grant.clone())))
@@ -392,7 +395,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -478,7 +481,7 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let (principal, grant) = match Self::change_set_identity(&extensions) {
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
             Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
@@ -540,15 +543,28 @@ impl PanosMcpServer {
         {
             return Ok(denial);
         }
-        let principal = match Self::mutation_principal(&extensions) {
-            Ok(principal) => principal,
+        // MEC-528 F4: `stage_panos_config` is the v0.1 write tool and used to
+        // check only the device-wide mutation policy for an HTTP caller with
+        // no grant, passing `None` straight to `stage_config` -- unlike the
+        // v0.2 change-set tools (`create_panos_change_set`,
+        // `apply_panos_change_set`), which already refuse that caller via
+        // `mutation_identity`. Sharing the same identity check means both
+        // write paths fail closed on the same condition.
+        let (principal, grant) = match Self::mutation_identity(&extensions) {
+            Ok(identity) => identity,
             Err(denial) => return Ok(denial),
         };
         let service = self.runtime.snapshot().service.clone();
         let caller = Self::caller(&extensions);
         Self::to_call_result(
             service
-                .stage_config(input, &principal, caller.as_ref(), cancellation)
+                .stage_config(
+                    input,
+                    &principal,
+                    grant.as_ref(),
+                    caller.as_ref(),
+                    cancellation,
+                )
                 .await,
         )
     }
@@ -795,6 +811,56 @@ impl PanosMcpServer {
         Self::to_call_result(
             service
                 .get_panos_config(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Page through a rule or object list container's entries.
+    #[tool(
+        name = "list_panos_entries",
+        description = "List <entry> children of a PAN-OS rulebase or object list XPath as structured JSON, paginated and truncation-marked rather than erroring on a large rulebase"
+    )]
+    async fn list_panos_entries(
+        &self,
+        Parameters(input): Parameters<ListPanosEntriesInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "list_panos_entries", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .list_panos_entries(input, caller.as_ref(), cancellation)
+                .await,
+        )
+    }
+
+    /// Digest one entry for single-rule drift detection.
+    #[tool(
+        name = "get_panos_entry_digest",
+        description = "Fetch and hash exactly one PAN-OS config entry by XPath, without reading the rest of the configuration -- for detecting drift on a single rule or object"
+    )]
+    async fn get_panos_entry_digest(
+        &self,
+        Parameters(input): Parameters<GetPanosEntryDigestInput>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(denial) =
+            Self::authorize(&extensions, "get_panos_entry_digest", Some(&input.device))
+        {
+            return Ok(denial);
+        }
+        let service = self.runtime.snapshot().service.clone();
+        let caller = Self::caller(&extensions);
+        Self::to_call_result(
+            service
+                .get_panos_entry_digest(input, caller.as_ref(), cancellation)
                 .await,
         )
     }
