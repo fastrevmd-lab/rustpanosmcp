@@ -50,10 +50,24 @@ STOPSIGNAL SIGTERM
 # relevant. CMD carries only what an operator is expected to replace: bind
 # address, port, and mode flags. Docker replaces CMD when the caller supplies
 # arguments, so security-relevant defaults must stay in ENTRYPOINT.
+#
+# --audit-hmac-key-file: the binary itself generates
+# /var/lib/rust-panosmcp/audit-hmac.key on first run if it is absent (see
+# ensure_audit_hmac_key in src/main.rs) -- the container-image equivalent of
+# packaging/lxc/install.sh's own key-generation step, closing the "5 of 6
+# server images run unkeyed audit" gap (mecmcp#376 / MEC-978). The path is
+# under the writable /var/lib/rust-panosmcp volume, not /etc/rust-panosmcp,
+# because compose.example.yaml mounts /etc/rust-panosmcp read-only, so a key
+# path there could never be generated on a fresh container.
+# --audit-redact devices=hmac is the same default packaging/systemd ships, so
+# the container and LXC/systemd paths converge on the same keyed, redacted
+# posture instead of only the device-direct paths doing it.
 ENTRYPOINT ["/usr/local/bin/rust-panosmcp", \
     "--device-mapping", "/etc/rust-panosmcp/devices.json", \
     "--tokens-file", "/var/lib/rust-panosmcp/tokens.json", \
-    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json"]
+    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json", \
+    "--audit-hmac-key-file", "/var/lib/rust-panosmcp/audit-hmac.key", \
+    "--audit-redact", "devices=hmac"]
 CMD ["--transport", "streamable-http", \
     "--host", "127.0.0.1", \
     "--port", "30031"]
