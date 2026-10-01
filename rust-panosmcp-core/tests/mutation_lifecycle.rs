@@ -1368,11 +1368,12 @@ async fn foreign_pending_change_outside_allowed_roots_is_refused() {
     );
 }
 
-/// Percy F4 (MEC-533 re-review): `state_lock`'s own unit tests prove the
-/// `flock` primitive works in isolation. This proves the wiring -- that
-/// `PanosService::new_with_options` takes the lock before a second process
-/// (here, a second `PanosService` in this same process, indistinguishable to
-/// `flock`) can open the same state file while the first is still live.
+/// Percy F4 (MEC-533 re-review): a second process must not be able to open
+/// the same state file while the first is still live. Enforced by
+/// `mecmcp_changeset::ChangesetCoordinator`'s own exclusive, whole-lifetime
+/// ownership lock (MEC-540) rather than a lock of this crate's own (MEC-1158
+/// removed the latter: a second, redundant lock on the same sibling file
+/// self-deadlocked against the coordinator's new per-write lock).
 #[tokio::test]
 async fn second_service_on_the_same_state_file_is_refused() {
     let _serial = AUDIT_SERIAL.lock().await;
