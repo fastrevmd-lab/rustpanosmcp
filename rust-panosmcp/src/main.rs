@@ -120,9 +120,64 @@ fn check_stale_secrets(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Pre-provision the audit HMAC key file at `path` if it is absent or empty,
+/// mirroring `packaging/lxc/install.sh`'s own key-generation step so every
+/// entry point -- LXC install, systemd start, or a container's first run --
+/// converges on the same keyed-audit posture instead of only the LXC path
+/// doing it (mecmcp#376 / MEC-978). `--audit-redact` still defaults to empty
+/// (redaction stays opt-in, see docs/AUDIT.md), so this alone does not turn
+/// redaction on; it just means the key is already there the moment an
+/// operator flips `--audit-redact ...=hmac` on, instead of failing with
+/// `HmacKeyUnreadable` on that first restart.
+///
+/// `-s` (not `-e`): a zero-byte key file is indistinguishable from "never
+/// generated" and would make every HMAC output constant, so rewriting it
+/// here is a repair, not data loss. A non-empty file is never rotated --
+/// that would silently break verification of every audit record signed
+/// under the old key.
+fn ensure_audit_hmac_key(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key)
+        .map_err(|e| format!("generating audit HMAC key: OS entropy source unavailable: {e}"))?;
+    let hex_key: String = key.iter().map(|b| format!("{b:02x}")).collect();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("creating audit HMAC key file {}: {e}", path.display()))?;
+        use std::io::Write as _;
+        file.write_all(hex_key.as_bytes())
+            .map_err(|e| format!("writing audit HMAC key file {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &hex_key)
+            .map_err(|e| format!("writing audit HMAC key file {}: {e}", path.display()))?;
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    if let Some(key_path) = cli.audit_hmac_key_file.as_deref() {
+        ensure_audit_hmac_key(key_path)?;
+    }
 
     let audit_format = rust_panosmcp_core::observability::AuditFormat::parse(&cli.audit_format);
     let redaction = if let Some(ref policy) = cli.audit_redact {
@@ -399,4 +454,80 @@ fn spawn_reload_handler(
     _audit_sink: Option<rust_panosmcp_core::observability::AuditFileSink>,
 ) -> Result<(), std::io::Error> {
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod audit_hmac_key_tests {
+    use super::ensure_audit_hmac_key;
+
+    /// The common case: no entry point has ever run here before (fresh
+    /// container volume, fresh LXC install). A key must be created, be
+    /// non-empty, and be mode 0600 so it is not group/world-readable.
+    #[test]
+    fn generates_a_key_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+
+        ensure_audit_hmac_key(&path).unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert!(!contents.is_empty(), "generated key file must not be empty");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "key file must be mode 0600");
+        }
+    }
+
+    /// A key already exists (install.sh ran, or this is not the first
+    /// container start against this volume). It must be left byte-for-byte
+    /// untouched -- rotating it here would silently break verification of
+    /// every audit record HMAC'd under the old key.
+    #[test]
+    fn does_not_rotate_an_existing_nonempty_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, b"existing-key-material").unwrap();
+
+        ensure_audit_hmac_key(&path).unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"existing-key-material");
+    }
+
+    /// A zero-byte key file is indistinguishable from "never generated" (a
+    /// truncated write, an `install -m 0600 /dev/null ...` placeholder, an
+    /// interrupted first run) and would make every HMAC output constant. It
+    /// must be repaired, not treated as already-present.
+    #[test]
+    fn repairs_an_empty_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit-hmac.key");
+        std::fs::write(&path, b"").unwrap();
+
+        ensure_audit_hmac_key(&path).unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert!(!contents.is_empty(), "empty key file must be repaired");
+    }
+
+    /// Two independent calls must not produce the same key -- otherwise the
+    /// "random" key is really a constant and every deployment's audit HMAC
+    /// is forgeable by anyone who reads this test.
+    #[test]
+    fn successive_generations_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.key");
+        let path_b = dir.path().join("b.key");
+
+        ensure_audit_hmac_key(&path_a).unwrap();
+        ensure_audit_hmac_key(&path_b).unwrap();
+
+        let a = std::fs::read(&path_a).unwrap();
+        let b = std::fs::read(&path_b).unwrap();
+        assert_ne!(a, b, "two generated keys must not collide");
+    }
 }

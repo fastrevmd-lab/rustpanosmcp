@@ -13,13 +13,17 @@ services:
       - ./state:/var/lib/rust-panosmcp:rw
     ports:
       - "30031:30031"
-    # --device-mapping, --tokens-file, and --state-file are all baked into the
-    # image's ENTRYPOINT — do not repeat any of them here. `command:` is
-    # appended to ENTRYPOINT (not merged with CMD), so passing one again
-    # duplicates the flag and rust-panosmcp refuses to start with a clap
-    # "cannot be used multiple times" error. tokens.json lives in ./state,
-    # alongside mutation-state.json, since ENTRYPOINT points --tokens-file at
-    # /var/lib/rust-panosmcp/tokens.json.
+    # --device-mapping, --tokens-file, --state-file, --audit-hmac-key-file, and
+    # --audit-redact are all baked into the image's ENTRYPOINT — do not repeat
+    # any of them here. `command:` is appended to ENTRYPOINT (not merged with
+    # CMD), so passing one again duplicates the flag and rust-panosmcp refuses
+    # to start with a clap "cannot be used multiple times" error. tokens.json
+    # lives in ./state, alongside mutation-state.json and audit-hmac.key,
+    # since ENTRYPOINT points --tokens-file and --audit-hmac-key-file at
+    # /var/lib/rust-panosmcp/tokens.json and /var/lib/rust-panosmcp/audit-hmac.key.
+    # The key is generated on first run if absent (mecmcp#376 / MEC-978) — keep
+    # ./state persisted across restarts, or every prior audit record's HMAC
+    # becomes unverifiable against the new key.
     command:
       - --transport
       - streamable-http

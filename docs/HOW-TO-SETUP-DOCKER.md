@@ -27,31 +27,38 @@ The Dockerfile is
 ENTRYPOINT ["/usr/local/bin/rust-panosmcp", \
     "--device-mapping", "/etc/rust-panosmcp/devices.json", \
     "--tokens-file", "/var/lib/rust-panosmcp/tokens.json", \
-    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json"]
+    "--state-file", "/var/lib/rust-panosmcp/mutation-state.json", \
+    "--audit-hmac-key-file", "/var/lib/rust-panosmcp/audit-hmac.key", \
+    "--audit-redact", "devices=hmac"]
 CMD ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "30031"]
 ```
 
-All three of `--device-mapping`, `--tokens-file`, and `--state-file` are baked
-into ENTRYPOINT precisely so they survive when you pass other arguments —
-Docker **appends** caller arguments to ENTRYPOINT but **replaces CMD
-entirely**, so a flag reachable only through CMD used to vanish the moment you
-set the bind address or anything else.
+All five of `--device-mapping`, `--tokens-file`, `--state-file`,
+`--audit-hmac-key-file`, and `--audit-redact` are baked into ENTRYPOINT
+precisely so they survive when you pass other arguments — Docker **appends**
+caller arguments to ENTRYPOINT but **replaces CMD entirely**, so a flag
+reachable only through CMD used to vanish the moment you set the bind address
+or anything else.
 
-**Do not pass `--device-mapping`, `--tokens-file`, or `--state-file` yourself
-on `docker run` / `command:`.** Doing so duplicates the flag (once from
-ENTRYPOINT, once from your argument), and the server refuses to start:
+**Do not pass `--device-mapping`, `--tokens-file`, `--state-file`,
+`--audit-hmac-key-file`, or `--audit-redact` yourself on `docker run` /
+`command:`.** Doing so duplicates the flag (once from ENTRYPOINT, once from
+your argument), and the server refuses to start:
 
 ```
 error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times
 ```
 
-(the same error, naming the repeated flag, for `--tokens-file` or
-`--state-file`). If you need different paths than the three baked in, mount
-your files at those paths rather than passing the flags — the paths are fixed
-in the image, only the files backing them change. `--tokens-file` and
-`--state-file` share one directory, `/var/lib/rust-panosmcp`, so mount that
-directory once and place `tokens.json` inside it; `mutation-state.json` is
-created there by the server.
+(the same error, naming the repeated flag, for any of the other four). If you
+need different paths than the ones baked in, mount your files at those paths
+rather than passing the flags — the paths are fixed in the image, only the
+files backing them change. `--tokens-file`, `--state-file`, and
+`--audit-hmac-key-file` share one directory, `/var/lib/rust-panosmcp`, so
+mount that directory once and place `tokens.json` inside it;
+`mutation-state.json` and `audit-hmac.key` are both created there by the
+server on first run — the key is generated once, from OS entropy, and never
+rotated in place, so the volume must persist across restarts or every audit
+record's HMAC becomes unverifiable against the previous key.
 
 ## 1. Prepare host paths
 
@@ -244,8 +251,9 @@ caller finds the device blocked.
 All three of these were hit while writing this document.
 
 **`error: the argument '--device-mapping <DEVICE_MAPPING>' cannot be used multiple times`**
-(or the same error naming `--tokens-file` or `--state-file`)
-You passed one of the three ENTRYPOINT-baked flags explicitly. Drop it from
+(or the same error naming `--tokens-file`, `--state-file`,
+`--audit-hmac-key-file`, or `--audit-redact`)
+You passed one of the ENTRYPOINT-baked flags explicitly. Drop it from
 your `docker run` arguments or compose `command:` — mount your inventory file
 at `/etc/rust-panosmcp/devices.json`, and put `tokens.json` inside the
 directory mounted at `/var/lib/rust-panosmcp`, instead of passing the flags.
