@@ -448,5 +448,25 @@ async fn diff_panos_candidate_redacts_the_change_summary() {
 ///   built in `xml.rs`, not re-tested end-to-end here to avoid duplicating
 ///   the mutation lifecycle's much heavier commit/validate mock plumbing
 ///   already exercised in `mutation_lifecycle.rs`.
+/// - `query_panos_logs`, `list_panos_rulebase_entries`,
+///   `test_panos_security_policy_match`: each carries a `ConfigEntry`/`.xml`
+///   field through `crate::redact::redact_device_xml` the same as
+///   `list_panos_entries` above, and each has its own redaction fixture test
+///   already in `typed_reads.rs`
+///   (`log_query_redacts_secret_material_in_entry_text`,
+///   `rulebase_entries_redacts_secret_material_in_entry_text`,
+///   `security_policy_match_redacts_secret_material_in_matched_rule_xml`),
+///   which also exercises their non-redaction behavior (log-job polling,
+///   xpath construction, probe matching) that this file's lighter mock
+///   backend does not model. Listed here rather than duplicated so this
+///   file's own coverage table stays an accurate map of what it checks.
+/// - `get_panos_ha_state`, `get_panos_license_info`,
+///   `get_panos_content_status`, `get_panos_software_status`,
+///   `list_panorama_device_groups`, `list_panorama_templates`,
+///   `get_panorama_push_status`: each parses only named, non-secret fields
+///   out of the device response (status/version/serial/date strings) into a
+///   typed struct -- none retains a raw `ConfigEntry.xml` or free-text
+///   field, so there is no redaction call to exercise. Covered functionally
+///   in `typed_reads.rs`.
 #[test]
 fn documented_exclusions_from_the_table_above() {}
