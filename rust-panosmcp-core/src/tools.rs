@@ -1151,7 +1151,7 @@ impl PanosService {
                     cancellation,
                 )
                 .await?;
-            let rules = parse_security_policy_match(&response)?;
+            let mut rules = parse_security_policy_match(&response)?;
             let first_entry = rules.first();
             // Some PAN-OS releases return a text-form entry (`rule; index:
             // N`) with no `name` attribute; report that as a parse error
@@ -1168,6 +1168,13 @@ impl PanosService {
                 .map(|entry| crate::xml::extract_element_text(&entry.xml, "action"))
                 .transpose()?
                 .flatten();
+            // `action` is pulled from each entry's raw XML above, before the
+            // loop below redacts it -- `rules` here carries the matched
+            // rule's exact source XML, redacted the same way every other
+            // tool that returns a `ConfigEntry` is (MEC-1233).
+            for entry in &mut rules {
+                entry.xml = crate::redact::redact_device_xml(&entry.xml);
+            }
             Ok(TestPanosSecurityPolicyMatchOutput {
                 device: input.device,
                 matched: !rules.is_empty(),
