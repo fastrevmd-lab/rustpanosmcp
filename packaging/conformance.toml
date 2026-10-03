@@ -13,4 +13,10 @@ units = ["packaging/systemd/rust-panosmcp.service"]
 
 # The inventory path must survive an operator override. It currently lives in
 # CMD, which Docker replaces wholesale -- mecmcp#357. Fixed in this PR.
-must_survive_override = ["--device-mapping"]
+#
+# --audit-hmac-key-file also lives in ENTRYPOINT (added by #220 to close
+# mecmcp#376 / MEC-978) but was never added here, so R6 never actually
+# checked that an operator override couldn't drop audit keying the same way
+# #357 described for --device-mapping. rustproxmoxmcp and rustsdcmcp already
+# cover it in their own manifests; this brings rustpanosmcp in line.
+must_survive_override = ["--device-mapping", "--audit-hmac-key-file"]
