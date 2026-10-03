@@ -200,7 +200,7 @@ jobs:
           # Regression test for mecmcp#357: config paths must survive operator overrides.
           # Docker replaces CMD entirely when the caller supplies args, but ENTRYPOINT
           # is appended to. Security-relevant flags (device-mapping, tokens-file,
-          # state-file) must live in ENTRYPOINT so they cannot be lost.
+          # state-file, audit-hmac-key-file) must live in ENTRYPOINT so they cannot be lost.
           container_id=$(docker create rust-panosmcp:ci --host 0.0.0.0)
           argv=$(docker inspect "$container_id" --format '{{join .Args "\n"}}')
           docker rm "$container_id" > /dev/null
@@ -208,6 +208,11 @@ jobs:
           echo "$argv" | grep -q -- '--tokens-file' || { echo "FAIL: --tokens-file missing from argv with --host override"; exit 1; }
           echo "$argv" | grep -q -- '--state-file' || { echo "FAIL: --state-file missing from argv with --host override"; exit 1; }
           echo "$argv" | grep -q -- '--device-mapping' || { echo "FAIL: --device-mapping missing from argv with --host override"; exit 1; }
+          # mecmcp#376 / MEC-978: packaging/conformance.toml's must_survive_override
+          # lists --audit-hmac-key-file, but nothing read that list until now -- an
+          # operator override (or a future Dockerfile edit) could silently drop audit
+          # keying with CI still green. Check the actual flag here instead.
+          echo "$argv" | grep -q -- '--audit-hmac-key-file' || { echo "FAIL: --audit-hmac-key-file missing from argv with --host override"; exit 1; }
           echo "PASS: config paths survive --host override"
 
       - name: Upload release candidate
